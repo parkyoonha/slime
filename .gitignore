@@ -1,0 +1,22 @@
+node_modules
+dist
+dist-ssr
+.vscode
+.idea
+.DS_Store
+*.log
+
+# Capacitor
+ios/App/App/public
+android/app/src/main/assets/public
+android/app/src/main/assets/capacitor.config.json
+android/app/src/main/assets/capacitor.plugins.json
+android/.gradle
+android/local.properties
+android/build
+android/app/build
+android/.idea
+android/captures
+android/gradle-app.setting
+android/.cxx
+
