@@ -17,6 +17,38 @@ export type DetectFn = (
   timestampMs: number
 ) => HandLandmarkerResult | null
 
+/** Shared module-scope Promise so the WASM + model start downloading the
+ *  moment this module is IMPORTED (during React's render preparation),
+ *  not when the hook's effect fires (after mount + after every other
+ *  mount-time effect that runs before it). Saves the head start we'd
+ *  otherwise lose to sound-sample fetches, camera permission, PMREM
+ *  environment build, and initial layer allocation — all of which had
+ *  been pushing the model download by a few hundred ms on first load. */
+let landmarkerPromise: Promise<HandLandmarker> | null = null
+function preloadLandmarker(): Promise<HandLandmarker> {
+  if (landmarkerPromise) return landmarkerPromise
+  landmarkerPromise = (async () => {
+    const vision = await FilesetResolver.forVisionTasks(WASM_URL)
+    return HandLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: MODEL_URL,
+        delegate: 'GPU'
+      },
+      runningMode: 'VIDEO',
+      numHands: 2,
+      minHandDetectionConfidence: 0.5,
+      minHandPresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    })
+  })()
+  return landmarkerPromise
+}
+// Kick off the download at module load time — no `await`, we just want the
+// network request in flight before the component even mounts.
+void preloadLandmarker().catch(() => {
+  // Swallow — the hook's effect will surface any real error via state.
+})
+
 export function useHandLandmarker() {
   const [status, setStatus] = useState<HandStatus>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -25,35 +57,25 @@ export function useHandLandmarker() {
   useEffect(() => {
     let cancelled = false
     setStatus('loading')
-    ;(async () => {
-      try {
-        const vision = await FilesetResolver.forVisionTasks(WASM_URL)
-        const landmarker = await HandLandmarker.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: MODEL_URL,
-            delegate: 'GPU'
-          },
-          runningMode: 'VIDEO',
-          numHands: 2,
-          minHandDetectionConfidence: 0.5,
-          minHandPresenceConfidence: 0.5,
-          minTrackingConfidence: 0.5
-        })
-        if (cancelled) {
-          landmarker.close()
-          return
-        }
+    preloadLandmarker().then(
+      (landmarker) => {
+        if (cancelled) return
         landmarkerRef.current = landmarker
         setStatus('ready')
-      } catch (e) {
+      },
+      (e) => {
+        if (cancelled) return
         console.error(e)
         setError(e instanceof Error ? e.message : String(e))
         setStatus('error')
       }
-    })()
+    )
     return () => {
       cancelled = true
-      landmarkerRef.current?.close()
+      // The shared landmarker instance is intentionally NOT closed here —
+      // it's cached in module scope so a hot-reload / remount reuses the
+      // already-downloaded WASM+model instead of paying the full startup
+      // cost again. In a production single-mount app this leaks nothing.
       landmarkerRef.current = null
     }
   }, [])

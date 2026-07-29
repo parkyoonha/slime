@@ -6,14 +6,100 @@
   padding: 0;
 }
 
+/* ── Theme tokens ───────────────────────────────────────────
+   Colour surface tokens keyed off `data-theme` on <html>. Modules read
+   these via var(--...) so the entire UI restyles when the user flips the
+   toggle in the drawer. Dark is default (matches the app's origin look)
+   with light as an override. Colour tokens name their role, not their
+   value, so a designer swap only touches this file. */
+:root,
+:root[data-theme='dark'] {
+  --bg-page-start: #1a1030;
+  --bg-page-middle: #0b0b12;
+  --bg-page-end: #050308;
+  --bg-orb: #1a1130;
+  /* Panel is fully transparent — the tabs and controls provide their
+     own surfaces, and dropping the card lets the page gradient show
+     through without a visible seam behind the option bar. */
+  --bg-panel: transparent;
+  --bg-panel-strong: rgba(40, 40, 46, 0.96);
+  --bg-chip: rgba(60, 60, 68, 0.9);
+  --bg-chip-hover: rgba(75, 75, 85, 0.95);
+  --bg-chip-active: rgba(90, 90, 100, 0.95);
+  /* Darker "selected" surface — used for the active sub-category tab and
+     the active chip so the picked option reads as pressed in / recessed
+     against the surrounding gray chips instead of raised out of them. */
+  --bg-chip-selected: rgba(20, 20, 24, 0.95);
+  /* Muted border — replaces the pure-white outline on the back button
+     and other bordered controls so the border reads as a subtle rim
+     rather than a strong stroke against the dark gray fill. */
+  --color-border-muted: rgba(90, 90, 98, 0.9);
+  /* Selected-control pair — used by every "picked" or persistent-action
+     surface (active tab, active chip, back button, bottom toggle bar).
+     Dark theme = dark-gray pill with white text; light theme flips to a
+     white pill with dark ink. Kept as tokens so all four control types
+     move together when the palette is retuned. */
+  --bg-selected: #3a3a44;
+  --color-selected-text: #fff;
+  --bg-slider-track: rgba(0, 0, 0, 0.28);
+  --bg-slider-fill: rgba(255, 255, 255, 0.18);
+  --bg-toggle: rgba(40, 40, 46, 0.85);
+  --bg-toggle-hover: rgba(60, 60, 68, 0.9);
+  --bg-toast: rgba(40, 40, 46, 0.96);
+  --bg-drawer-backdrop: rgba(0, 0, 0, 0.45);
+  --bg-modal-backdrop: rgba(0, 0, 0, 0.55);
+  --color-text: #fff;
+  --color-text-muted: rgba(255, 255, 255, 0.7);
+  --color-border: rgba(255, 255, 255, 0.9);
+  --color-border-soft: rgba(255, 255, 255, 0.14);
+  --color-outline-focus: #b4ebff;
+  --shadow-strong: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+:root[data-theme='light'] {
+  --bg-page-start: #f4f0ff;
+  --bg-page-middle: #ece6f2;
+  --bg-page-end: #d8d1e0;
+  --bg-orb: #e5deec;
+  /* Panel is fully transparent — the tabs and controls provide their
+     own surfaces, and dropping the card lets the page gradient show
+     through without a visible seam behind the option bar. */
+  --bg-panel: transparent;
+  --bg-panel-strong: rgba(255, 255, 255, 0.96);
+  --bg-chip: rgba(235, 235, 240, 0.95);
+  --bg-chip-hover: rgba(220, 220, 228, 0.95);
+  --bg-chip-active: rgba(195, 195, 205, 0.95);
+  /* See dark-theme comment above — light mode's "selected" surface is a
+     deeper mid-gray so it still reads as pressed against the pale chips. */
+  --bg-chip-selected: rgba(150, 150, 158, 0.95);
+  --color-border-muted: rgba(150, 150, 158, 0.85);
+  /* Light-mode selected pair — white pill + dark ink so the picked
+     control still pops against the pale surrounding panel. */
+  --bg-selected: #fff;
+  --color-selected-text: #1a1030;
+  --bg-slider-track: rgba(0, 0, 0, 0.08);
+  --bg-slider-fill: rgba(0, 0, 0, 0.15);
+  --bg-toggle: rgba(245, 245, 250, 0.92);
+  --bg-toggle-hover: rgba(220, 220, 228, 0.95);
+  --bg-toast: rgba(255, 255, 255, 0.96);
+  --bg-drawer-backdrop: rgba(0, 0, 0, 0.25);
+  --bg-modal-backdrop: rgba(0, 0, 0, 0.3);
+  --color-text: #1a1030;
+  --color-text-muted: rgba(26, 16, 48, 0.65);
+  --color-border: rgba(26, 16, 48, 0.85);
+  --color-border-soft: rgba(26, 16, 48, 0.15);
+  --color-outline-focus: #6b8cff;
+  --shadow-strong: 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+
 html,
 body,
 #root {
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: #0b0b12;
-  color: #f5f5fa;
+  background: var(--bg-page-middle);
+  color: var(--color-text);
   font-family: -apple-system, BlinkMacSystemFont, 'Pretendard', 'Noto Sans KR',
     sans-serif;
   touch-action: none;

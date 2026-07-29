@@ -4,10 +4,11 @@
   overflow: hidden;
   background: radial-gradient(
       circle at 50% 40%,
-      #1a1030 0%,
-      #0b0b12 60%,
-      #050308 100%
+      var(--bg-page-start) 0%,
+      var(--bg-page-middle) 60%,
+      var(--bg-page-end) 100%
     );
+  transition: background 220ms ease;
 }
 
 .video {
@@ -40,34 +41,250 @@
   z-index: 1;
 }
 
-.hud {
+/* ── Top-right menu bar ────────────────────────────────── */
+
+.topBar {
   position: absolute;
   top: max(16px, env(safe-area-inset-top));
-  left: 20px;
-  right: 20px;
-  z-index: 2;
-  pointer-events: none;
-  color: #fff;
-  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+  right: max(16px, env(safe-area-inset-right));
+  z-index: 4;
+  display: flex;
+  gap: 8px;
+  align-items: center;
 }
 
-.title {
-  font-size: 22px;
+.iconButton {
+  pointer-events: auto;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  outline: none;
+  background: var(--bg-toggle);
+  color: var(--color-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  transition: background 120ms ease;
+}
+
+.iconButton:hover,
+.iconButton:focus-visible {
+  background: var(--bg-toggle-hover);
+  outline: none;
+}
+
+/* ── Left drawer (menu panel) ──────────────────────────── */
+
+.drawerBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9;
+  background: var(--bg-drawer-backdrop);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+  animation: drawerFade 180ms ease-out;
+}
+
+.drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 10;
+  width: min(280px, 82vw);
+  padding: 16px 12px;
+  padding-top: max(16px, env(safe-area-inset-top));
+  padding-bottom: max(16px, env(safe-area-inset-bottom));
+  padding-right: max(12px, env(safe-area-inset-right));
+  background: var(--bg-panel-strong);
+  backdrop-filter: blur(16px);
+  color: var(--color-text);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  pointer-events: auto;
+  box-shadow: -4px 0 24px rgba(0, 0, 0, 0.4);
+  animation: drawerSlideIn 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.drawerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 4px 6px;
+}
+
+.drawerClose {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  outline: none;
+  background: var(--bg-chip);
+  color: var(--color-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.drawerClose:hover,
+.drawerClose:focus-visible {
+  background: var(--bg-chip-hover);
+  outline: none;
+}
+
+.drawerNav {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.drawerItem {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--color-text);
+  text-align: left;
+  padding: 16px 16px;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.drawerItem:hover,
+.drawerItem:focus-visible {
+  background: var(--bg-chip);
+  outline: none;
+}
+
+/* Theme-toggle segment inside a drawer item. Two mini pills side by side;
+   the active one is filled. */
+.themeSwitch {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--bg-chip);
+  gap: 2px;
+}
+
+.themeSwitchOption {
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.themeSwitchOption[data-active='true'] {
+  background: var(--bg-chip-active);
+  color: var(--color-text);
+}
+
+@keyframes drawerFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes drawerSlideIn {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+
+/* ── Guide modal ───────────────────────────────────────── */
+
+.modalBackdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  background: var(--bg-modal-backdrop);
+  backdrop-filter: blur(6px);
+  padding: 24px;
+}
+
+.modal {
+  pointer-events: auto;
+  max-width: 320px;
+  width: 100%;
+  padding: 22px;
+  border-radius: 18px;
+  background: var(--bg-panel-strong);
+  color: var(--color-text);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modalTitle {
+  font-size: 16px;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0.02em;
 }
 
-.subtitle {
-  margin-top: 4px;
+.modalList {
+  margin: 0;
+  padding-left: 20px;
   font-size: 13px;
-  opacity: 0.75;
+  line-height: 1.7;
+  opacity: 0.9;
 }
 
-.stats {
-  margin-top: 10px;
-  font-size: 12px;
-  opacity: 0.6;
-  font-variant-numeric: tabular-nums;
+.modalClose {
+  align-self: flex-end;
+  background: var(--bg-chip);
+  color: var(--color-text);
+  border: none;
+  outline: none;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.modalClose:hover,
+.modalClose:focus-visible {
+  background: var(--bg-chip-hover);
+  outline: none;
+}
+
+/* ── Ephemeral toast ────────────────────────────────────── */
+
+.toast {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 11;
+  padding: 12px 20px;
+  border-radius: 999px;
+  background: var(--bg-toast);
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  backdrop-filter: blur(10px);
+  pointer-events: none;
+  box-shadow: var(--shadow-strong);
 }
 
 .controls {
@@ -100,34 +317,51 @@
   gap: 10px;
   padding: 10px 18px;
   border-radius: 999px;
-  background: rgba(20, 14, 40, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  color: #fff;
+  /* Outlined pill — transparent fill, muted-gray rim in both themes
+     (dark mode ≈ #5a5a62, light mode ≈ #9696a2 via --color-border-muted).
+     Text uses --color-text so it still contrasts with the page. Fill
+     stays transparent through every interaction state so clicking never
+     paints a background flash. */
+  background: transparent;
+  border: 1px solid var(--color-border-muted);
+  outline: none;
+  color: var(--color-text);
   font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  backdrop-filter: blur(10px);
-  transition: background 120ms ease, border-color 120ms ease;
+  transition: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.toggle::-moz-focus-inner {
+  border: 0;
+  padding: 0;
 }
 
 .toggle:hover,
-.toggle:focus-visible {
-  background: rgba(30, 20, 55, 0.7);
-  border-color: rgba(255, 255, 255, 0.24);
+.toggle:focus,
+.toggle:focus-visible,
+.toggle:active {
+  background: transparent;
+  color: var(--color-text);
+  border: 1px solid var(--color-border-muted);
   outline: none;
+  box-shadow: none;
+  -webkit-tap-highlight-color: transparent;
 }
+
 
 .toggleDot {
   width: 10px;
   height: 10px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.25);
+  background: var(--color-text-muted);
   box-shadow: 0 0 0 0 rgba(180, 235, 255, 0);
   transition: background 120ms ease, box-shadow 200ms ease;
 }
 
 .toggleDot[data-on='true'] {
-  background: #b4ebff;
+  background: var(--color-outline-focus);
   box-shadow: 0 0 12px 2px rgba(180, 235, 255, 0.6);
 }
 
@@ -145,6 +379,6 @@
   font-size: 14px;
   padding: 12px 18px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: var(--bg-chip);
+  border: 1px solid var(--color-border-soft);
 }

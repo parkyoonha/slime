@@ -3,8 +3,10 @@ import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import {
   COATINGS,
   COLORS,
+  MATERIALS,
   type CoatingId,
   type ColorId,
+  type MaterialId,
   type ShapeId,
   shapeScale
 } from './presets'
@@ -48,10 +50,14 @@ const DEFAULTS: SlimeParams = {
   influenceRadius: 0.9,
   pushStrength: 14,
   velSmoothing: 0.15,
-  // dispSmoothing pulls deformations back toward the average of neighbor
-  // displacements — that's a spring-back in disguise. Keep it at 0 so
-  // kneading is truly plastic.
-  dispSmoothing: 0,
+  // dispSmoothing pulls each vertex toward the AVERAGE of its
+  // neighbours' displacements. A light amount (0.12) rounds out
+  // isolated sharp spikes — the kind that pop up when volume
+  // preservation and bead taffy-stretch push a single vertex
+  // outward much harder than its neighbours — without deadening
+  // the overall knead response. Higher values start reading as a
+  // spring-back so we keep it modest.
+  dispSmoothing: 0.12,
   maxDisplacement: 0.65,
   volumePreservation: 0.12
 }
@@ -68,30 +74,138 @@ export class SlimeSphere {
   private readonly adjOffsets: Uint32Array
   private readonly adjNeighbors: Uint32Array
   private currentShape: ShapeId = 'sphere'
+  // Track material + coating IDs together so a change to one can reapply
+  // BOTH — sheen is shared between them and would otherwise get stale.
+  // Defaults match SlimeApp's entry state (crystal + none) so the first
+  // rendered frame matches the React state and doesn't flash a mismatched
+  // look before the initial useEffects fire.
+  private currentMaterialId: MaterialId = 'crystal'
+  private currentCoatingId: CoatingId = 'none'
+  // Colour used for coating accent sheen (wax / foil / ice). Kept
+  // independent of the slime's base colour so users can pick e.g. white
+  // slime with gold foil coating. Neutral default so the first frame under
+  // a coating (before setCoatingColor runs) still reads sensibly.
+  private currentCoatingColorHex = 0xffe89a
   /** Sum of |restPos|² across all vertices — a cheap proxy for volume that
    *  we use to scale the mesh back up when the user compresses it. */
   private restVolumeMetric = 0
   /** Per-vertex accumulated damage 0..1. Grows with kneading force and never
-   *  fully recovers on its own — reset()/setShape() zero it. Used by the wax
-   *  coating shader to draw a spreading crack pattern. */
+   *  fully recovers on its own — reset()/setShape() zero it. Currently only
+   *  used as a soft entry gate; crack visibility is driven by pressCount. */
   private readonly damage: Float32Array
   private readonly damageAttr: THREE.BufferAttribute
+  /** Per-vertex continuous "crack level" 0..3. Each discrete press event
+   *  (rising edge of force on a vertex) bumps this by +1 at that vertex.
+   *  Each frame the level PROPAGATES to mesh neighbours with per-hop decay
+   *  (~0.9x), so cracks spread outward from the press region gradually
+   *  across the shell rather than snapping onto the whole ball at once.
+   *  The ice shader reads this as a vertex attribute so the gap width
+   *  fades toward zero at the spread frontier — the SAME connected
+   *  voronoi network becomes visible everywhere the level > 0, with
+   *  crack thickness proportional to level. */
+  private readonly crackLevel: Float32Array
+  private readonly crackLevelAttr: THREE.BufferAttribute
+  /** Scratch buffer used to snapshot crackLevel before running each
+   *  frame's propagation pass, so neighbour reads see the previous
+   *  frame's values (no order-dependent smearing). */
+  private readonly prevCrackLevel: Float32Array
+  /** Per-vertex boolean (0/1) tracking whether force was applied last frame,
+   *  used to detect the rising edge that fires a new press event. */
+  private readonly wasBeingPressed: Uint8Array
   private restAttr!: THREE.BufferAttribute
-  /** Shader uniform: 1 when the wax coating is active, 0 otherwise. Multiplied
-   *  into the crack effect so other coatings look untouched even after damage
-   *  has been accrued. */
+  /** Shader uniform: 1 when a crack-capable coating (ice / foil) is active,
+   *  0 otherwise. Multiplied into the crack effect so other coatings look
+   *  untouched even after damage has been accrued. */
   private readonly damageEnabledUniform = { value: 0.0 }
+  /** Shader uniform: 1 when the active crack-capable coating is foil, 0
+   *  otherwise. Foil tears reveal the slime's raw base colour with metalness
+   *  dropped so the exposed patch reads as gooey slime. */
+  private readonly damageIsFoilUniform = { value: 0.0 }
+  /** Shader uniform: 1 when the active crack-capable coating is ice, 0
+   *  otherwise. Ice cracks reveal a bright wet version of the slime base
+   *  colour to look like wet slime bulging through a frozen shell. */
+  private readonly damageIsIceUniform = { value: 0.0 }
+  /** Shader uniform: 1 when the (new, crack-less) wax coating is active,
+   *  0 otherwise. Only used to gate the shader's diffuse override (wax
+   *  paints the whole surface in the coating colour) — wax has no
+   *  shatter behaviour, so this flag never touches the crack pass. */
+  private readonly damageIsWaxUniform = { value: 0.0 }
+  /** Shader uniform: 1 when the base material is matte, 0 otherwise. Toggles
+   *  a procedural foam pattern in the fragment shader so matte slime reads
+   *  as an aerated / bubbly cream (like whipped bath foam) instead of a
+   *  flat matte surface — matches the reference capture. Ignored under
+   *  crack-drawing coatings (foil/wax/ice paint the whole shell). */
+  private readonly materialIsMatteUniform = { value: 0.0 }
+  /** Shader uniform: the coating colour used as the full-surface tint when
+   *  a diffuse-overriding coating (wax / foil) is active. Feeds diffuseColor
+   *  across the whole ball so the entire sphere reads as e.g. gold foil or
+   *  red wax — not just an edge sheen. Ignored when the coating isn't wax
+   *  or foil. */
+  private readonly coatingTintUniform = { value: new THREE.Color(0xb5bbc4) }
+  // Multi-colour gradient uniforms. When two or more slime colours are
+  // selected, we build a 1D CanvasTexture of the palette interpolated top-
+  // to-bottom and let the fragment shader replace the base diffuse colour
+  // with a sample from it. Single-colour slimes disable the uniform and use
+  // the standard MeshPhysicalMaterial `color` path — one less texture bind.
+  private readonly gradientUseUniform = { value: 0.0 }
+  private readonly gradientTexUniform: { value: THREE.Texture | null } = {
+    value: null
+  }
+  private readonly gradientRadiusUniform = { value: 1.0 }
+  private gradientTexture: THREE.DataTexture | null = null
+  // Coating gradient — mirrors the slime gradient infra but paints the
+  // wax / foil surface tint instead of the base slime colour. When only
+  // one coating colour is picked the uniform stays off and the shader
+  // falls through to the flat uCoatingTint colour.
+  private readonly coatingGradientUseUniform = { value: 0.0 }
+  private readonly coatingGradientTexUniform: {
+    value: THREE.Texture | null
+  } = { value: null }
+  private coatingGradientTexture: THREE.DataTexture | null = null
+  // Marble ink uniforms — driven by SlimeApp when sprinklesConfig.type is
+  // 'ink'. Amount 0 = no marble effect; amount > 0 mixes swirls of the ink
+  // colour into the base slime colour via a turbulence-based mask in the
+  // fragment shader.
+  private readonly inkColorUniform = { value: new THREE.Color(0xffffff) }
+  private readonly inkAmountUniform = { value: 0.0 }
+  // Bead taffy-pull uniforms — when active, the slime vertex shader
+  // stretches each vertex OUTWARD along its nearest bead's direction so
+  // the slime surface literally follows every bead's shape upward,
+  // creating the "slime pulled up over each bead" look from a taffy
+  // stretch. Radius = bead radius in world units; amount is a 0/1 gate.
+  private readonly beadRadiusUniform = { value: 0 }
+  private readonly beadWrapAmountUniform = { value: 0 }
+  /** Per-vertex nearest-bead unit direction stored as an attribute. */
+  private beadDirAttr!: THREE.BufferAttribute
   private accumulatedForce = 0
+
+  /** True while at least one fingertip is actively pressing. Used to detect
+   *  the release edge (true → false) so we can snapshot the "retained shape"
+   *  target — after release the mesh springs partway back to rest rather
+   *  than either fully restoring or fully freezing. */
+  private wasPressing = false
+  /** Per-vertex target the mesh eases toward when nothing is pressing.
+   *  Snapshotted on the release edge as rest + disp * (1 - RELEASE_RESTORE),
+   *  so ~RELEASE_RESTORE of the dent depth retracts and the rest persists.
+   *  Cleared once the mesh is close enough to stop the spring. */
+  private restoreTargetPos: Float32Array | null = null
 
   constructor(params: Partial<SlimeParams> = {}) {
     this.params = { ...DEFAULTS, ...params }
 
-    // Merge duplicate seam vertices so we can build a real adjacency graph.
-    // Without this the icosphere has repeated positions at shared edges and
-    // Laplacian smoothing would tear the mesh apart.
-    this.geometry = mergeVertices(
-      new THREE.IcosahedronGeometry(this.params.radius, this.params.detail)
+    // Drop UV + normal attributes BEFORE mergeVertices so it can fully weld
+    // seam vertices — with UVs kept, positions on the antimeridian have
+    // distinct UV values (0 vs 1) and mergeVertices leaves them unmerged,
+    // which produces a visible "zigzag" normal seam once we recompute vertex
+    // normals. We don't sample any UV maps on the slime material so UVs are
+    // safe to drop; normals are recomputed later from the merged geometry.
+    const raw = new THREE.IcosahedronGeometry(
+      this.params.radius,
+      this.params.detail
     )
+    raw.deleteAttribute('uv')
+    raw.deleteAttribute('normal')
+    this.geometry = mergeVertices(raw)
     if (!this.geometry.index) {
       throw new Error('Merged geometry unexpectedly has no index buffer')
     }
@@ -128,7 +242,14 @@ export class SlimeSphere {
     this.damageAttr.setUsage(THREE.DynamicDrawUsage)
     this.geometry.setAttribute('damage', this.damageAttr)
 
-    // Rest position as a vertex attribute so the wax shader can (a) sample
+    this.crackLevel = new Float32Array(this.vertexCount)
+    this.crackLevelAttr = new THREE.BufferAttribute(this.crackLevel, 1)
+    this.crackLevelAttr.setUsage(THREE.DynamicDrawUsage)
+    this.geometry.setAttribute('crackLevel', this.crackLevelAttr)
+    this.prevCrackLevel = new Float32Array(this.vertexCount)
+    this.wasBeingPressed = new Uint8Array(this.vertexCount)
+
+    // Rest position as a vertex attribute so the ice shader can (a) sample
     // the voronoi plate pattern in the un-deformed frame (plates stay fixed
     // size instead of stretching with the mesh), and (b) compute per-vertex
     // displacement and widen cracks proportionally.
@@ -136,20 +257,51 @@ export class SlimeSphere {
     this.restAttr.setUsage(THREE.DynamicDrawUsage)
     this.geometry.setAttribute('aRestPos', this.restAttr)
 
+    // Per-vertex nearest-bead direction (populated by BeadsLayer when
+    // beads change). Zero until bead influence is set.
+    this.beadDirAttr = new THREE.BufferAttribute(
+      new Float32Array(this.vertexCount * 3),
+      3
+    )
+    this.beadDirAttr.setUsage(THREE.DynamicDrawUsage)
+    this.geometry.setAttribute('aBeadDir', this.beadDirAttr)
+
+    // Initial params match the entry defaults (white + crystal + no coating)
+    // so the first rendered frame renders as clear glassy slime instead of a
+    // pink flash before React's first useEffect batch pushes state through.
     const material = new THREE.MeshPhysicalMaterial({
-      color: 0xff9ec7,
-      roughness: 0.18,
-      metalness: 0.0,
-      transmission: 0.35,
-      thickness: 1.2,
-      ior: 1.35,
-      clearcoat: 1.0,
-      clearcoatRoughness: 0.08,
-      sheen: 0.4,
-      sheenColor: new THREE.Color(0xffe0ee),
+      color: 0xfbf7f2,
+      roughness: 0.05,
+      metalness: 0,
+      transmission: 0.95,
+      thickness: 0.4,
+      ior: 1.5,
+      clearcoat: 0,
+      clearcoatRoughness: 0,
+      sheen: 0,
+      sheenColor: new THREE.Color(0xffffff),
+      iridescence: 0,
       side: THREE.DoubleSide
     })
-    installDamageShader(material, this.damageEnabledUniform)
+    this.gradientRadiusUniform.value = this.params.radius
+    installDamageShader(
+      material,
+      this.damageEnabledUniform,
+      this.damageIsFoilUniform,
+      this.damageIsIceUniform,
+      this.damageIsWaxUniform,
+      this.materialIsMatteUniform,
+      this.coatingTintUniform,
+      this.inkColorUniform,
+      this.inkAmountUniform,
+      this.beadRadiusUniform,
+      this.beadWrapAmountUniform,
+      this.gradientUseUniform,
+      this.gradientTexUniform,
+      this.gradientRadiusUniform,
+      this.coatingGradientUseUniform,
+      this.coatingGradientTexUniform
+    )
 
     this.mesh = new THREE.Mesh(this.geometry, material)
     this.mesh.castShadow = false
@@ -178,9 +330,25 @@ export class SlimeSphere {
     for (let i = 0; i < this.velocities.length; i++) this.velocities[i] *= 0.3
     this.damage.fill(0)
     this.damageAttr.needsUpdate = true
+    this.crackLevel.fill(0)
+    this.prevCrackLevel.fill(0)
+    this.crackLevelAttr.needsUpdate = true
+    this.wasBeingPressed.fill(0)
     this.restAttr.needsUpdate = true
     this.recomputeRestVolumeMetric()
     posAttr.needsUpdate = true
+
+    // Preset mesh orientation per shape. Cube gets a 3/4 hero view
+    // (yaw so the right face peeks in + pitch so the top face peeks
+    // down) so the user immediately sees it as a cube rather than as
+    // a flat square silhouette. Sphere resets to identity.
+    if (shape === 'cube') {
+      this.mesh.quaternion.setFromEuler(
+        new THREE.Euler(-0.26, 0.44, 0, 'YXZ')
+      )
+    } else {
+      this.mesh.quaternion.identity()
+    }
     this.geometry.computeVertexNormals()
   }
 
@@ -191,29 +359,321 @@ export class SlimeSphere {
     this.restVolumeMetric = total
   }
 
-  setColor(id: ColorId) {
-    const preset = COLORS.find((c) => c.id === id)
-    if (!preset) return
-    ;(this.mesh.material as THREE.MeshPhysicalMaterial).color.setHex(
-      preset.hex
-    )
+  /** Assign the slime's base colour. Passing a single ID sets the material
+   *  colour and turns the gradient path off; passing two or more builds a
+   *  1D LUT of the palette (top vertex = colours[0], bottom vertex = last)
+   *  and turns the gradient sampler on in the shader. The material's own
+   *  `color` is set to the first entry as a fallback for surface-param
+   *  consumers (bead wrap sync) that can't render a gradient themselves. */
+  setColors(ids: readonly ColorId[]) {
+    const hexes: number[] = []
+    for (const id of ids) {
+      const preset = COLORS.find((c) => c.id === id)
+      if (preset) hexes.push(preset.hex)
+    }
+    const mat = this.mesh.material as THREE.MeshPhysicalMaterial
+    if (hexes.length === 0) {
+      mat.color.setHex(0xfbf7f2)
+      this.gradientUseUniform.value = 0
+      return
+    }
+    mat.color.setHex(hexes[0])
+    if (hexes.length === 1) {
+      this.gradientUseUniform.value = 0
+      return
+    }
+    this.rebuildGradientTexture(hexes)
+    this.gradientUseUniform.value = 1
   }
 
+  private rebuildGradientTexture(hexes: readonly number[]) {
+    if (this.gradientTexture) this.gradientTexture.dispose()
+    const size = 64
+    const data = new Uint8Array(size * 4)
+    const cA = new THREE.Color()
+    const cB = new THREE.Color()
+    for (let i = 0; i < size; i++) {
+      const t = i / (size - 1)
+      const scaled = t * (hexes.length - 1)
+      const lo = Math.floor(scaled)
+      const hi = Math.min(lo + 1, hexes.length - 1)
+      const frac = scaled - lo
+      cA.setHex(hexes[lo])
+      cB.setHex(hexes[hi])
+      const r = cA.r * (1 - frac) + cB.r * frac
+      const g = cA.g * (1 - frac) + cB.g * frac
+      const b = cA.b * (1 - frac) + cB.b * frac
+      data[i * 4] = Math.round(r * 255)
+      data[i * 4 + 1] = Math.round(g * 255)
+      data[i * 4 + 2] = Math.round(b * 255)
+      data[i * 4 + 3] = 255
+    }
+    const tex = new THREE.DataTexture(data, size, 1, THREE.RGBAFormat)
+    tex.colorSpace = THREE.SRGBColorSpace
+    tex.minFilter = THREE.LinearFilter
+    tex.magFilter = THREE.LinearFilter
+    tex.wrapS = THREE.ClampToEdgeWrapping
+    tex.wrapT = THREE.ClampToEdgeWrapping
+    tex.needsUpdate = true
+    this.gradientTexture = tex
+    this.gradientTexUniform.value = tex
+  }
+
+  /** Base slime look (roughness/metalness/transmission/sheen/iridescence).
+   *  Always re-applies via _applyLook so a subsequent wax coating's accent
+   *  sheen doesn't get stranded on the wrong base state. */
+  setMaterial(id: MaterialId) {
+    this.currentMaterialId = id
+    this.materialIsMatteUniform.value = id === 'matte' ? 1.0 : 0.0
+    this._applyLook()
+  }
+
+  /** Outer surface treatment. Non-`none` coatings add clearcoat + accent
+   *  sheen tinted by the user's coating colour; ice/foil turn on the crack
+   *  shader so kneading draws cracks (ice) or wrinkles / tears (foil). */
   setCoating(id: CoatingId) {
-    const preset = COATINGS.find((c) => c.id === id)
-    if (!preset) return
+    this.currentCoatingId = id
+    this._applyLook()
+    const hasCracks =
+      COATINGS.find((c) => c.id === id)?.params.hasCracks ?? false
+    this.setDamageRenderingEnabled(hasCracks)
+    // 'tube' piggybacks on the foil shader path — same wispy tear
+    // behaviour, and the paper's metalness is 0 so the foil-only
+    // "kill metalness in crack" step is a no-op.
+    this.damageIsFoilUniform.value =
+      id === 'foil' || id === 'tube' ? 1.0 : 0.0
+    this.damageIsIceUniform.value = id === 'ice' ? 1.0 : 0.0
+    this.damageIsWaxUniform.value = id === 'wax' ? 1.0 : 0.0
+    if (!hasCracks) this.clearDamage()
+  }
+
+  /** Colour used for the coating's accent sheen AND (for wax / foil / ice)
+   *  the whole surface tint. All three real coatings paint the entire
+   *  surface with this colour via the shader — a red wax ball reads as red
+   *  everywhere, a gold foil ball reads as gold everywhere, a pale ice
+   *  ball reads as that pale colour everywhere — and cracks in the
+   *  crack-capable ones (ice, foil) expose the slime base colour
+   *  underneath. */
+  setCoatingColor(hex: number) {
+    this.currentCoatingColorHex = hex
+    this.coatingTintUniform.value.setHex(hex)
+    this.coatingGradientUseUniform.value = 0
+    this._applyLook()
+  }
+
+  /** Multi-colour coating tint. One colour → falls back to the single-
+   *  tint path (uCoatingTint uniform flat over the whole shell). Two or
+   *  more → builds a top-to-bottom LUT sampled by the coating shader,
+   *  giving the wax / foil surface a gradient across the sphere. */
+  setCoatingColors(hexes: readonly number[]) {
+    if (hexes.length <= 1) {
+      this.setCoatingColor(hexes[0] ?? this.currentCoatingColorHex)
+      return
+    }
+    this.currentCoatingColorHex = hexes[0]
+    this.coatingTintUniform.value.setHex(hexes[0])
+    this.rebuildCoatingGradientTexture(hexes)
+    this.coatingGradientUseUniform.value = 1
+    this._applyLook()
+  }
+
+  private rebuildCoatingGradientTexture(hexes: readonly number[]) {
+    if (this.coatingGradientTexture) this.coatingGradientTexture.dispose()
+    const size = 64
+    const data = new Uint8Array(size * 4)
+    const cA = new THREE.Color()
+    const cB = new THREE.Color()
+    for (let i = 0; i < size; i++) {
+      const t = i / (size - 1)
+      const scaled = t * (hexes.length - 1)
+      const lo = Math.floor(scaled)
+      const hi = Math.min(lo + 1, hexes.length - 1)
+      const frac = scaled - lo
+      cA.setHex(hexes[lo])
+      cB.setHex(hexes[hi])
+      const r = cA.r * (1 - frac) + cB.r * frac
+      const g = cA.g * (1 - frac) + cB.g * frac
+      const b = cA.b * (1 - frac) + cB.b * frac
+      data[i * 4] = Math.round(r * 255)
+      data[i * 4 + 1] = Math.round(g * 255)
+      data[i * 4 + 2] = Math.round(b * 255)
+      data[i * 4 + 3] = 255
+    }
+    const tex = new THREE.DataTexture(data, size, 1, THREE.RGBAFormat)
+    tex.colorSpace = THREE.SRGBColorSpace
+    tex.minFilter = THREE.LinearFilter
+    tex.magFilter = THREE.LinearFilter
+    tex.wrapS = THREE.ClampToEdgeWrapping
+    tex.wrapT = THREE.ClampToEdgeWrapping
+    tex.needsUpdate = true
+    this.coatingGradientTexture = tex
+    this.coatingGradientTexUniform.value = tex
+  }
+
+  /** Snapshot of the slime's current live material params — colour +
+   *  everything the composed material/coating pass writes. Beads copy this
+   *  onto their wrap-shell material every time slime changes so the wrap
+   *  looks identical to the underlying slime (matte slime → matte wrap,
+   *  crystal slime → transparent wrap, wax / ice → clearcoat + accent
+   *  sheen). */
+  getSurfaceParams(): {
+    color: THREE.Color
+    roughness: number
+    metalness: number
+    transmission: number
+    thickness: number
+    ior: number
+    sheen: number
+    sheenRoughness: number
+    sheenColor: THREE.Color
+    iridescence: number
+    iridescenceIOR: number
+    clearcoat: number
+    clearcoatRoughness: number
+  } {
     const mat = this.mesh.material as THREE.MeshPhysicalMaterial
-    const p = preset.params
-    mat.roughness = p.roughness
-    mat.transmission = p.transmission
-    mat.thickness = p.thickness
-    mat.ior = p.ior
-    mat.clearcoat = p.clearcoat
-    mat.clearcoatRoughness = p.clearcoatRoughness
-    mat.metalness = p.metalness
-    mat.sheen = p.sheen
-    mat.sheenRoughness = p.sheenRoughness
-    mat.sheenColor.setHex(p.sheenColorHex)
+    return {
+      color: mat.color.clone(),
+      roughness: mat.roughness,
+      metalness: mat.metalness,
+      transmission: mat.transmission,
+      thickness: mat.thickness,
+      ior: mat.ior,
+      sheen: mat.sheen,
+      sheenRoughness: mat.sheenRoughness,
+      sheenColor: mat.sheenColor.clone(),
+      iridescence: mat.iridescence,
+      iridescenceIOR: mat.iridescenceIOR,
+      clearcoat: mat.clearcoat,
+      clearcoatRoughness: mat.clearcoatRoughness
+    }
+  }
+
+  /** Ink marble effect painted inside the slime body via a fragment shader
+   *  turbulence mask. `amount` in [0, 1] controls how much of the base slime
+   *  colour is replaced by ink swirls; 0 disables the effect entirely so
+   *  the shader mixin becomes a cheap no-op for non-ink sprinkle types. */
+  setInk(colorHex: number, amount: number) {
+    this.inkColorUniform.value.setHex(colorHex)
+    this.inkAmountUniform.value = Math.max(0, Math.min(1, amount))
+  }
+
+  /** Set per-vertex nearest-bead directions and bead radius so the slime
+   *  vertex shader can taffy-stretch outward toward every bead. Pass
+   *  active=false (or null dirs) to disable. `nearestDirs` is a flat
+   *  Float32Array of vertexCount x 3 unit vectors. */
+  setBeadInfluence(
+    nearestDirs: Float32Array | null,
+    beadRadius: number,
+    active: boolean
+  ) {
+    if (!active || nearestDirs === null) {
+      this.beadWrapAmountUniform.value = 0
+      this.beadRadiusUniform.value = 0
+      return
+    }
+    const arr = this.beadDirAttr.array as Float32Array
+    arr.set(nearestDirs)
+    this.beadDirAttr.needsUpdate = true
+    this.beadRadiusUniform.value = beadRadius
+    this.beadWrapAmountUniform.value = 1
+  }
+
+  /** Live uniform refs for the ink effect. Shared with BeadsLayer so the
+   *  bead wrap-shell can paint the SAME marble swirls on top of the beads
+   *  (paper sprinkles sit above beads naturally; ink is a shader effect on
+   *  the slime, so without this the beads would occlude every stroke). One
+   *  setInk call updates both layers because they hold the same references. */
+  getInkUniforms(): {
+    colorUniform: { value: THREE.Color }
+    amountUniform: { value: number }
+  } {
+    return {
+      colorUniform: this.inkColorUniform,
+      amountUniform: this.inkAmountUniform
+    }
+  }
+
+  /** Live uniform refs for the slime's multi-colour gradient — shared
+   *  with BeadsLayer so the bead wrap-shell can sample the SAME gradient
+   *  and paint compact beads with the top-to-bottom colour band. Without
+   *  this the wrap defaults to the slime's mat.color (only colours[0]),
+   *  so compact-fill layers with a multi-colour slime look monotone. */
+  getGradientUniforms(): {
+    useUniform: { value: number }
+    texUniform: { value: THREE.Texture | null }
+    radiusUniform: { value: number }
+  } {
+    return {
+      useUniform: this.gradientUseUniform,
+      texUniform: this.gradientTexUniform,
+      radiusUniform: this.gradientRadiusUniform
+    }
+  }
+
+  /** Combine current material + coating into the MeshPhysicalMaterial. The
+   *  material sets every base property; the coating layers clearcoat +
+   *  optional metalness/roughness/sheen adjustments on top, pulling its
+   *  sheen tint from `currentCoatingColorHex` when it opts into user colour. */
+  private _applyLook() {
+    const m = MATERIALS.find((x) => x.id === this.currentMaterialId)?.params
+    const c = COATINGS.find((x) => x.id === this.currentCoatingId)?.params
+    if (!m || !c) return
+    const mat = this.mesh.material as THREE.MeshPhysicalMaterial
+    mat.roughness = m.roughness
+    mat.metalness = m.metalness
+    mat.transmission = m.transmission
+    mat.thickness = m.thickness
+    mat.ior = m.ior
+    mat.sheen = m.sheen
+    mat.sheenRoughness = m.sheenRoughness
+    mat.sheenColor.setHex(m.sheenColorHex)
+    mat.iridescence = m.iridescence
+    mat.clearcoat = c.clearcoat
+    mat.clearcoatRoughness = c.clearcoatRoughness
+    if (c.extraMetalness !== undefined) {
+      mat.metalness = Math.min(1, mat.metalness + c.extraMetalness)
+    }
+    if (c.extraRoughness !== undefined) {
+      mat.roughness = Math.min(1, mat.roughness + c.extraRoughness)
+    }
+    if (c.extraIridescence !== undefined) {
+      mat.iridescence = Math.min(1, mat.iridescence + c.extraIridescence)
+    }
+    if (c.extraSheen !== undefined) {
+      mat.sheen = c.extraSheen
+      mat.sheenRoughness = c.extraSheenRoughness ?? mat.sheenRoughness
+      if (c.usesUserColor) {
+        mat.sheenColor.setHex(this.currentCoatingColorHex)
+      }
+    }
+    // Force the base material into a fully opaque matte state — no
+    // transmission (so a glassy base like crystal doesn't wash the
+    // coating tint out), no metalness / sheen / iridescence, high
+    // roughness. Wax uses this so its colour reads with the same soft
+    // opaque feel as the standalone 'matte' material option regardless
+    // of which base material the slime is set to.
+    if (c.forceMatteBase) {
+      mat.roughness = Math.max(mat.roughness, 0.85)
+      mat.transmission = 0
+      mat.thickness = 0
+      mat.metalness = 0
+      mat.sheen = 0
+      mat.iridescence = 0
+    }
+    // Force the base material into a glassy CRYSTAL state — high
+    // transmission + thin refractive slab + low roughness. Ice uses
+    // this so its shell always reads as a transparent stained-glass
+    // crystal regardless of which base material the slime is set to.
+    if (c.forceCrystalBase) {
+      mat.roughness = 0.05
+      mat.metalness = 0
+      mat.transmission = 0.95
+      mat.thickness = 0.4
+      mat.ior = 1.5
+      mat.sheen = 0
+      mat.iridescence = 0
+    }
     mat.needsUpdate = true
   }
 
@@ -225,8 +685,20 @@ export class SlimeSphere {
     return this.geometry.attributes.position.array as Float32Array
   }
 
+  get normalArray(): Float32Array {
+    return this.geometry.attributes.normal.array as Float32Array
+  }
+
   get unitDirsArray(): Float32Array {
     return this.unitDirs
+  }
+
+  get indexArray(): Uint16Array | Uint32Array {
+    return this.geometry.index!.array as Uint16Array | Uint32Array
+  }
+
+  get shape(): ShapeId {
+    return this.currentShape
   }
 
   get vertexCount(): number {
@@ -259,6 +731,25 @@ export class SlimeSphere {
     const vel = this.velocities
     const offsets = this.adjOffsets
     const nbrs = this.adjNeighbors
+    // Foil tears aggressively under sustained force — damage builds fast
+    // so a modest press already gapes tears open dramatically. Wax tears
+    // moderately (thick candle material — visible tearing but slower
+    // than thin foil). Ice's damage is only retained as soft physics
+    // state; its crack visibility uses the per-vertex crackLevel
+    // propagation pass instead. Other coatings fall back to the default.
+    const damageRate =
+      this.currentCoatingId === 'foil'
+        ? 0.32
+        : this.currentCoatingId === 'wax'
+          ? 0.24
+          : this.currentCoatingId === 'ice'
+            ? 0.18
+            : 0.12
+    // Flag set when any vertex's crackLevel changes (from a press event or
+    // from propagation), so we only re-upload the attribute when there's
+    // actually new data.
+    let crackLevelChanged = false
+
 
     // Collect active tips (position + push direction + weight).
     const tipsPX: number[] = []
@@ -322,13 +813,41 @@ export class SlimeSphere {
       vel[i + 1] = (vel[i + 1] + fy * dt) * damping
       vel[i + 2] = (vel[i + 2] + fz * dt) * damping
 
-      // Accumulate per-vertex damage (bounded 0..1). Rate is tuned so a
-      // brief press starts opening a few cells and sustained kneading
-      // spreads cracks noticeably further outward.
+      // Accumulate per-vertex damage (bounded 0..1). Retained as a soft
+      // physics quantity; the crack shader no longer uses it for
+      // visibility.
+      const vi = i / 3
       if (localForceMag > 0) {
-        const vi = i / 3
-        const d = this.damage[vi] + localForceMag * dt * 0.12
+        const d = this.damage[vi] + localForceMag * dt * damageRate
         this.damage[vi] = d < 1 ? d : 1
+      }
+
+      // ICE + WAX: crack on the RISING EDGE of press force so the
+      // per-vertex crackLevel gets a discrete level bump the frame a
+      // finger first touches. Ice uses this for its shatter visibility;
+      // wax uses it to drive a slow OUTWARD SPREAD of its tear region
+      // (via the propagation pass) — direct damage still controls the
+      // tear width at each vertex, but propagation lets the tear
+      // territory creep across the ball with each additional press
+      // event. Foil's tear model reads vDamage only so it skips this.
+      // Ice caps at 3 (3-stage shatter model); wax caps at 5 so it can
+      // distinguish the first 3 presses (Layer 1 pieces spreading wider
+      // apart) from press #4 onwards (Layer 2 subdivisions kicking in).
+      const wasPressed = this.wasBeingPressed[vi] === 1
+      if (!wasPressed && localForceMag > 0.05) {
+        if (this.currentCoatingId === 'ice' && this.crackLevel[vi] < 3) {
+          this.crackLevel[vi] = Math.min(3, this.crackLevel[vi] + 1)
+          crackLevelChanged = true
+        } else if (
+          this.currentCoatingId === 'wax' &&
+          this.crackLevel[vi] < 5
+        ) {
+          this.crackLevel[vi] = Math.min(5, this.crackLevel[vi] + 1)
+          crackLevelChanged = true
+        }
+        this.wasBeingPressed[vi] = 1
+      } else if (wasPressed && localForceMag < 0.01) {
+        this.wasBeingPressed[vi] = 0
       }
     }
 
@@ -395,7 +914,11 @@ export class SlimeSphere {
     // 4) Smooth the (position - rest) displacement across neighbors.
     //    Only the deviation gets averaged, so the base shape (blob/pumpkin/…)
     //    is preserved but sharp local kinks are rounded out.
-    if (dispSmoothing > 0) {
+    //    Gated on tipCount so the shape freezes the moment the user lets
+    //    go — running this pass every idle frame slowly diffuses dents
+    //    outward and (with volume preservation) drifts the ball back to
+    //    a sphere, which contradicts "kneading persists".
+    if (dispSmoothing > 0 && tipCount > 0) {
       const verts = this.vertexCount
       const a = dispSmoothing
       const dispTmp = new Float32Array(vel.length)
@@ -429,7 +952,10 @@ export class SlimeSphere {
     // 5) Volume preservation — gently scale every vertex radially so the mesh
     //    keeps its rest volume. Pressing flat on one side of a sphere makes
     //    the sides bulge outward instead of the whole ball shrinking.
-    if (volumePreservation > 0 && this.restVolumeMetric > 0) {
+    //    Gated on tipCount for the same reason as dispSmoothing above:
+    //    running this after release would keep inflating the compressed
+    //    ball each idle frame, undoing the dent instead of holding it.
+    if (volumePreservation > 0 && this.restVolumeMetric > 0 && tipCount > 0) {
       let curVol = 0
       for (let i = 0; i < arr.length; i++) curVol += arr[i] * arr[i]
       if (curVol > 1e-6) {
@@ -445,6 +971,87 @@ export class SlimeSphere {
 
     this.damageAttr.needsUpdate = true
 
+    // Crack propagation pass — ice fractures OUTWARD from press points
+    // gradually via crackLevel spreading across the mesh; wax's tear
+    // TERRITORY spreads the same way but with STEEPER per-hop decay so
+    // a single press event only reaches a few hops out. Repeated press
+    // events at the same spot raise the source level (up to 3) — a
+    // level-2 source reaches ~2x further than level-1, so by around
+    // the second press event the tear territory has extended toward
+    // the ball's edges. Foil reads vDamage directly and skips this
+    // pass.
+    if (
+      this.currentCoatingId === 'ice' ||
+      this.currentCoatingId === 'wax'
+    ) {
+    const decayPerHop = this.currentCoatingId === 'wax' ? 0.85 : 0.9
+    const spreadPerFrame =
+      (this.currentCoatingId === 'wax' ? 15 : 15) * dt
+    this.prevCrackLevel.set(this.crackLevel)
+    for (let vi = 0; vi < this.vertexCount; vi++) {
+      let maxN = 0
+      const s = this.adjOffsets[vi]
+      const e = this.adjOffsets[vi + 1]
+      for (let k = s; k < e; k++) {
+        const lvl = this.prevCrackLevel[this.adjNeighbors[k]]
+        if (lvl > maxN) maxN = lvl
+      }
+      const target = maxN * decayPerHop
+      if (target > this.crackLevel[vi]) {
+        const nextLevel = this.crackLevel[vi] + spreadPerFrame
+        const newLevel = nextLevel < target ? nextLevel : target
+        if (newLevel > this.crackLevel[vi]) {
+          this.crackLevel[vi] = newLevel
+          crackLevelChanged = true
+        }
+      }
+    }
+    }
+    if (crackLevelChanged) this.crackLevelAttr.needsUpdate = true
+
+    // 6) Partial restore on release. Deformations don't fully rebound
+    //    (that would erase kneading) but they don't fully freeze either
+    //    — on the frame the last fingertip leaves, snapshot a target at
+    //    10% of the way back to rest, then ease the mesh toward it. The
+    //    remaining 90% of the dent stays baked in until the user presses
+    //    again (which clears the target so a fresh press can build up).
+    const RELEASE_RESTORE = 0.1
+    const SPRING_STEP = 0.12
+    if (tipCount > 0) {
+      this.wasPressing = true
+      this.restoreTargetPos = null
+    } else {
+      if (this.wasPressing) {
+        this.wasPressing = false
+        if (
+          this.restoreTargetPos === null ||
+          this.restoreTargetPos.length !== arr.length
+        ) {
+          this.restoreTargetPos = new Float32Array(arr.length)
+        }
+        const target = this.restoreTargetPos
+        const keep = 1 - RELEASE_RESTORE
+        for (let i = 0; i < arr.length; i++) {
+          target[i] = rest[i] + (arr[i] - rest[i]) * keep
+        }
+      }
+      if (this.restoreTargetPos !== null) {
+        const target = this.restoreTargetPos
+        let maxDelta2 = 0
+        for (let i = 0; i < arr.length; i += 3) {
+          const dx = target[i] - arr[i]
+          const dy = target[i + 1] - arr[i + 1]
+          const dz = target[i + 2] - arr[i + 2]
+          arr[i] += dx * SPRING_STEP
+          arr[i + 1] += dy * SPRING_STEP
+          arr[i + 2] += dz * SPRING_STEP
+          const d2 = dx * dx + dy * dy + dz * dz
+          if (d2 > maxDelta2) maxDelta2 = d2
+        }
+        if (maxDelta2 < 1e-8) this.restoreTargetPos = null
+      }
+    }
+
     posAttr.needsUpdate = true
     this.geometry.computeVertexNormals()
   }
@@ -454,8 +1061,14 @@ export class SlimeSphere {
     const arr = posAttr.array as Float32Array
     arr.set(this.restPositions)
     this.velocities.fill(0)
+    this.wasPressing = false
+    this.restoreTargetPos = null
     this.damage.fill(0)
     this.damageAttr.needsUpdate = true
+    this.crackLevel.fill(0)
+    this.prevCrackLevel.fill(0)
+    this.crackLevelAttr.needsUpdate = true
+    this.wasBeingPressed.fill(0)
     posAttr.needsUpdate = true
     this.geometry.computeVertexNormals()
   }
@@ -464,6 +1077,10 @@ export class SlimeSphere {
   clearDamage() {
     this.damage.fill(0)
     this.damageAttr.needsUpdate = true
+    this.crackLevel.fill(0)
+    this.prevCrackLevel.fill(0)
+    this.crackLevelAttr.needsUpdate = true
+    this.wasBeingPressed.fill(0)
   }
 
   /** Approximation of "how hard the user is squishing right now". */
@@ -480,7 +1097,34 @@ export class SlimeSphere {
     return this.damageEnabledUniform.value > 0.5
   }
 
+  /** Fade the slime BODY toward invisible. Used by SlimeApp to hide
+   *  the "soft" slime interior when chunk beads pack the sphere so
+   *  densely that a background body would just add visual clutter
+   *  between the beads. `o` = 1 → normal, `o` = 0 → mesh hidden
+   *  outright. Intermediate values enable material transparency and
+   *  set the alpha; below ~0.02 the mesh is dropped from rendering
+   *  entirely to skip the transmission pass. */
+  setBodyOpacity(o: number) {
+    const clamped = o < 0 ? 0 : o > 1 ? 1 : o
+    this.mesh.visible = clamped > 0.02
+    const mat = this.mesh.material as THREE.MeshPhysicalMaterial
+    const wantTransparent = clamped < 0.99
+    if (mat.transparent !== wantTransparent) {
+      mat.transparent = wantTransparent
+      mat.needsUpdate = true
+    }
+    mat.opacity = clamped
+  }
+
   dispose() {
+    if (this.gradientTexture) {
+      this.gradientTexture.dispose()
+      this.gradientTexture = null
+    }
+    if (this.coatingGradientTexture) {
+      this.coatingGradientTexture.dispose()
+      this.coatingGradientTexture = null
+    }
     this.geometry.dispose()
     ;(this.mesh.material as THREE.Material).dispose()
   }
@@ -526,20 +1170,57 @@ function buildAdjacency(
 
 /**
  * Extend MeshPhysicalMaterial via onBeforeCompile: forward per-vertex damage
- * to the fragment shader and paint procedural voronoi-cell cracks when the
- * damage uniform is enabled. The base PBR shading otherwise runs unchanged.
+ * to the fragment shader, paint procedural voronoi-cell cracks when the
+ * damage uniform is enabled, mix in marble-ink swirls when the ink uniforms
+ * are non-zero, and stretch slime vertices outward around each bead so the
+ * translucent slime literally pulls up over every bead like taffy — the
+ * bead pokes through, and slime tightens around its contours instead of
+ * being punched flat by the bead sphere.
  */
 function installDamageShader(
   material: THREE.MeshPhysicalMaterial,
-  enabledUniform: { value: number }
+  enabledUniform: { value: number },
+  isFoilUniform: { value: number },
+  isIceUniform: { value: number },
+  isWaxUniform: { value: number },
+  isMatteUniform: { value: number },
+  coatingTintUniform: { value: THREE.Color },
+  inkColorUniform: { value: THREE.Color },
+  inkAmountUniform: { value: number },
+  beadRadiusUniform: { value: number },
+  beadWrapAmountUniform: { value: number },
+  gradientUseUniform: { value: number },
+  gradientTexUniform: { value: THREE.Texture | null },
+  gradientRadiusUniform: { value: number },
+  coatingGradientUseUniform: { value: number },
+  coatingGradientTexUniform: { value: THREE.Texture | null }
 ) {
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uDamageEnabled = enabledUniform
+    shader.uniforms.uCoatingIsFoil = isFoilUniform
+    shader.uniforms.uCoatingIsIce = isIceUniform
+    shader.uniforms.uCoatingIsWax = isWaxUniform
+    shader.uniforms.uMaterialIsMatte = isMatteUniform
+    shader.uniforms.uCoatingTint = coatingTintUniform
+    shader.uniforms.uInkColor = inkColorUniform
+    shader.uniforms.uInkAmount = inkAmountUniform
+    shader.uniforms.uBeadRadius = beadRadiusUniform
+    shader.uniforms.uBeadWrapAmount = beadWrapAmountUniform
+    shader.uniforms.uUseGradient = gradientUseUniform
+    shader.uniforms.uGradient = gradientTexUniform
+    shader.uniforms.uGradientRadius = gradientRadiusUniform
+    shader.uniforms.uUseCoatingGradient = coatingGradientUseUniform
+    shader.uniforms.uCoatingGradient = coatingGradientTexUniform
 
     shader.vertexShader =
       `attribute float damage;
+       attribute float crackLevel;
        attribute vec3 aRestPos;
+       attribute vec3 aBeadDir;
+       uniform float uBeadRadius;
+       uniform float uBeadWrapAmount;
        varying float vDamage;
+       varying float vCrackLevel;
        varying vec3 vRest;
        varying float vStretch;
       ` +
@@ -547,29 +1228,127 @@ function installDamageShader(
         '#include <begin_vertex>',
         `#include <begin_vertex>
          vDamage = damage;
+         vCrackLevel = crackLevel;
          // Rest position anchors the voronoi cells so plate SIZES stay
          // constant — deformation moves plates but doesn't stretch them.
          vRest = aRestPos;
          // Only outward radial displacement counts as "stretch" — pressing a
-         // vertex INWARD compresses the wax (should not crack open the
+         // vertex INWARD compresses the ice (should not crack open the
          // plates there), while a vertex bulging OUTWARD from volume
          // preservation genuinely pulls the shell apart.
          vec3 restDir = length(aRestPos) > 1e-4
            ? aRestPos / length(aRestPos)
            : vec3(0.0, 0.0, 1.0);
-         vStretch = max(0.0, dot(position - aRestPos, restDir));`
+         vStretch = max(0.0, dot(position - aRestPos, restDir));
+
+         // Bead taffy stretch. Each vertex has a nearest-bead direction
+         // baked in (aBeadDir). Compute the bead centre at the same rest
+         // radius as this vertex, take the world-distance to that centre,
+         // and pull the vertex outward by a smoothstep of that distance.
+         //
+         // Amplitude peaks at 1.05 x bead radius — slightly OVER the
+         // bead top so the slime literally engulfs the tip and beads read
+         // as embedded in a stretched slime bulge (not sitting on a flat
+         // surface). Fade radius 1.9 x bead radius gives wide overlap
+         // between adjacent beads so bulges merge into a smooth taffy
+         // sheet instead of appearing as isolated bumps.
+         if (uBeadWrapAmount > 0.5 && uBeadRadius > 1e-4) {
+           float restLen = length(aRestPos);
+           vec3 beadRest = aBeadDir * restLen;
+           float d = length(aRestPos - beadRest);
+           float bulge =
+             smoothstep(uBeadRadius * 1.9, uBeadRadius * 0.1, d)
+             * uBeadRadius * 1.05;
+           transformed += restDir * bulge;
+         }`
       )
 
     shader.fragmentShader =
       `uniform float uDamageEnabled;
+       uniform float uCoatingIsFoil;
+       uniform float uCoatingIsIce;
+       uniform float uCoatingIsWax;
+       uniform float uMaterialIsMatte;
+       uniform vec3 uCoatingTint;
+       uniform vec3 uInkColor;
+       uniform float uInkAmount;
+       uniform float uUseGradient;
+       uniform sampler2D uGradient;
+       uniform float uGradientRadius;
+       uniform float uUseCoatingGradient;
+       uniform sampler2D uCoatingGradient;
        varying float vDamage;
+       varying float vCrackLevel;
        varying vec3 vRest;
        varying float vStretch;
+
+       // 3D turbulence built from nested sines — cheap enough to run per
+       // fragment and produces the long twisty flows that read as marble
+       // swirls when their sign flips through zero. Sampled in the REST
+       // frame so the pattern stays anchored to the slime body and doesn't
+       // wobble around while the mesh deforms.
+       float inkTurb(vec3 p) {
+         float n = 0.0;
+         float amp = 1.0;
+         for (int i = 0; i < 4; i++) {
+           n += amp * sin(
+             p.x * 1.7 +
+             sin(p.y * 1.3 + p.z * 0.9) * 2.0
+           );
+           p *= 2.05;
+           amp *= 0.5;
+         }
+         return n;
+       }
 
        float damageHash(vec2 p) {
          p = fract(p * vec2(233.34, 851.73));
          p += dot(p, p + 23.45);
          return fract(p.x * p.y);
+       }
+
+       // 3D hash → single float in [0, 1). Used by the foam pattern to
+       // seed per-cell brightness so bubbles have irregular values instead
+       // of a uniform speckle. Sampled in REST space so the foam stays
+       // anchored to the slime body during deformation.
+       float foamHash3(vec3 p) {
+         p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+         p *= 17.0;
+         return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+       }
+       // Cheap 3D value noise via trilinear-interpolated hashes.
+       float foamNoise(vec3 p) {
+         vec3 i = floor(p);
+         vec3 f = fract(p);
+         vec3 u = f * f * (3.0 - 2.0 * f);
+         float n000 = foamHash3(i);
+         float n100 = foamHash3(i + vec3(1.0, 0.0, 0.0));
+         float n010 = foamHash3(i + vec3(0.0, 1.0, 0.0));
+         float n110 = foamHash3(i + vec3(1.0, 1.0, 0.0));
+         float n001 = foamHash3(i + vec3(0.0, 0.0, 1.0));
+         float n101 = foamHash3(i + vec3(1.0, 0.0, 1.0));
+         float n011 = foamHash3(i + vec3(0.0, 1.0, 1.0));
+         float n111 = foamHash3(i + vec3(1.0, 1.0, 1.0));
+         float nx00 = mix(n000, n100, u.x);
+         float nx10 = mix(n010, n110, u.x);
+         float nx01 = mix(n001, n101, u.x);
+         float nx11 = mix(n011, n111, u.x);
+         float nxy0 = mix(nx00, nx10, u.y);
+         float nxy1 = mix(nx01, nx11, u.y);
+         return mix(nxy0, nxy1, u.z);
+       }
+       // fBm — sum of octaves. Produces the mottled bubble field with fine
+       // pockets on top of larger cell structures, matching the reference
+       // image's aerated bath-foam look.
+       float foamFbm(vec3 p) {
+         float total = 0.0;
+         float amp = 0.5;
+         for (int i = 0; i < 4; i++) {
+           total += foamNoise(p) * amp;
+           p *= 2.15;
+           amp *= 0.55;
+         }
+         return total;
        }
 
        // Worley/voronoi with F2-F1 boundary distance + a stable per-cell
@@ -606,71 +1385,359 @@ function installDamageShader(
         .replace(
           '#include <map_fragment>',
           `#include <map_fragment>
-           float crackReveal = 0.0;
-           // Enter the crack pass whenever there is EITHER damage OR
-           // outward stretch — silhouette vertices never accumulate damage
-           // but do stretch from volume preservation, and we want them to
-           // crack too.
-           if (uDamageEnabled > 0.5 && (vDamage > 0.02 || vStretch > 0.02)) {
-             // Voronoi anchored in the REST frame: cell sizes stay constant.
-             // Kneading only decides "is this seam crackable yet" (visibility).
-             // What actually pushes the plates apart is the mesh STRETCHING —
-             // volume-preservation bulges and finger-pressed inflation both
-             // grow vStretch, which is the dominant term in crack width.
-             vec2 v = damageVoronoi(vRest * 3.5);
-
-             // Two independent visibility ramps merged with max():
-             //  - kneaded plates crack from accumulated damage,
-             //  - silhouette / opposite-side plates crack from volume-
-             //    preservation stretch alone (no finger ever touched them).
-             // Without the second ramp, edges stayed pristine no matter how
-             // much they bulged.
-             float visibility = max(
-               smoothstep(0.12, 0.3, vDamage),
-               smoothstep(0.05, 0.18, vStretch)
+           // Multi-colour gradient: when active, replace the base diffuse
+           // with a sample from the 1D palette LUT keyed off the vertex's
+           // REST y-coordinate. Sampling in rest space keeps the gradient
+           // anchored to the slime body — kneading deforms plates and
+           // dents but the top-to-bottom colour arrangement stays put.
+           if (uUseGradient > 0.5) {
+             float gt = clamp(
+               (vRest.y / uGradientRadius + 1.0) * 0.5,
+               0.0,
+               1.0
              );
+             diffuseColor.rgb = texture2D(uGradient, vec2(gt, 0.5)).rgb;
+           }
+           // Preserve the slime's own base colour for the crack pass — wax
+           // / foil / ice all replace diffuseColor with the coating tint,
+           // but any torn / cracked area needs to reveal what's underneath
+           // (the slime body), so we snapshot it BEFORE the override.
+           vec3 slimeBaseColor = diffuseColor.rgb;
 
-             // No base hairline — only cells with actual damage/stretch
-             // build a visible crack. Both terms are strong so once a cell
-             // starts cracking it gapes open substantially.
-             float damageWidth = smoothstep(0.18, 0.7, vDamage) * 0.11;
-             float stretchWidth = clamp(vStretch, 0.0, 0.4) * 0.75;
-             // 0.3..2.1: some cells (low y) stay tight, others (high y) open
-             // multiple times wider than the median — organic variation.
-             float perCell = 0.3 + v.y * 1.8;
-             float crackWidth = (damageWidth + stretchWidth) * perCell;
-             // Absolute ceiling — raised so the widest seams can gape open
-             // dramatically while narrow ones stay hairlines.
-             crackWidth = min(crackWidth, 0.55);
+           // Wax, foil, and ice paint the ENTIRE ball in the coating
+           // colour so the sphere reads as "red wax" / "gold foil" /
+           // "clear ice" rather than as "slime with a coating-coloured
+           // rim". Same tint uniform for all three (they differ in
+           // material response: wax is soft candle sheen, foil is
+           // metallic + iridescent, ice is fully matte + crackable) and
+           // the flags are mutually exclusive so whichever is 1 wins.
+           if (uCoatingIsFoil > 0.5 || uCoatingIsIce > 0.5 || uCoatingIsWax > 0.5) {
+             if (uUseCoatingGradient > 0.5) {
+               // Sample coating LUT keyed off the vertex's rest Y — same
+               // top-to-bottom direction the slime gradient uses — so a
+               // multi-colour coating reads as a smooth band across the
+               // whole shell.
+               float ct = clamp(
+                 (vRest.y / uGradientRadius + 1.0) * 0.5,
+                 0.0,
+                 1.0
+               );
+               diffuseColor.rgb =
+                 texture2D(uCoatingGradient, vec2(ct, 0.5)).rgb;
+             } else {
+               diffuseColor.rgb = uCoatingTint;
+             }
+           }
 
-             // Hard-edged reveal: crack interior is fully exposed, plate is
-             // fully covered. Transition happens in a tiny sliver right at
-             // the boundary so we get anti-aliasing but no soft washout.
-             float edgeBand = min(0.004, crackWidth * 0.15);
-             crackReveal = (1.0 - smoothstep(
-               crackWidth - edgeBand,
-               crackWidth,
-               v.x
-             )) * visibility;
+           float crackReveal = 0.0;
+           if (uDamageEnabled > 0.5) {
+             // ── ICE: rigid frozen shell SHATTER model ─────────────
+             // Ice pieces are conserved in aggregate — the coating
+             // doesn't dissolve away with repeated pressing. Three
+             // levers drive the visible behaviour:
+             //   (1) crackLevel (per-vertex, propagates outward
+             //       across the mesh from press points) drives WHERE
+             //       the shell is cracked. Growing past a vertex
+             //       joins it into the cracked network.
+             //   (2) vStretch (per-vertex, from volume-preservation
+             //       bulges under the finger) PHYSICALLY spreads the
+             //       existing pieces apart, exposing more slime
+             //       between them without changing piece count.
+             //   (3) A SECOND voronoi layer fades in once crackLevel
+             //       climbs past ~1.2 — each additional press
+             //       SUBDIVIDES the existing plates into smaller
+             //       pieces (rather than widening the gaps).
+             //       Layer 1 is always drawn so the base network
+             //       remains fully connected; Layer 2 only ADDS
+             //       lines on top.
+             if (uCoatingIsIce > 0.5 && vCrackLevel > 0.01) {
+               // Piece gap width — starts THIN on the very first press
+               // (crackLevel ~1) so cracks read as hairline fractures,
+               // then widens as repeated presses push crackLevel higher
+               // and the shell truly breaks apart. Mesh stretch still
+               // spreads the pieces further apart on top of this.
+               float baseWidth = mix(
+                 0.025,
+                 0.06,
+                 smoothstep(1.0, 2.0, vCrackLevel)
+               );
+               float stretchBoost = clamp(vStretch, 0.0, 0.4) * 0.35;
+               float gapWidth = baseWidth + stretchBoost;
+               // Hard 12% AA sliver → crisp piece boundaries.
+               float gapEdge = gapWidth * 0.88;
 
-             // Slime showing through cracks is pushed hard toward white so it
-             // reads as a distinct bright layer against the coated plates.
-             vec3 slimeTint = mix(diffuseColor.rgb, vec3(1.0), 0.85);
+               // Layer 1: primary plate network — always visible
+               // where crackLevel > 0 so its connectivity holds up.
+               vec2 v1 = damageVoronoi(vRest * 3.0);
+               float layer1 = 1.0 - smoothstep(gapEdge, gapWidth, v1.x);
+
+               // Layer 2: finer subdivision — fades in on the
+               // second press event, splitting each layer-1 piece
+               // in two rather than widening the gaps.
+               vec2 v2 = damageVoronoi(vRest * 6.0 + vec3(37.1, 11.3, 88.7));
+               float layer2 = (1.0 - smoothstep(gapEdge, gapWidth, v2.x))
+                 * smoothstep(1.2, 2.2, vCrackLevel);
+
+               // Global visibility fade — unreached regions stay
+               // fully uncracked; the spread frontier shows only
+               // faint hairlines.
+               float visibility = smoothstep(0.0, 1.0, vCrackLevel);
+
+               crackReveal = max(layer1, layer2) * visibility;
+             }
+             // ── WAX: candle-wax TEAR model ────────────────────────
+             // Wax tears open along local damage accumulation like
+             // foil, but slower and narrower. crackLevel (propagated
+             // across the mesh from press points) additionally
+             // controls the tear TERRITORY: areas that haven't been
+             // pressed directly become tearable once the propagated
+             // level reaches them. So the FIRST press tears open a
+             // local patch, and by the SECOND press event the tear
+             // network has crept out to the ball's edges. Cracks
+             // share foil's soft feathered edges.
+             else if (
+               uCoatingIsWax > 0.5 &&
+               (vDamage > 0.02 || vCrackLevel > 0.85)
+             ) {
+               // Layer 1: primary tear network — always the same
+               // voronoi pattern, so the wax PIECES stay the same
+               // size regardless of press count. Widens with local
+               // damage/stretch and shows across the propagated
+               // crackLevel territory.
+               vec2 v1 = damageVoronoi(vRest * 2.6);
+
+               // Spread visibility starts JUST BELOW level 1 so a
+               // first press (which caps at level 1 at pressed vertices
+               // and drops to 0.85 at 1 hop under decay 0.85) only
+               // shows cracks at the pressed vertices themselves — no
+               // propagation reach on press #1. Press #2 bumps sources
+               // to level 2 and now propagation stays above threshold
+               // for ~6 hops, extending the tear territory outward.
+               // Stretch is intentionally EXCLUDED from visibility —
+               // volume preservation makes vStretch positive across
+               // large parts of the ball whenever any spot is pressed
+               // (opposite-side bulges, silhouette vertices), and if
+               // it triggered cracks the coating would tear everywhere
+               // on the first press instead of just under the finger.
+               float damageVis = smoothstep(0.22, 0.42, vDamage);
+               float spreadVis = smoothstep(0.85, 1.15, vCrackLevel);
+               float visibility = max(damageVis, spreadVis);
+
+               float damageWidth =
+                 smoothstep(0.25, 0.7, vDamage) * 0.10;
+               float stretchWidth = clamp(vStretch, 0.0, 0.4) * 0.35;
+               // Spread width grows progressively through presses 1-3
+               // (crackLevel 1 to 3), so each additional press within
+               // the first three visibly widens the gaps between
+               // pieces without introducing any subdivisions. Piece
+               // SIZE stays constant — only the crack gap widens.
+               float spreadWidth =
+                 smoothstep(0.85, 3.0, vCrackLevel) * 0.09;
+               float perCell1 = 0.3 + v1.y * 1.8;
+               float rawWidth1 =
+                 (damageWidth + stretchWidth + spreadWidth) * perCell1;
+               // Enforce a minimum width whenever the crack is
+               // visible at all — otherwise the transitions produce
+               // hairline strokes that read as thin solid lines
+               // scattered across the ball. With this floor, cracks
+               // are either invisible or drawn as proper gaps with
+               // meaningful thickness.
+               float minVisibleWidth1 = visibility * 0.045;
+               float width1 = min(max(rawWidth1, minVisibleWidth1), 0.35);
+               // Hard step edge — no anti-aliased rim, so cracks read
+               // as angular voronoi-cell boundaries with sharp
+               // right-angle transitions instead of soft radial fades.
+               float layer1 = (1.0 - step(width1, v1.x)) * visibility;
+
+               // Layer 2: SUBDIVISIONS inside layer-1 pieces. Only
+               // starts on the FOURTH press event — presses 1-3 stay
+               // pure Layer 1 (bigger and bigger gaps between the
+               // same fixed-size pieces), press 4 introduces
+               // subdivisions. Layer 2's own gap width grows with
+               // damage, stretch, and further presses just like
+               // Layer 1 does — so subdivisions also spread apart
+               // progressively once they've appeared, exposing more
+               // slime as press count climbs from 4 to 5.
+               vec2 v2 =
+                 damageVoronoi(vRest * 5.0 + vec3(37.1, 11.3, 88.7));
+               float visLayer2 = smoothstep(3.4, 4.0, vCrackLevel);
+               float perCell2 = 0.3 + v2.y * 1.4;
+               float damageWidth2 =
+                 smoothstep(0.3, 0.85, vDamage) * 0.08;
+               float stretchWidth2 = clamp(vStretch, 0.0, 0.4) * 0.28;
+               float spreadWidth2 =
+                 smoothstep(3.4, 5.0, vCrackLevel) * 0.08;
+               float rawWidth2 =
+                 (damageWidth2 + stretchWidth2 + spreadWidth2) * perCell2;
+               // Layer 2 appears with a chunky starting gap the moment
+               // it activates (press 4) so subdivisions don't look
+               // like faint hairlines — they read as proper cracks
+               // from their very first frame of visibility.
+               float minVisibleWidth2 = visLayer2 * 0.08;
+               float width2 = min(max(rawWidth2, minVisibleWidth2), 0.22);
+               float layer2 = (1.0 - step(width2, v2.x)) * visLayer2;
+
+               // Layer 3: even FINER subdivisions — kicks in on the
+               // FIFTH press event (crackLevel 4.5+), splitting
+               // layer-2 pieces one more time.
+               vec2 v3 =
+                 damageVoronoi(vRest * 9.0 + vec3(70.7, 44.4, 91.2));
+               float visLayer3 = smoothstep(4.5, 4.9, vCrackLevel);
+               float perCell3 = 0.3 + v3.y * 1.2;
+               float rawWidth3 = width1 * 0.55;
+               float minVisibleWidth3 = visLayer3 * 0.025;
+               float width3 = min(max(rawWidth3, minVisibleWidth3), 0.18);
+               float layer3 = (1.0 - step(width3, v3.x)) * visLayer3;
+
+               // Combine — max so every visible layer contributes.
+               // Piece SIZE stays constant; press count only adds more
+               // interior crack lines that subdivide existing pieces.
+               crackReveal = max(max(layer1, layer2), layer3);
+             }
+
+             // ── FOIL: thin metallic sheet TEAR model ──────────────
+             // Foil tears aggressively under sustained pressure —
+             // crack widths GROW continuously with damage AND stretch,
+             // so any real press quickly gapes tears wide open,
+             // exposing large patches of slime through the torn sheet.
+             // Cracks have SOFT wispy edges rather than wax's hard
+             // fragment boundaries.
+             else if (uCoatingIsFoil > 0.5 && vDamage > 0.02) {
+               vec2 v = damageVoronoi(vRest * 2.3);
+
+               // Same visibility thresholds as ice's crack gate so
+               // tears stay LOCAL to the press site (dropping these
+               // lower made every volume-preservation bulge across
+               // the whole ball flash tears — the original complaint).
+               float visibility = max(
+                 smoothstep(0.12, 0.3, vDamage),
+                 smoothstep(0.05, 0.18, vStretch)
+               );
+
+               // Tear width — grows continuously with damage and
+               // stretch. Aggressive multipliers + high ceiling so
+               // sustained pressure gapes tears wide open, exposing
+               // big patches of slime. Per-cell variation makes some
+               // tears wider than others (organic ripping).
+               float damageWidth = smoothstep(0.18, 0.7, vDamage) * 0.36;
+               float stretchWidth = clamp(vStretch, 0.0, 0.4) * 1.7;
+               float perCell = 0.3 + v.y * 1.8;
+               float crackWidth =
+                 min((damageWidth + stretchWidth) * perCell, 0.88);
+
+               // Soft 15% edge band — torn foil has wispy, feathered
+               // edges, not the hard-edged perimeter ice fragments
+               // show. This is the visual difference between "torn"
+               // and "shattered".
+               float edgeBand = min(0.004, crackWidth * 0.15);
+               crackReveal = (1.0 - smoothstep(
+                 crackWidth - edgeBand,
+                 crackWidth,
+                 v.x
+               )) * visibility;
+             }
+           }
+
+           // Cracks reveal the slime's own base colour (snapshotted
+           // before the coating overrode diffuseColor). Ice and wax
+           // cracks brighten a little toward a wet-cream tone so
+           // slime showing through the shell reads as glistening
+           // wet; foil shows the raw slime colour unaltered.
+           vec3 wetReveal = mix(slimeBaseColor, vec3(1.0), 0.35);
+           float wetMix = max(uCoatingIsIce, uCoatingIsWax);
+           vec3 crackTarget = mix(slimeBaseColor, wetReveal, wetMix);
+           diffuseColor.rgb =
+             mix(diffuseColor.rgb, crackTarget, crackReveal);
+
+           if (uInkAmount > 0.005) {
+             float t = inkTurb(vRest * 1.6);
+             // Amount controls the RIBBON WIDTH — small amount = thin swirl
+             // (only near zero-crossings), large amount = fat marble field.
+             // Mask stays fully saturated inside the ribbon so a thin
+             // stroke reads as saturated ink, not faint ink.
+             float threshold = 0.05 + 0.65 * uInkAmount;
+             float band = 1.0 - smoothstep(0.0, threshold, abs(t));
              diffuseColor.rgb =
-               mix(diffuseColor.rgb, slimeTint, crackReveal);
-           }`
+               mix(diffuseColor.rgb, uInkColor, clamp(band, 0.0, 1.0));
+           }
+
+           // Matte foam pattern — mottles the base slime colour with fine
+           // brightness variation so the surface reads as aerated bath
+           // foam (see reference capture). Only mixes when NO crack-
+           // drawing coating is active (wax/foil/ice/tube all paint
+           // the whole shell with their own tint, so foam speckle
+           // would leak onto those surfaces).
+           float vFoam = 0.0;
+           if (uMaterialIsMatte > 0.5 && uDamageEnabled < 0.5) {
+             // Two-scale foam: fbm gives soft cellular pockets, a second
+             // higher-frequency layer adds tiny bubble highlights.
+             float fbm = foamFbm(vRest * 22.0);
+             float fine = foamNoise(vRest * 55.0);
+             vFoam = clamp(fbm * 0.75 + fine * 0.35, 0.0, 1.0);
+             // Both bubble masks push toward DARKER shades of the slime's
+             // OWN colour — no added white/grey. Mid-frequency pockets
+             // get a mild darken (subtle mottling) and the deep pockets
+             // get a stronger darken (bubble crevice), so foam always
+             // reads as a darker tone of whatever colour the slime is
+             // (mint slime → darker mint pockets, pink slime → darker
+             // pink pockets), matching the reference capture.
+             // Widen the smoothstep bands so more of the surface takes
+             // a darkening pass — reduces the amount of pure slime-tone
+             // area between pockets, pushing the overall look darker.
+             float bright = smoothstep(0.4, 0.9, vFoam);
+             float shade  = smoothstep(0.6, 0.1, vFoam);
+             diffuseColor.rgb = mix(
+               diffuseColor.rgb,
+               diffuseColor.rgb * 0.3,
+               bright * 0.95
+             );
+             diffuseColor.rgb = mix(
+               diffuseColor.rgb,
+               diffuseColor.rgb * 0.2,
+               shade
+             );
+           }
+
+           `
         )
         .replace(
           '#include <roughnessmap_fragment>',
           `#include <roughnessmap_fragment>
            if (crackReveal > 0.0) {
-             // Exposed slime is much glossier than the waxy shell.
-             roughnessFactor = mix(roughnessFactor, 0.12, crackReveal * 0.9);
+             // Ice cracks expose wet inner cream — nearly mirror glossy.
+             // Foil tears expose raw slime body — soft slime gloss, not
+             // mirror, so the exposed patch reads as squishy rather than
+             // as another shiny surface layer.
+             float crackRoughness = mix(0.12, 0.35, uCoatingIsFoil);
+             roughnessFactor =
+               mix(roughnessFactor, crackRoughness, crackReveal * 0.9);
+           }
+           // Matte foam roughness modulation. Bright bubble spots
+           // (highlights) drop roughness a touch so a tiny glint reads
+           // as the top of an aerated bubble, while shaded pockets push
+           // roughness up so the cavity looks dry / dusty. The overall
+           // material stays matte — this is just enough variation to
+           // fake surface bumps without a normal map.
+           if (uMaterialIsMatte > 0.5 && uDamageEnabled < 0.5) {
+             float bright = smoothstep(0.55, 0.95, vFoam);
+             float shade  = smoothstep(0.45, 0.05, vFoam);
+             roughnessFactor =
+               clamp(roughnessFactor + shade * 0.15 - bright * 0.35, 0.05, 1.0);
+           }`
+        )
+        .replace(
+          '#include <metalnessmap_fragment>',
+          `#include <metalnessmap_fragment>
+           if (crackReveal > 0.0 && uCoatingIsFoil > 0.5) {
+             // Torn foil exposes non-metallic slime — kill metalness in
+             // the crack area so the base colour is rendered as diffuse
+             // slime instead of being swallowed by the specular BRDF.
+             metalnessFactor = mix(metalnessFactor, 0.0, crackReveal);
            }`
         )
         .replace(
           // Boost the diffuse contribution inside the crack strips so the
-          // bright slime clearly punches through the wax's warm sheen tint.
+          // bright slime clearly punches through the ice's cool sheen tint.
           'vec3 totalDiffuse = reflectedLight.directDiffuse',
           `if (crackReveal > 0.01) {
              reflectedLight.directDiffuse *= mix(1.0, 1.95, crackReveal);
