@@ -76,6 +76,13 @@
   outline: none;
 }
 
+.iconButton[data-active='true'] {
+  /* Background stays default; only the SVG icon (via currentColor)
+     turns blue so the on/off state is obvious without breaking the
+     top bar's clean pill styling. */
+  color: #4a9eff;
+}
+
 /* ── Left drawer (menu panel) ──────────────────────────── */
 
 .drawerBackdrop {
@@ -264,6 +271,419 @@
 .modalClose:hover,
 .modalClose:focus-visible {
   background: var(--bg-chip-hover);
+  outline: none;
+}
+
+/* ── Collection dropdown + browse overlay ───────────────── */
+
+.collectionMenuWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.collectionMenuBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 4;
+  background: transparent;
+}
+
+.collectionMenu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 5;
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 12px;
+  background: var(--bg-panel-strong);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(10px);
+}
+
+.collectionMenuBtn {
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: none;
+  outline: none;
+  background: var(--bg-chip);
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.collectionMenuBtn:hover,
+.collectionMenuBtn:focus-visible {
+  background: var(--bg-chip-hover);
+  outline: none;
+}
+
+.browseOverlay {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  /* Default: overlay absorbs touches → used for swipe-nav between
+     saved slimes. Preview mode below flips pointer-events off so
+     touches pass through to the slime canvas for interaction. */
+  pointer-events: auto;
+  touch-action: pan-y;
+}
+
+.browseOverlayPreview {
+  pointer-events: none;
+}
+
+/* Top-right cluster (share + delete) — placed BELOW the app's own
+   four icon buttons (topBar ~16 + 40 tall). Aligns to right so the
+   pair sits above the slime without covering the icon row. */
+.browseTopBar {
+  position: absolute;
+  top: calc(max(16px, env(safe-area-inset-top)) + 56px);
+  right: max(16px, env(safe-area-inset-right));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+/* Top-left cluster (preview toggle + reset while active). */
+.browseTopLeftBar {
+  position: absolute;
+  top: calc(max(16px, env(safe-area-inset-top)) + 56px);
+  left: max(16px, env(safe-area-inset-left));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+/* Blue text when preview mode is on (button background stays the
+   same so it's still visible against dark backdrops). */
+.browseActionBtn[data-preview-active='true'] {
+  color: #4a9eff;
+}
+
+.browseAllBtn {
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: none;
+  outline: none;
+  background: var(--bg-toggle);
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+}
+
+.browseAllBtn:hover,
+.browseAllBtn:focus-visible {
+  background: var(--bg-toggle-hover);
+  outline: none;
+}
+
+/* Footer stack (name + 모두보기) — centred below the slime, above
+   the "이 슬라임 사용하기" pill and the × close in the corner. */
+.browseFooter {
+  position: absolute;
+  bottom: calc(max(24px, env(safe-area-inset-bottom)) + 88px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  pointer-events: auto;
+}
+
+.browseTitle {
+  text-align: center;
+  color: var(--color-text);
+  font-size: 14px;
+  font-weight: 600;
+  opacity: 0.9;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  max-width: 220px;
+}
+
+.browseTitle:hover,
+.browseTitle:focus-visible {
+  background: rgba(255, 255, 255, 0.08);
+  outline: none;
+  opacity: 1;
+}
+
+.browseFooterActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.browseActionBtn {
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: none;
+  outline: none;
+  background: var(--bg-toggle);
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  backdrop-filter: blur(10px);
+  white-space: nowrap;
+}
+
+.browseActionBtn:hover,
+.browseActionBtn:focus-visible {
+  background: var(--bg-toggle-hover);
+  outline: none;
+}
+
+.browseDeleteBtn {
+  color: rgba(255, 120, 120, 0.95);
+}
+
+/* Bottom-LEFT circular check icon — commits the browsed slime as
+   the live editing state and leaves browse mode. Mirror position
+   of the bottom-right × close button. */
+.browseUseBtn {
+  position: absolute;
+  bottom: max(24px, env(safe-area-inset-bottom));
+  left: max(16px, env(safe-area-inset-left));
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  outline: none;
+  background: var(--bg-selected);
+  color: var(--color-selected-text);
+  cursor: pointer;
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.3);
+}
+
+.browseUseBtn:hover,
+.browseUseBtn:focus-visible {
+  filter: brightness(1.1);
+  outline: none;
+}
+
+/* Bottom-right × icon — closes browse mode WITHOUT keeping the
+   previewed saved slime; restores whatever the user was working on
+   before they opened the collection. */
+.browseCloseIconBtn {
+  position: absolute;
+  bottom: max(24px, env(safe-area-inset-bottom));
+  right: max(16px, env(safe-area-inset-right));
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  outline: none;
+  background: var(--bg-toggle);
+  color: var(--color-text);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  pointer-events: auto;
+  backdrop-filter: blur(10px);
+}
+
+.browseCloseIconBtn:hover,
+.browseCloseIconBtn:focus-visible {
+  background: var(--bg-toggle-hover);
+  outline: none;
+}
+
+/* ── Collection modal ───────────────────────────────────── */
+
+.collectionEmpty {
+  margin: 8px 0 16px;
+  padding: 20px 0;
+  text-align: center;
+  color: var(--color-text-muted, rgba(255, 255, 255, 0.55));
+  font-size: 13px;
+}
+
+/* Horizontally-scrolling 2-row grid of saved-slime thumbnails. Rows
+   are fixed to 2 and columns auto-grow, so N saved slimes create N/2
+   columns that scroll sideways on overflow. */
+.collectionGridWrap {
+  margin: 0 0 12px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 6px;
+  scrollbar-width: thin;
+}
+
+.collectionGrid {
+  display: grid;
+  grid-template-rows: repeat(2, 168px);
+  /* grid-template-columns is set inline per render (JS computes
+     ceil(itemCount / 2) columns). Explicit row flow lays items
+     top-row LEFT→RIGHT first, then wraps into the bottom row. */
+  grid-auto-flow: row;
+  gap: 10px;
+}
+
+.collectionCard {
+  position: relative;
+  width: 133px;
+  height: 168px; /* thumb 133 + name label + gap */
+  display: flex;
+  flex-direction: column;
+}
+
+.collectionCardBody {
+  width: 133px;
+  height: 133px;
+  border-radius: 12px;
+  overflow: hidden;
+  cursor: pointer;
+  background: var(--bg-chip);
+  outline: none;
+  transition: transform 120ms ease;
+  position: relative;
+}
+
+.collectionCardBody:hover,
+.collectionCardBody:focus-visible {
+  transform: scale(0.97);
+  outline: none;
+}
+
+.collectionThumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.collectionDeleteBtn,
+.collectionShareBtn {
+  position: absolute;
+  bottom: 4px;
+  z-index: 1;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  border: none;
+  outline: none;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+/* Both action buttons anchor to the bottom-right corner, laid out
+   side by side (share on the left of the pair, delete on the right). */
+.collectionShareBtn {
+  right: 34px;
+}
+
+.collectionDeleteBtn {
+  right: 4px;
+}
+
+.collectionDeleteBtn:hover,
+.collectionDeleteBtn:focus-visible,
+.collectionShareBtn:hover,
+.collectionShareBtn:focus-visible {
+  background: rgba(0, 0, 0, 0.8);
+  outline: none;
+}
+
+.collectionNameLabel {
+  margin-top: 6px;
+  padding: 4px 8px;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  width: 100%;
+  border-radius: 6px;
+}
+
+.collectionNameLabel:hover,
+.collectionNameLabel:focus-visible {
+  background: rgba(255, 255, 255, 0.06);
+  outline: none;
+}
+
+/* ── Name dialog (save / rename) ────────────────────────── */
+
+.nameDialogInput {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: var(--bg-chip);
+  color: var(--color-text);
+  font-size: 15px;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.nameDialogInput:focus {
+  border-color: rgba(180, 235, 255, 0.7);
+}
+
+.nameDialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.nameDialogSaveBtn {
+  background: var(--bg-selected);
+  color: var(--color-selected-text);
+  border: none;
+  outline: none;
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.nameDialogSaveBtn:hover,
+.nameDialogSaveBtn:focus-visible {
+  filter: brightness(1.1);
   outline: none;
 }
 

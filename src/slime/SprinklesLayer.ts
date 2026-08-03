@@ -145,6 +145,12 @@ export class SprinklesLayer {
     mat.iridescence = p.iridescence
     mat.iridescenceIOR = p.iridescenceIOR
     mat.envMapIntensity = p.envMapIntensity
+    // Optional physical transmission — crystal preset sets these to
+    // make the sprinkle read as clear glass; other presets omit
+    // them (defaults zero out cleanly).
+    mat.transmission = p.transmission ?? 0
+    mat.thickness = p.thickness ?? 0
+    if (p.ior !== undefined) mat.ior = p.ior
     mat.needsUpdate = true
   }
 

@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
 import {
   BEAD_COLORS,
   BEAD_MATERIAL_PARAMS,
@@ -89,6 +90,10 @@ export class BeadsLayer {
   // marble swirls on top of every bead. Held as refs (not copies) so one
   // slime.setInk() call updates both layers in lockstep with no re-emit.
   private inkColorUniform: { value: THREE.Color } | null = null
+  /** Live ref to SlimeSphere.materialIsMatteUniform — set via
+   *  setMatteFoamUniform so the wrap-shell can gate its foam pass on
+   *  the exact same flag the slime shader uses. */
+  private matteFoamUniform: { value: number } | null = null
   private inkAmountUniform: { value: number } | null = null
   // Slime gradient uniforms borrowed the same way — lets the wrap sample
   // the same top-to-bottom colour band the slime is painted with, so
@@ -501,6 +506,16 @@ export class BeadsLayer {
     if (this.wrapMaterial) this.installWrapInkShader(this.wrapMaterial)
   }
 
+  /** Adopt the slime's matte-material flag uniform so the wrap-shell
+   *  can render the same darker-tone foam pattern the slime body does.
+   *  Under compact-fill layers, wrap shells cover almost the whole
+   *  slime surface — without foam on the wrap, the aerated look
+   *  disappears whenever any beads are active. */
+  setMatteFoamUniform(uniform: { value: number }) {
+    this.matteFoamUniform = uniform
+    if (this.wrapMaterial) this.installWrapInkShader(this.wrapMaterial)
+  }
+
   /** Attach onBeforeCompile that mixes ink swirls into the wrap fragment
    *  colour. Samples turbulence in the wrap's local (post-instance) position
    *  — the bead group lives at identity under slime.mesh, so this coord
@@ -513,10 +528,13 @@ export class BeadsLayer {
     const gradUseU = this.slimeGradientUseUniform
     const gradTexU = this.slimeGradientTexUniform
     const gradRadiusU = this.slimeGradientRadiusUniform
-    // Both shader mixins (ink + slime-gradient sampling) share one
-    // onBeforeCompile — a material only supports a single hook so we
-    // fold them into the same replace path. Gradient runs BEFORE ink so
-    // ink still paints its swirls on top of the gradient base.
+    const matteU = this.matteFoamUniform
+    // All shader mixins (ink + slime-gradient sampling + matte foam)
+    // share one onBeforeCompile — a material only supports a single
+    // hook so we fold them into the same replace path. Gradient runs
+    // BEFORE ink so ink still paints its swirls on top of the gradient
+    // base; foam runs LAST so darker pockets tint whatever colour ended
+    // up in diffuseColor (gradient, ink, or plain slime base).
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uInkColor = colorU
       shader.uniforms.uInkAmount = amountU
@@ -524,6 +542,9 @@ export class BeadsLayer {
         shader.uniforms.uWrapGradientUse = gradUseU
         shader.uniforms.uWrapGradient = gradTexU
         shader.uniforms.uWrapGradientRadius = gradRadiusU
+      }
+      if (matteU) {
+        shader.uniforms.uWrapMaterialIsMatte = matteU
       }
 
       shader.vertexShader =
@@ -544,6 +565,7 @@ export class BeadsLayer {
          uniform float uWrapGradientUse;
          uniform sampler2D uWrapGradient;
          uniform float uWrapGradientRadius;
+         uniform float uWrapMaterialIsMatte;
          varying vec3 vWrapLocal;
 
          float wrapInkTurb(vec3 p) {
@@ -558,6 +580,46 @@ export class BeadsLayer {
              amp *= 0.5;
            }
            return n;
+         }
+
+         // Foam noise helpers — mirror SlimeSphere's foamHash3 /
+         // foamNoise / foamFbm so wrap shells sampled in the same
+         // slime-local frame produce the identical foam pattern that
+         // flows across the slime body onto every bead.
+         float wrapFoamHash3(vec3 p) {
+           p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+           p *= 17.0;
+           return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+         }
+         float wrapFoamNoise(vec3 p) {
+           vec3 i = floor(p);
+           vec3 f = fract(p);
+           vec3 u = f * f * (3.0 - 2.0 * f);
+           float n000 = wrapFoamHash3(i);
+           float n100 = wrapFoamHash3(i + vec3(1.0, 0.0, 0.0));
+           float n010 = wrapFoamHash3(i + vec3(0.0, 1.0, 0.0));
+           float n110 = wrapFoamHash3(i + vec3(1.0, 1.0, 0.0));
+           float n001 = wrapFoamHash3(i + vec3(0.0, 0.0, 1.0));
+           float n101 = wrapFoamHash3(i + vec3(1.0, 0.0, 1.0));
+           float n011 = wrapFoamHash3(i + vec3(0.0, 1.0, 1.0));
+           float n111 = wrapFoamHash3(i + vec3(1.0, 1.0, 1.0));
+           float nx00 = mix(n000, n100, u.x);
+           float nx10 = mix(n010, n110, u.x);
+           float nx01 = mix(n001, n101, u.x);
+           float nx11 = mix(n011, n111, u.x);
+           float nxy0 = mix(nx00, nx10, u.y);
+           float nxy1 = mix(nx01, nx11, u.y);
+           return mix(nxy0, nxy1, u.z);
+         }
+         float wrapFoamFbm(vec3 p) {
+           float total = 0.0;
+           float amp = 0.5;
+           for (int i = 0; i < 4; i++) {
+             total += wrapFoamNoise(p) * amp;
+             p *= 2.15;
+             amp *= 0.55;
+           }
+           return total;
          }
         ` +
         shader.fragmentShader.replace(
@@ -583,6 +645,28 @@ export class BeadsLayer {
              float band = 1.0 - smoothstep(0.0, threshold, abs(t));
              diffuseColor.rgb =
                mix(diffuseColor.rgb, uInkColor, clamp(band, 0.0, 1.0));
+           }
+           // Matte foam — same darker-tone bubble mottling that the
+           // slime body renders. Sampled in slime-local space so the
+           // pattern lines up continuously across the slime and every
+           // wrap-covered bead, giving one unified aerated look under
+           // dense compact-fill layers.
+           if (uWrapMaterialIsMatte > 0.5) {
+             float fbm = wrapFoamFbm(vWrapLocal * 22.0);
+             float fine = wrapFoamNoise(vWrapLocal * 55.0);
+             float foam = clamp(fbm * 0.75 + fine * 0.35, 0.0, 1.0);
+             float bright = smoothstep(0.4, 0.9, foam);
+             float shade  = smoothstep(0.6, 0.1, foam);
+             diffuseColor.rgb = mix(
+               diffuseColor.rgb,
+               diffuseColor.rgb * 0.3,
+               bright * 0.95
+             );
+             diffuseColor.rgb = mix(
+               diffuseColor.rgb,
+               diffuseColor.rgb * 0.2,
+               shade
+             );
            }`
         )
     }
@@ -838,21 +922,24 @@ export class BeadsLayer {
              // rips the coating specifically where it lands; the
              // 속비즈 preset drops that gate so the tear develops
              // across the whole bead surface.
-             else if (uBeadCoatingIsFoil > 0.5 && vBeadDamage > 0.01) {
-               // Verbatim port of the slime foil coating shader path.
+             else if (uBeadCoatingIsFoil > 0.5 && vBeadDamage > 0.005) {
+               // Verbatim port of the slime foil coating shader path
+               // for BOTH multi-bead and single centred beads.
                // Beads have no per-vertex stretch channel (vStretch
                // is slime-only from volume preservation), so we use
                // vBeadDamage as a stretch proxy — that keeps the
-               // stretchWidth * 1.7 contribution (which dominates
-               // the slime version's wide wispy tears) alive on
-               // the bead too, so the visual matches.
+               // stretchWidth * 1.7 contribution alive so the width
+               // ramp matches the slime version's wide wispy tears.
                vec2 v = beadCrackVoronoi(vBeadLocal * 2.3);
                float stretchProxy = clamp(vBeadDamage, 0.0, 0.4);
-               float visibility = max(
-                 smoothstep(0.12, 0.3, vBeadDamage),
-                 smoothstep(0.05, 0.18, stretchProxy)
-               );
-               float damageWidth = smoothstep(0.18, 0.7, vBeadDamage) * 0.36;
+               // Visibility saturates at the FIRST tap so the crack
+               // is drawn at full opacity right away — only the
+               // width scales with tap count, so a first tap shows a
+               // small crack, subsequent taps widen it. Without this
+               // early saturation, first tap on 속비즈 (damage ≈ 0.03
+               // after the edge-bump scale) stayed invisible.
+               float visibility = smoothstep(0.005, 0.03, vBeadDamage);
+               float damageWidth = smoothstep(0.02, 0.6, vBeadDamage) * 0.5;
                float stretchWidth = stretchProxy * 1.7;
                float perCell = 0.3 + v.y * 1.8;
                float crackWidth = min((damageWidth + stretchWidth) * perCell, 0.88);
@@ -864,7 +951,7 @@ export class BeadsLayer {
                )) * visibility;
 
                // Bead damage is UNIFORM across every vertex of the
-               // instance (no per-vertex localization), so without a
+               // instance (no per-vertex localisation), so without a
                // press-point cone the whole bead would tear at once.
                // Cone gate keeps the tear local to where the user
                // is pressing, matching how slime foil's vDamage is
@@ -882,7 +969,12 @@ export class BeadsLayer {
                  localMask = smoothstep(coneEdge - 0.2, coneEdge + 0.05, cosAngle);
                }
                crackReveal = rawTear * localMask;
-               revealTone = 0.65;
+               // Stronger reveal tone for foil/tube so the exposed
+               // slime pops against the intact coating instead of
+               // reading as a slightly-lighter patch of the same
+               // colour. Combined with the shadowed edge below,
+               // gives a clear "torn open" boundary.
+               revealTone = 0.9;
              }
            }
 
@@ -893,18 +985,62 @@ export class BeadsLayer {
            // detected via min(r,g,b) > 0.85 so coloured beads (even
            // saturated bright ones like yellow / cyan) keep the
            // original brighten-to-white reveal.
+           // Special case: 속비즈 (single centred bead) with foil/tube
+           // coating reveals PURE WHITE regardless of the bead colour
+           // — matches the slime coating's "inside is white under
+           // coating" convention so the whole app reads consistently.
            vec3 _crackReveal;
-           float _minCh = min(
-             min(diffuseColor.r, diffuseColor.g),
-             diffuseColor.b
-           );
-           if (_minCh > 0.85) {
-             _crackReveal = diffuseColor.rgb * (1.0 - revealTone * 0.7);
+           if (uBeadFoilFullSurface > 0.5 && uBeadCoatingIsFoil > 0.5) {
+             _crackReveal = vec3(1.0);
            } else {
-             _crackReveal = mix(diffuseColor.rgb, vec3(1.0), revealTone);
+             float _minCh = min(
+               min(diffuseColor.r, diffuseColor.g),
+               diffuseColor.b
+             );
+             if (_minCh > 0.85) {
+               _crackReveal = diffuseColor.rgb * (1.0 - revealTone * 0.75);
+             } else {
+               _crackReveal = mix(diffuseColor.rgb, vec3(1.0), revealTone);
+             }
            }
+           // Darken the crack RIM (where crackReveal ramps from 0 to
+           // 1) so the boundary between intact coating and exposed
+           // slime reads as a visible shadow line — foil is a
+           // physical sheet, torn edges have thickness that catches
+           // less light. Only the transition band gets shadowed;
+           // the fully-torn interior keeps the bright reveal.
+           float edgeShadow = 4.0 * crackReveal * (1.0 - crackReveal);
+           _crackReveal *= (1.0 - edgeShadow * 0.55);
            diffuseColor.rgb =
              mix(diffuseColor.rgb, _crackReveal, clamp(crackReveal, 0.0, 1.0));`
+        )
+        .replace(
+          '#include <roughnessmap_fragment>',
+          `#include <roughnessmap_fragment>
+           // 속비즈 foil crack reveal — bump roughness up so the
+           // exposed white area reads as a diffuse "wet interior"
+           // rather than a mirror-metallic sheet. Without this,
+           // the crack area kept the shell's low roughness and
+           // looked like a see-through reflective patch even though
+           // diffuseColor is white.
+           if (uBeadFoilFullSurface > 0.5 &&
+               uBeadCoatingIsFoil > 0.5 &&
+               crackReveal > 0.0) {
+             roughnessFactor = mix(roughnessFactor, 0.55, crackReveal);
+           }`
+        )
+        .replace(
+          '#include <metalnessmap_fragment>',
+          `#include <metalnessmap_fragment>
+           // 속비즈 foil crack reveal — zero metalness in the torn
+           // area so the diffuse white shows through instead of
+           // being swallowed by the metallic BRDF (which would
+           // reflect the environment and look transparent).
+           if (uBeadFoilFullSurface > 0.5 &&
+               uBeadCoatingIsFoil > 0.5 &&
+               crackReveal > 0.0) {
+             metalnessFactor = mix(metalnessFactor, 0.0, crackReveal);
+           }`
         )
     }
     mat.needsUpdate = true
@@ -1250,8 +1386,24 @@ export class BeadsLayer {
           this.beadPressPoint[i * 3 + 2] = nz / nlen
         }
       }
+      // 속비즈 (single centred bead) receives EVERY tip's full weight
+      // (routing bypasses the angular check and uses falloff = 1.0).
+      // With touch weights now up to ~11 per tip, damage saturates
+      // in a couple of frames and the coating rips wide open on a
+      // single tap. Scale accumulation down heavily for this case so
+      // one touch only nicks the coating, matching slime foil's
+      // "small tear at press site" behaviour where damage is per-
+      // vertex and each tap only accumulates on a few verts.
+      // 속비즈 dampens damage growth so the coating doesn't rip wide
+      // open in one tap, but the rising-edge bump is kept large
+      // enough that a FIRST tap immediately crosses the shader's
+      // visibility threshold (crack appears right away). Continuous
+      // growth stays modest so long-press just widens the tear
+      // rather than blowing it out.
+      const damageScale = singleCenteredBead ? 0.35 : 1.0
+      const edgeBumpScale = singleCenteredBead ? 0.6 : 1.0
       if (localForce > 0) {
-        const d = this.beadDamage[i] + localForce * dt * damageRate
+        const d = this.beadDamage[i] + localForce * dt * damageRate * damageScale
         this.beadDamage[i] = d < 1 ? d : 1
         // Squish factor climbs with press force. Rate tuned so a
         // steady press reaches SQUISH_MAX (0.45 → 45% compression,
@@ -1273,7 +1425,10 @@ export class BeadsLayer {
       // full-crack response after a single successful press.
       const wasPressed = this.beadWasPressed[i] === 1
       if (!wasPressed && localForce > 0.05) {
-        this.beadDamage[i] = Math.min(1, this.beadDamage[i] + 0.12)
+        this.beadDamage[i] = Math.min(
+          1,
+          this.beadDamage[i] + 0.12 * edgeBumpScale
+        )
         this.beadWasPressed[i] = 1
       } else if (wasPressed && localForce < 0.01) {
         this.beadWasPressed[i] = 0
@@ -2115,8 +2270,20 @@ export class BeadsLayer {
       // the press axis. Squish PERSISTS: once pressed flat it stays
       // flat until the layer is reset, matching the permanent damage
       // model of the crack pass.
+      // 속비즈 (single centred bead) skips the squish scaling — the
+      // bead is fully embedded inside the slime, so pressing the
+      // slime shouldn't flatten the bead itself (it would look
+      // like the bead is deforming inside the slime volume, not
+      // being pressed). Only the coating tears; the bead stays
+      // uniformly round.
+      const isSingleCenteredBead =
+        n === 1 &&
+        this.colPos[0] === 0 &&
+        this.colPos[1] === 0 &&
+        this.colPos[2] === 0
       if (
         isChunk &&
+        !isSingleCenteredBead &&
         this.currentCoatingId !== 'none' &&
         i < this.beadSquish.length
       ) {
@@ -2464,7 +2631,12 @@ function buildBeadGeometry(shape: BeadShapeId): THREE.BufferGeometry {
     case 'sphere':
       return new THREE.SphereGeometry(1, 14, 10)
     case 'cube':
-      return new THREE.BoxGeometry(1.5, 1.5, 1.5)
+      // RoundedBoxGeometry keeps the same 1.5 outer dimension the
+      // plain BoxGeometry had but softens the corners with a 0.25
+      // radius so bead cubes read as chunky pillowed dice rather
+      // than sharp-edged blocks. 4 segments smooths the rounding
+      // without adding too many verts per bead instance.
+      return new RoundedBoxGeometry(1.5, 1.5, 1.5, 4, 0.25)
     case 'torus':
       return new THREE.TorusGeometry(1, 0.4, 10, 20)
     case 'star': {

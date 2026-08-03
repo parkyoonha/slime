@@ -49,7 +49,11 @@ const DEFAULTS: SlimeParams = {
   damping: 0.82,
   influenceRadius: 0.9,
   pushStrength: 14,
-  velSmoothing: 0.15,
+  // Velocity diffusion — turned way down from 0.15 so a spike at
+  // pressed vertices doesn't cascade out into the surrounding mesh
+  // frame by frame, which read as far-away regions shaking during
+  // a targeted press.
+  velSmoothing: 0.04,
   // dispSmoothing pulls each vertex toward the AVERAGE of its
   // neighbours' displacements. A light amount (0.12) rounds out
   // isolated sharp spikes — the kind that pop up when volume
@@ -59,7 +63,12 @@ const DEFAULTS: SlimeParams = {
   // spring-back so we keep it modest.
   dispSmoothing: 0.12,
   maxDisplacement: 0.65,
-  volumePreservation: 0.12
+  // Volume preservation — dropped from 0.12 to 0.04. Under the
+  // press-machine physics (symmetric antipode), the two-sided
+  // compression makes vStretch swing wildly frame to frame; a
+  // strong volume-preservation gain amplified that into a visible
+  // whole-body wobble at spots the user isn't even touching.
+  volumePreservation: 0.04
 }
 
 export class SlimeSphere {
@@ -611,6 +620,15 @@ export class SlimeSphere {
     }
   }
 
+  /** Share the matte-material flag uniform with the bead wrap-shell so
+   *  the same foam pattern that mottles the slime body also appears on
+   *  wrap-covered beads. Without this, a compact-fill bead layer over
+   *  a matte slime shows opaque flat wrap shells (foam invisible).
+   *  Returns the live reference — BeadsLayer holds it directly. */
+  getMatteFoamUniform(): { value: number } {
+    return this.materialIsMatteUniform
+  }
+
   /** Combine current material + coating into the MeshPhysicalMaterial. The
    *  material sets every base property; the coating layers clearcoat +
    *  optional metalness/roughness/sheen adjustments on top, pulling its
@@ -647,12 +665,17 @@ export class SlimeSphere {
         mat.sheenColor.setHex(this.currentCoatingColorHex)
       }
     }
-    // Force the base material into a fully opaque matte state — no
-    // transmission (so a glassy base like crystal doesn't wash the
-    // coating tint out), no metalness / sheen / iridescence, high
-    // roughness. Wax uses this so its colour reads with the same soft
-    // opaque feel as the standalone 'matte' material option regardless
-    // of which base material the slime is set to.
+    // Coating-driven material transforms — restore each coating's
+    // signature finish regardless of what base material the user
+    // picked. These change reflectance/roughness/transmission only;
+    // the diffuse colour is separately owned by the slime colour
+    // picker (setCoatingColors), so the picked hue stays the same,
+    // only the surface FINISH switches. Layout:
+    //   wax  → opaque matte candle body (forceMatteBase)
+    //   tube → matte paper + high clearcoat (forceMatteBase +
+    //          coating params bring clearcoat)
+    //   foil → glossy metal (base extras handle metalness/clearcoat)
+    //   ice  → glassy crystal shell (forceCrystalBase)
     if (c.forceMatteBase) {
       mat.roughness = Math.max(mat.roughness, 0.85)
       mat.transmission = 0
@@ -661,10 +684,6 @@ export class SlimeSphere {
       mat.sheen = 0
       mat.iridescence = 0
     }
-    // Force the base material into a glassy CRYSTAL state — high
-    // transmission + thin refractive slab + low roughness. Ice uses
-    // this so its shell always reads as a transparent stained-glass
-    // crystal regardless of which base material the slime is set to.
     if (c.forceCrystalBase) {
       mat.roughness = 0.05
       mat.metalness = 0
@@ -673,6 +692,14 @@ export class SlimeSphere {
       mat.ior = 1.5
       mat.sheen = 0
       mat.iridescence = 0
+    }
+    if (c.forceOpaqueBase) {
+      // Zero transmission only — keeps metalness / roughness / sheen
+      // set by the coating's extras intact. Used by foil so its
+      // metallic outside stays intact but crack reveals can't see
+      // through a transparent-base slime.
+      mat.transmission = 0
+      mat.thickness = 0
     }
     mat.needsUpdate = true
   }
@@ -822,17 +849,17 @@ export class SlimeSphere {
         this.damage[vi] = d < 1 ? d : 1
       }
 
-      // ICE + WAX: crack on the RISING EDGE of press force so the
-      // per-vertex crackLevel gets a discrete level bump the frame a
-      // finger first touches. Ice uses this for its shatter visibility;
-      // wax uses it to drive a slow OUTWARD SPREAD of its tear region
-      // (via the propagation pass) — direct damage still controls the
-      // tear width at each vertex, but propagation lets the tear
-      // territory creep across the ball with each additional press
-      // event. Foil's tear model reads vDamage only so it skips this.
-      // Ice caps at 3 (3-stage shatter model); wax caps at 5 so it can
-      // distinguish the first 3 presses (Layer 1 pieces spreading wider
-      // apart) from press #4 onwards (Layer 2 subdivisions kicking in).
+      // ICE + WAX + FOIL/TUBE: crack on the RISING EDGE of press
+      // force so the per-vertex crackLevel gets a discrete level bump
+      // the frame a finger first touches. Foil / tube joined the
+      // list so their tear visibility also gates on crackLevel — a
+      // single tap now nudges the vertex to level 1 (below the
+      // visibility threshold of 1.5 in the shader) and only the
+      // SECOND tap crosses into visible cracks. Long-press growth
+      // (below) is what lets a sustained hold also cross the
+      // threshold without releasing.
+      // Ice caps at 3 (3-stage shatter model); wax and foil cap at
+      // 5 so multiple presses can keep widening / subdividing.
       const wasPressed = this.wasBeingPressed[vi] === 1
       if (!wasPressed && localForceMag > 0.05) {
         if (this.currentCoatingId === 'ice' && this.crackLevel[vi] < 3) {
@@ -844,10 +871,41 @@ export class SlimeSphere {
         ) {
           this.crackLevel[vi] = Math.min(5, this.crackLevel[vi] + 1)
           crackLevelChanged = true
+        } else if (
+          (this.currentCoatingId === 'foil' ||
+            this.currentCoatingId === 'tube') &&
+          this.crackLevel[vi] < 5
+        ) {
+          this.crackLevel[vi] = Math.min(5, this.crackLevel[vi] + 1)
+          crackLevelChanged = true
         }
         this.wasBeingPressed[vi] = 1
       } else if (wasPressed && localForceMag < 0.01) {
         this.wasBeingPressed[vi] = 0
+      }
+      // LONG-PRESS crackLevel growth — while a vertex is continuously
+      // being pressed, its crackLevel ticks up gradually so a held
+      // press eventually crosses the visibility threshold and
+      // propagates across the mesh, matching the "long press spreads
+      // cracks widely" behaviour. Growth rate is tuned so ~1.5 s of
+      // continuous hard press moves level from 1 to 2 (visibility
+      // unlocks). Only runs for crack-drawing coatings.
+      if (
+        wasPressed &&
+        localForceMag > 0.1 &&
+        (this.currentCoatingId === 'ice' ||
+          this.currentCoatingId === 'wax' ||
+          this.currentCoatingId === 'foil' ||
+          this.currentCoatingId === 'tube')
+      ) {
+        const cap =
+          this.currentCoatingId === 'ice' ? 3 : 5
+        const growRate = 0.7 // level per second under a firm press
+        const next = Math.min(cap, this.crackLevel[vi] + growRate * dt)
+        if (next > this.crackLevel[vi]) {
+          this.crackLevel[vi] = next
+          crackLevelChanged = true
+        }
       }
     }
 
@@ -949,12 +1007,11 @@ export class SlimeSphere {
       arr.set(dispTmp)
     }
 
-    // 5) Volume preservation — gently scale every vertex radially so the mesh
-    //    keeps its rest volume. Pressing flat on one side of a sphere makes
-    //    the sides bulge outward instead of the whole ball shrinking.
-    //    Gated on tipCount for the same reason as dispSmoothing above:
-    //    running this after release would keep inflating the compressed
-    //    ball each idle frame, undoing the dent instead of holding it.
+    // 5) Volume preservation — under the symmetric-press physics
+    //    (both sides squished simultaneously), scaling every vertex
+    //    outward is exactly the "equator bulges when poles are
+    //    pressed" behaviour we want. Reinstated so a two-plate
+    //    squish reads as a proper flattened pancake.
     if (volumePreservation > 0 && this.restVolumeMetric > 0 && tipCount > 0) {
       let curVol = 0
       for (let i = 0; i < arr.length; i++) curVol += arr[i] * arr[i]
@@ -974,19 +1031,17 @@ export class SlimeSphere {
     // Crack propagation pass — ice fractures OUTWARD from press points
     // gradually via crackLevel spreading across the mesh; wax's tear
     // TERRITORY spreads the same way but with STEEPER per-hop decay so
-    // a single press event only reaches a few hops out. Repeated press
-    // events at the same spot raise the source level (up to 3) — a
-    // level-2 source reaches ~2x further than level-1, so by around
-    // the second press event the tear territory has extended toward
-    // the ball's edges. Foil reads vDamage directly and skips this
-    // pass.
+    // a single press event only reaches a few hops out. Foil / tube
+    // intentionally SKIP propagation so a first tap only tears at the
+    // exact pressed vertex — the user asked for local tears there,
+    // not the network spread wax and ice do.
     if (
       this.currentCoatingId === 'ice' ||
       this.currentCoatingId === 'wax'
     ) {
-    const decayPerHop = this.currentCoatingId === 'wax' ? 0.85 : 0.9
-    const spreadPerFrame =
-      (this.currentCoatingId === 'wax' ? 15 : 15) * dt
+    const decayPerHop =
+      this.currentCoatingId === 'ice' ? 0.9 : 0.85
+    const spreadPerFrame = 15 * dt
     this.prevCrackLevel.set(this.crackLevel)
     for (let vi = 0; vi < this.vertexCount; vi++) {
       let maxN = 0
@@ -1086,6 +1141,16 @@ export class SlimeSphere {
   /** Approximation of "how hard the user is squishing right now". */
   get pressureThisFrame(): number {
     return this.accumulatedForce
+  }
+
+  /** Freeze the mesh's current velocities without touching positions,
+   *  damage, or crack state. Meant for input transitions (e.g. a
+   *  second finger arrives → pinch gesture starts) where the existing
+   *  dent should stay but any in-flight motion from the just-cancelled
+   *  press should stop. */
+  stopMotion() {
+    this.velocities.fill(0)
+    this.accumulatedForce = 0
   }
 
   /** Enable/disable the crack rendering effect (wired to coating selection). */
@@ -1398,11 +1463,16 @@ function installDamageShader(
              );
              diffuseColor.rgb = texture2D(uGradient, vec2(gt, 0.5)).rgb;
            }
-           // Preserve the slime's own base colour for the crack pass — wax
-           // / foil / ice all replace diffuseColor with the coating tint,
-           // but any torn / cracked area needs to reveal what's underneath
-           // (the slime body), so we snapshot it BEFORE the override.
-           vec3 slimeBaseColor = diffuseColor.rgb;
+           // Slime body colour that shows THROUGH crack / tear reveals
+           // is forced to pure WHITE whenever a crack-drawing coating
+           // is active. Reads as a "wet cream" interior no matter what
+           // colour the user picked for the outer coating — matches
+           // the request to keep the slime under coatings uniformly
+           // white. Uncoated slime still uses its own diffuse colour
+           // for the (unused) snapshot path.
+           vec3 slimeBaseColor = uDamageEnabled > 0.5
+             ? vec3(1.0)
+             : diffuseColor.rgb;
 
            // Wax, foil, and ice paint the ENTIRE ball in the coating
            // colour so the sphere reads as "red wax" / "gold foil" /
@@ -1450,7 +1520,7 @@ function installDamageShader(
              //       Layer 1 is always drawn so the base network
              //       remains fully connected; Layer 2 only ADDS
              //       lines on top.
-             if (uCoatingIsIce > 0.5 && vCrackLevel > 0.01) {
+             if (uCoatingIsIce > 0.5 && vCrackLevel > 0.5) {
                // Piece gap width — starts THIN on the very first press
                // (crackLevel ~1) so cracks read as hairline fractures,
                // then widens as repeated presses push crackLevel higher
@@ -1497,7 +1567,7 @@ function installDamageShader(
              // share foil's soft feathered edges.
              else if (
                uCoatingIsWax > 0.5 &&
-               (vDamage > 0.02 || vCrackLevel > 0.85)
+               vCrackLevel > 0.5
              ) {
                // Layer 1: primary tear network — always the same
                // voronoi pattern, so the wax PIECES stay the same
@@ -1519,8 +1589,12 @@ function installDamageShader(
                // (opposite-side bulges, silhouette vertices), and if
                // it triggered cracks the coating would tear everywhere
                // on the first press instead of just under the finger.
-               float damageVis = smoothstep(0.22, 0.42, vDamage);
-               float spreadVis = smoothstep(0.85, 1.15, vCrackLevel);
+               // Visibility saturates at the first tap (crackLevel 1)
+               // so cracks are drawn at FULL opacity from tap 1 —
+               // only the crack WIDTH scales with tap count for the
+               // "small at first, wider with more taps" progression.
+               float damageVis = smoothstep(0.05, 0.2, vDamage);
+               float spreadVis = smoothstep(0.5, 1.0, vCrackLevel);
                float visibility = max(damageVis, spreadVis);
 
                float damageWidth =
@@ -1602,28 +1676,33 @@ function installDamageShader(
              // exposing large patches of slime through the torn sheet.
              // Cracks have SOFT wispy edges rather than wax's hard
              // fragment boundaries.
-             else if (uCoatingIsFoil > 0.5 && vDamage > 0.02) {
+             else if (uCoatingIsFoil > 0.5 && vCrackLevel > 0.5) {
                vec2 v = damageVoronoi(vRest * 2.3);
 
-               // Same visibility thresholds as ice's crack gate so
-               // tears stay LOCAL to the press site (dropping these
-               // lower made every volume-preservation bulge across
-               // the whole ball flash tears — the original complaint).
+               // Visibility is LOCAL to the press site only — damage
+               // and crackLevel are both per-vertex signals that spike
+               // at pressed verts. vStretch was removed from this
+               // channel because press-machine physics bulges the
+               // equator whenever any spot is pressed, and if stretch
+               // triggered visibility the whole ball would flash tears
+               // on a single tap. Now a tap only rips the coating
+               // right where the finger landed.
                float visibility = max(
-                 smoothstep(0.12, 0.3, vDamage),
-                 smoothstep(0.05, 0.18, vStretch)
+                 smoothstep(0.05, 0.2, vDamage),
+                 smoothstep(0.5, 1.0, vCrackLevel)
                );
 
-               // Tear width — grows continuously with damage and
-               // stretch. Aggressive multipliers + high ceiling so
-               // sustained pressure gapes tears wide open, exposing
-               // big patches of slime. Per-cell variation makes some
-               // tears wider than others (organic ripping).
-               float damageWidth = smoothstep(0.18, 0.7, vDamage) * 0.36;
-               float stretchWidth = clamp(vStretch, 0.0, 0.4) * 1.7;
+               // Tear width — damage + crackLevel drive it. Stretch
+               // is DROPPED here too so bulged non-pressed regions
+               // don't get widened tears just from volume preservation.
+               // Pressed vertices still get a strong width because
+               // their vDamage is high.
+               float damageWidth = smoothstep(0.18, 0.7, vDamage) * 0.55;
+               float spreadWidth =
+                 smoothstep(0.5, 3.5, vCrackLevel) * 0.32;
                float perCell = 0.3 + v.y * 1.8;
                float crackWidth =
-                 min((damageWidth + stretchWidth) * perCell, 0.88);
+                 min((damageWidth + spreadWidth) * perCell, 0.88);
 
                // Soft 15% edge band — torn foil has wispy, feathered
                // edges, not the hard-edged perimeter ice fragments
@@ -1638,6 +1717,11 @@ function installDamageShader(
              }
            }
 
+           // No tap-count intensity multiplier — visibility stays
+           // at full opacity from the FIRST tap. Range/area growth
+           // is handled by the per-branch width formulas above,
+           // which start small at crackLevel 1 and widen with each
+           // additional tap (and with continuous long-press growth).
            // Cracks reveal the slime's own base colour (snapshotted
            // before the coating overrode diffuseColor). Ice and wax
            // cracks brighten a little toward a wet-cream tone so

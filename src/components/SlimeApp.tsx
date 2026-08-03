@@ -8,7 +8,6 @@ import { EmojiBeadsLayer } from '../slime/EmojiBeadsLayer'
 import { SprinklesLayer } from '../slime/SprinklesLayer'
 import {
   BEADS_DEFAULT,
-  COATING_COLORS,
   COLORS,
   EMOJI_BEADS_DEFAULT,
   SPRINKLE_COLORS,
@@ -131,10 +130,26 @@ export default function SlimeApp() {
     'idle' | 'requesting' | 'ready' | 'error'
   >('idle')
   const [cameraError, setCameraError] = useState<string | null>(null)
-  const [skeletonOn, setSkeletonOn] = useState(true)
+  // Hand tracking toggle — now gates the entire camera + MediaPipe
+  // pipeline, not just the skeleton overlay. When OFF: no camera stream,
+  // no `detect()` calls, no overlay. Touch/pointer input still works
+  // (that's the low-power interaction path). Persisted across sessions
+  // so a user who prefers touch-only doesn't have to re-toggle each
+  // launch. Default TRUE preserves the original out-of-box hand-
+  // interaction feel; users who want to save battery can turn it off.
+  const [skeletonOn, setSkeletonOn] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true
+    const saved = window.localStorage.getItem('wakbu-hand-tracking')
+    return saved === null ? true : saved === 'true'
+  })
   const skeletonOnRef = useRef(skeletonOn)
   useEffect(() => {
     skeletonOnRef.current = skeletonOn
+    try {
+      window.localStorage.setItem('wakbu-hand-tracking', String(skeletonOn))
+    } catch {
+      // Private-mode storage error — toggle still works for the session.
+    }
   }, [skeletonOn])
 
   // Scale state lives entirely in a ref — no UI reads it, and pinch / wheel
@@ -151,14 +166,14 @@ export default function SlimeApp() {
   // Slime colour is a MULTI-SELECT — picking one paints solid, picking two
   // or more paints a vertical gradient (colors[0] → colors[n-1] top-to-
   // bottom). Empty is treated as the default 'white' by the slime.
-  const [colors, setColors] = useState<ColorId[]>(['white'])
+  const [colors, setColors] = useState<ColorId[]>(['pearl'])
   const [material, setMaterial] = useState<MaterialId>('crystal')
   const [coating, setCoating] = useState<CoatingId>('none')
   // Wax / ice coating tint — multi-select array so 2+ colours paint a
   // top-to-bottom gradient across the coating (single-pick keeps the flat
   // tint). Draws from the general COLORS palette because those coatings
   // are ordinary pigmented surfaces (waxes, frozen shells).
-  const [coatingColors, setCoatingColors] = useState<ColorId[]>(['butter'])
+  const [coatingColors, setCoatingColors] = useState<ColorId[]>(['gold'])
   // Foil surface colour — same multi-select story but sourced from a
   // narrower COATING_COLORS palette of saturated metallic hues. Kept
   // separate from `coatingColors` so switching between wax and foil
@@ -180,6 +195,126 @@ export default function SlimeApp() {
   // the menu, menu itself opens on button click and closes on outside tap.
   const [menuOpen, setMenuOpen] = useState(false)
   const [guideOpen, setGuideOpen] = useState(false)
+  // Collection dropdown — bookmark button top-right toggles a small
+  // menu with "저장하기" and "컬렉션 보기" buttons.
+  const [collectionMenuOpen, setCollectionMenuOpen] = useState(false)
+  // Full-screen grid modal — opened from the browse view via
+  // "모두보기". Shows saved slimes as a 2-row × N-column preview grid.
+  const [collectionOpen, setCollectionOpen] = useState(false)
+  // Browse mode — while non-null, the app is rendering a saved slime
+  // from the collection and the user can swipe left/right to pick a
+  // different one. Slime press interaction is disabled during
+  // browse; use the top "닫기" button to return to normal editing.
+  const [browseIdx, setBrowseIdx] = useState<number | null>(null)
+  // Naming dialog — reused for both "save new slime" (mode 'save',
+  // pending state snapshot + thumb) and "rename existing" (mode
+  // 'rename', target id). Null while closed.
+  const [nameDialog, setNameDialog] = useState<
+    | {
+        mode: 'save'
+        pendingState: unknown
+        pendingThumb: string | undefined
+        input: string
+      }
+    | { mode: 'rename'; id: string; input: string }
+    | null
+  >(null)
+  const browseIdxRef = useRef(browseIdx)
+  useEffect(() => {
+    browseIdxRef.current = browseIdx
+  }, [browseIdx])
+  // Snapshot of the user's WIP slime taken the instant they entered
+  // browse mode. The "×" close button restores this so previewing a
+  // saved slime doesn't destroy in-progress work.
+  const preBrowseStateRef = useRef<unknown | null>(null)
+  // Preview-mode toggle inside browse view — off by default; when
+  // OFF, slime interactions are disabled and the whole overlay
+  // absorbs pointer input for horizontal swipe navigation. When
+  // ON, interactions (press / rotate / pinch) are enabled and
+  // swipe nav is disabled (single-finger drag rotates instead).
+  const [previewMode, setPreviewMode] = useState(false)
+  const previewModeRef = useRef(previewMode)
+  useEffect(() => {
+    previewModeRef.current = previewMode
+  }, [previewMode])
+  // Auto-spin timer — set to performance.now() + 600 on every
+  // browsed-index change. Render loop reads this and rotates the
+  // slime a full 360° over that 0.6 s window so the user sees each
+  // saved slime from every angle before it settles.
+  const autoSpinUntilRef = useRef(0)
+  // Carousel slide — set when the user swipes between saved slimes.
+  // Render loop applies mesh.position.x based on progress: current
+  // slime slides OUT in the swipe direction, state is swapped at
+  // the midpoint, then the new slime slides IN from the opposite
+  // side. Duration 400ms → feels connected without lingering.
+  const carouselRef = useRef<{
+    startTime: number
+    duration: number
+    /** +1 = slide out to the RIGHT (used when going back to prev),
+     *  -1 = slide out to the LEFT (used when going to next). */
+    direction: 1 | -1
+    /** Pending state apply. Called at midpoint (offscreen) so the
+     *  user never sees the state swap flash. */
+    swap: (() => void) | null
+  } | null>(null)
+  // "Reset needed" flag for browse mode. Flips true the first time
+  // the user presses the previewed slime (in preview mode), so a
+  // reset button can appear above the slime. Cleared when the user
+  // hits reset, switches saved item, or leaves preview mode.
+  const [browsePressed, setBrowsePressed] = useState(false)
+  const browsePressedRef = useRef(browsePressed)
+  useEffect(() => {
+    browsePressedRef.current = browsePressed
+  }, [browsePressed])
+  const [collection, setCollection] = useState<
+    {
+      id: string
+      name: string
+      createdAt: number
+      state: unknown
+      /** Base64 JPEG preview captured from the live canvas at save
+       *  time (data-URL). Missing on entries saved before the
+       *  thumbnail feature was added. */
+      thumb?: string
+    }[]
+  >(() => {
+    if (typeof window === 'undefined') return []
+    try {
+      const saved = window.localStorage.getItem('wakbu-collection')
+      if (!saved) return []
+      const parsed = JSON.parse(saved)
+      if (Array.isArray(parsed)) return parsed
+    } catch {
+      // Corrupted storage — start fresh.
+    }
+    return []
+  })
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        'wakbu-collection',
+        JSON.stringify(collection)
+      )
+    } catch {
+      // Private-mode storage error — collection still works for the session.
+    }
+  }, [collection])
+  // Emoji move mode — modal toggle. When ON, slime press is
+  // disabled and any tap/drag on the slime moves emojis instead.
+  // Off is the normal state (press works, emojis stay put).
+  const [emojiMoveOn, setEmojiMoveOn] = useState(false)
+  const emojiMoveOnRef = useRef(emojiMoveOn)
+  useEffect(() => {
+    emojiMoveOnRef.current = emojiMoveOn
+  }, [emojiMoveOn])
+  // Auto-exit emoji move mode when the emoji layer becomes empty
+  // (user removed all emojis). Prevents an orphan mode where the
+  // toggle button disappears but press stays disabled.
+  useEffect(() => {
+    const hasEmojis =
+      emojiBeads.emojis.length > 0 && emojiBeads.count > 0
+    if (!hasEmojis && emojiMoveOn) setEmojiMoveOn(false)
+  }, [emojiBeads, emojiMoveOn])
   const [toast, setToast] = useState<string | null>(null)
   // Light / dark theme — persisted across sessions in localStorage so a
   // returning user gets the same look they left with. Read once on mount
@@ -225,6 +360,11 @@ export default function SlimeApp() {
      *  light-mode UI. */
     setSceneBackground: (hex: number) => void
     reset: () => void
+    /** Snapshot the slime with a CANONICAL scale (1) and identity
+     *  rotation so every thumbnail in the collection reads at a
+     *  consistent size and orientation. The temporary transform is
+     *  reverted immediately, so the live view is unaffected. */
+    captureCanonicalThumbnail: () => string | undefined
   } | null>(null)
 
   useEffect(() => {
@@ -242,22 +382,19 @@ export default function SlimeApp() {
   // so switching wax→foil (or vice versa) immediately swaps the hex
   // pushed to the material.
   useEffect(() => {
-    // Resolve the active coating palette to a hex list. Foil reads from
-    // the metallic-only palette (COATING_COLORS); wax and ice read from
-    // the general slime palette (COLORS). Single-pick → flat tint; 2+
-    // picks → gradient (handled by slime.setCoatingColors).
-    const hexes =
-      coating === 'foil'
-        ? foilColors
-            .map((id) => COATING_COLORS.find((c) => c.id === id)?.hex)
-            .filter((h): h is number => typeof h === 'number')
-        : coatingColors
-            .map((id) => COLORS.find((c) => c.id === id)?.hex)
-            .filter((h): h is number => typeof h === 'number')
+    // Coating tint now MIRRORS the slime's own colour picks — no
+    // separate coating palette. Applying wax/foil/tube/ice keeps the
+    // colours the user chose for the slime body so the piece stays
+    // visually consistent (wax coating in the same tone as the
+    // slime, foil in the same tone, etc.). Single pick → flat tint,
+    // 2+ picks → gradient handled by slime.setCoatingColors.
+    const hexes = colors
+      .map((id) => COLORS.find((c) => c.id === id)?.hex)
+      .filter((h): h is number => typeof h === 'number')
     applyRef.current?.setCoatingColors(
-      hexes.length > 0 ? hexes : [coating === 'foil' ? 0xb5bbc4 : 0xffe89a]
+      hexes.length > 0 ? hexes : [0xfbf7f2]
     )
-  }, [coating, coatingColors, foilColors])
+  }, [coating, colors])
   useEffect(() => {
     applyRef.current?.setShape(shape)
   }, [shape])
@@ -283,9 +420,30 @@ export default function SlimeApp() {
       beads.combo !== 'none' && (beads.fill || beads.count > 0)
     const slimeCrystal = material === 'crystal'
     applyRef.current?.setEmojiGhost(slimeCrystal)
-    // Lift by (bead size + small margin) so the sprite centre sits above
-    // the bead outer surface at rest. Zero when there are no beads.
-    applyRef.current?.setEmojiBeadLift(beadsActive ? beads.size + 0.05 : 0)
+    // Bead-lift depends on WHERE the beads physically sit:
+    //   • No beads → 0 (emoji rests on slime surface).
+    //   • 속비즈 (chunk combo + 1 bead, placed at slime ORIGIN) → 0.
+    //     The bead is fully embedded inside the slime, not on the
+    //     surface, so pushing emojis outward by bead-size would
+    //     leave them floating in empty space above the surface.
+    //   • Compact fill (mini beads packed on the surface) → half-
+    //     size lift so emojis mix into the bead layer instead of
+    //     hovering distinctly above it.
+    //   • Regular chunk (multiple beads on surface) → full size +
+    //     small margin so emoji clears each bead's outer cap.
+    let beadLift = 0
+    if (beadsActive) {
+      const isCenteredSingleChunk =
+        beads.combo === 'chunk' && beads.count === 1
+      if (isCenteredSingleChunk) {
+        beadLift = 0
+      } else if (beads.combo === 'compact' || beads.fill) {
+        beadLift = beads.size * 0.6
+      } else {
+        beadLift = beads.size + 0.05
+      }
+    }
+    applyRef.current?.setEmojiBeadLift(beadLift)
   }, [material, beads])
 
   // Snap the entire customisation back to the entry state (white + crystal
@@ -293,10 +451,10 @@ export default function SlimeApp() {
   // Distinct from the plain 리셋 button, which only wipes the slime's
   // current dents/velocities without touching config.
   const resetToDefaults = () => {
-    setColors(['white'])
+    setColors(['pearl'])
     setMaterial('crystal')
     setCoating('none')
-    setCoatingColors(['butter'])
+    setCoatingColors(['gold'])
     setFoilColors(['silver'])
     setShape('sphere')
     setBeads(BEADS_DEFAULT)
@@ -309,18 +467,47 @@ export default function SlimeApp() {
   // recipient on the exact same slime the sender was playing with. JSON
   // + URL-safe base64 (btoa with +→- and /→_) is compact enough to fit in
   // a query param without a shortener while staying trivially decodable.
-  const encodeShareUrl = (): string => {
-    const state = {
-      c: colors,
-      m: material,
-      co: coating,
-      cc: coatingColors,
-      fc: foilColors,
-      sh: shape,
-      b: beads,
-      sp: sprinkles,
-      e: emojiBeads
-    }
+  // Snapshot every user-facing customisation into a JSON-safe object.
+  // Shared by the share-URL encoder AND the collection save path so
+  // both routes carry exactly the same fields with no drift risk.
+  const buildStateSnapshot = () => ({
+    c: colors,
+    m: material,
+    co: coating,
+    cc: coatingColors,
+    fc: foilColors,
+    sh: shape,
+    b: beads,
+    sp: sprinkles,
+    e: emojiBeads
+  })
+
+  // Apply a decoded snapshot to the live customisation. Missing /
+  // wrong-typed fields are silently skipped so partial or old-format
+  // snapshots don't break the app.
+  const applyStateSnapshot = (raw: unknown) => {
+    if (!raw || typeof raw !== 'object') return
+    const s = raw as Record<string, unknown>
+    if (Array.isArray(s.c) && s.c.length > 0) setColors(s.c as ColorId[])
+    if (typeof s.m === 'string') setMaterial(s.m as MaterialId)
+    if (typeof s.co === 'string') setCoating(s.co as CoatingId)
+    if (Array.isArray(s.cc) && s.cc.length > 0)
+      setCoatingColors(s.cc as ColorId[])
+    else if (typeof s.cc === 'string')
+      setCoatingColors([s.cc as ColorId])
+    if (Array.isArray(s.fc) && s.fc.length > 0)
+      setFoilColors(s.fc as CoatingColorId[])
+    else if (typeof s.fc === 'string')
+      setFoilColors([s.fc as CoatingColorId])
+    if (typeof s.sh === 'string') setShape(s.sh as ShapeId)
+    if (s.b && typeof s.b === 'object') setBeads(s.b as BeadsConfig)
+    if (s.sp && typeof s.sp === 'object')
+      setSprinkles(s.sp as SprinklesConfig)
+    if (s.e && typeof s.e === 'object')
+      setEmojiBeads(s.e as EmojiBeadsConfig)
+  }
+
+  const encodeShareUrlFromState = (state: unknown): string => {
     const json = JSON.stringify(state)
     const b64 = btoa(unescape(encodeURIComponent(json)))
       .replace(/\+/g, '-')
@@ -329,6 +516,160 @@ export default function SlimeApp() {
     const { origin, pathname } = window.location
     return `${origin}${pathname}?d=${b64}`
   }
+  const encodeShareUrl = (): string =>
+    encodeShareUrlFromState(buildStateSnapshot())
+
+  // Collection helpers — save current design under a user-provided
+  // name (asked via nameDialog), load a saved design back into live
+  // state, rename, remove one.
+  const beginSaveToCollection = () => {
+    // Capture the canonical thumbnail + state snapshot NOW so the
+    // preview matches what the user was looking at when they hit
+    // save, regardless of any tweaks made while the name dialog
+    // is open.
+    const pendingThumb = applyRef.current?.captureCanonicalThumbnail()
+    const pendingState = buildStateSnapshot()
+    setNameDialog({
+      mode: 'save',
+      pendingState,
+      pendingThumb,
+      input: `슬라임 ${collection.length + 1}`
+    })
+  }
+  const commitNameDialog = () => {
+    if (!nameDialog) return
+    const trimmed = nameDialog.input.trim()
+    if (nameDialog.mode === 'save') {
+      const name = trimmed || `슬라임 ${collection.length + 1}`
+      const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+      setCollection((prev) => [
+        ...prev,
+        {
+          id,
+          name,
+          createdAt: Date.now(),
+          state: nameDialog.pendingState,
+          thumb: nameDialog.pendingThumb
+        }
+      ])
+      setToast(`${name} 저장됨`)
+      window.setTimeout(() => setToast(null), 2000)
+    } else {
+      // Rename mode — no-op on empty input.
+      if (!trimmed) {
+        setNameDialog(null)
+        return
+      }
+      setCollection((prev) =>
+        prev.map((c) =>
+          c.id === nameDialog.id ? { ...c, name: trimmed } : c
+        )
+      )
+    }
+    setNameDialog(null)
+  }
+  const beginRename = (id: string) => {
+    const entry = collection.find((c) => c.id === id)
+    if (!entry) return
+    setNameDialog({ mode: 'rename', id, input: entry.name })
+  }
+  const loadFromCollection = (id: string) => {
+    const entry = collection.find((c) => c.id === id)
+    if (!entry) return
+    applyStateSnapshot(entry.state)
+    setCollectionOpen(false)
+    setBrowseIdx(null)
+    setToast(`${entry.name} 불러옴`)
+    window.setTimeout(() => setToast(null), 2000)
+  }
+  const deleteFromCollection = (id: string) => {
+    setCollection((prev) => prev.filter((c) => c.id !== id))
+  }
+
+  // Share a specific saved slime via Web Share API (falls back to
+  // clipboard copy). Used from the collection cards + browse view.
+  const shareCollectionItem = async (id: string) => {
+    const entry = collection.find((c) => c.id === id)
+    if (!entry) return
+    const url = encodeShareUrlFromState(entry.state)
+    const payload = {
+      title: '왁부 슬라임',
+      text: `${entry.name} 만들어봤어!`,
+      url
+    }
+    try {
+      if (typeof navigator !== 'undefined' && 'share' in navigator) {
+        await navigator.share(payload)
+        return
+      }
+    } catch {
+      // User dismissed — fall through to clipboard.
+    }
+    try {
+      await navigator.clipboard.writeText(url)
+      setToast('링크가 복사되었습니다')
+      window.setTimeout(() => setToast(null), 2000)
+    } catch {
+      setToast('공유 실패')
+      window.setTimeout(() => setToast(null), 2000)
+    }
+  }
+
+  // Enter browse mode — load the FIRST saved slime and let the user
+  // swipe horizontally through the rest.
+  const startBrowsing = () => {
+    const visible = collection.filter((c) => c.thumb)
+    if (visible.length === 0) {
+      setToast('저장된 슬라임이 없어요')
+      window.setTimeout(() => setToast(null), 2000)
+      return
+    }
+    // Snapshot the CURRENT work-in-progress state before loading a
+    // saved slime so the × close button can restore it later.
+    preBrowseStateRef.current = buildStateSnapshot()
+    setBrowseIdx(0)
+    applyStateSnapshot(visible[0].state)
+    setPreviewMode(false)
+    setBrowsePressed(false)
+    autoSpinUntilRef.current = performance.now() + 600
+    setCollectionMenuOpen(false)
+  }
+
+  // Swipe to a specific browsed item (clamped to range) and apply
+  // its saved state to the live view. Also fully resets the slime
+  // mesh (rotation / dents / scale) so navigating between saved
+  // items always shows each one in its canonical un-touched form.
+  const setBrowsedIndex = (nextIdx: number) => {
+    const visible = collection.filter((c) => c.thumb)
+    if (visible.length === 0) {
+      setBrowseIdx(null)
+      return
+    }
+    const clamped = Math.max(0, Math.min(visible.length - 1, nextIdx))
+    if (clamped === browseIdx) return
+    const currentIdx = browseIdx ?? clamped
+    // -1 direction = swipe LEFT (going to next / higher idx) → old
+    // slime slides off to the LEFT. +1 = opposite (prev).
+    const direction: 1 | -1 = clamped > currentIdx ? -1 : 1
+    // Any swipe / arrow nav automatically drops preview mode so the
+    // next slime opens in "just viewing" state.
+    setPreviewMode(false)
+    setBrowsePressed(false)
+    // Kick a carousel slide. The state swap happens at midpoint
+    // (offscreen), then auto-spin runs on the incoming slime.
+    carouselRef.current = {
+      startTime: performance.now(),
+      duration: 400,
+      direction,
+      swap: () => {
+        setBrowseIdx(clamped)
+        applyStateSnapshot(visible[clamped].state)
+        applyRef.current?.reset()
+        autoSpinUntilRef.current = performance.now() + 600
+      }
+    }
+  }
+
 
   const handleShare = async () => {
     const url = encodeShareUrl()
@@ -367,20 +708,7 @@ export default function SlimeApp() {
     try {
       const b64 = d.replace(/-/g, '+').replace(/_/g, '/')
       const json = decodeURIComponent(escape(atob(b64)))
-      const s = JSON.parse(json)
-      if (Array.isArray(s.c) && s.c.length > 0) setColors(s.c)
-      if (typeof s.m === 'string') setMaterial(s.m)
-      if (typeof s.co === 'string') setCoating(s.co)
-      // Backwards-compat: earlier share URLs stored coating colours as a
-      // single string. Accept both shapes so those links still load.
-      if (Array.isArray(s.cc) && s.cc.length > 0) setCoatingColors(s.cc)
-      else if (typeof s.cc === 'string') setCoatingColors([s.cc])
-      if (Array.isArray(s.fc) && s.fc.length > 0) setFoilColors(s.fc)
-      else if (typeof s.fc === 'string') setFoilColors([s.fc])
-      if (typeof s.sh === 'string') setShape(s.sh)
-      if (s.b && typeof s.b === 'object') setBeads(s.b)
-      if (s.sp && typeof s.sp === 'object') setSprinkles(s.sp)
-      if (s.e && typeof s.e === 'object') setEmojiBeads(s.e)
+      applyStateSnapshot(JSON.parse(json))
     } catch {
       // Ignore invalid share params — user still gets a working slime.
     }
@@ -479,8 +807,20 @@ export default function SlimeApp() {
     return () => ro.disconnect()
   }, [])
 
-  // Start camera on mount.
+  // Start camera on mount — gated on `skeletonOn`. When hand tracking
+  // is off the whole pipeline stays dormant: no getUserMedia call, no
+  // permission prompt, no NPU/CPU cost. Toggling on/off automatically
+  // reruns this effect thanks to the dep array, so cleanup safely
+  // stops the previous stream when the user disables tracking.
+  // Resolution capped at 480×360 @ 30fps — MediaPipe hand landmarker
+  // is designed for low-res input, and the video is never rendered
+  // to the user (only landmarks in normalized coords), so smaller
+  // frames just reduce ISP + palm-detector cost with no visual impact.
   useEffect(() => {
+    if (!skeletonOn) {
+      setCameraStatus('idle')
+      return
+    }
     let stream: MediaStream | null = null
     let cancelled = false
     ;(async () => {
@@ -489,8 +829,9 @@ export default function SlimeApp() {
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: 'user',
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
+            width: { ideal: 480 },
+            height: { ideal: 360 },
+            frameRate: { ideal: 30, max: 30 }
           },
           audio: false
         })
@@ -512,8 +853,10 @@ export default function SlimeApp() {
     return () => {
       cancelled = true
       stream?.getTracks().forEach((t) => t.stop())
+      const video = videoRef.current
+      if (video) video.srcObject = null
     }
-  }, [])
+  }, [skeletonOn])
 
   // Three.js scene + render loop.
   useEffect(() => {
@@ -525,7 +868,13 @@ export default function SlimeApp() {
       canvas,
       antialias: true,
       alpha: true,
-      powerPreference: 'high-performance'
+      powerPreference: 'high-performance',
+      // Keep the WebGL back buffer readable after render so the
+      // collection save can toDataURL() an accurate thumbnail on
+      // the same frame the user hits Save. Without this, mobile
+      // browsers clear the buffer post-swap and the readback is
+      // an empty transparent bitmap.
+      preserveDrawingBuffer: true
     })
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
     renderer.outputColorSpace = THREE.SRGBColorSpace
@@ -595,6 +944,11 @@ export default function SlimeApp() {
       gradientUniforms.texUniform,
       gradientUniforms.radiusUniform
     )
+    // Share the matte-material flag so bead wrap shells render the
+    // same darker-tone foam pattern the slime body does. Otherwise
+    // compact-fill layers on a matte slime hide the foam behind
+    // opaque wrap shells and the aerated look disappears.
+    beadsLayer.setMatteFoamUniform(slime.getMatteFoamUniform())
 
     // Two independent SprinklesLayers so paper + powder can render together.
     // Each takes a type-specific slice of SprinklesConfig. Ink is a shader
@@ -816,6 +1170,46 @@ export default function SlimeApp() {
           currentBeadInfo()
         )
         emojiBeadsLayer.reseat(slime.unitDirsArray)
+      },
+      captureCanonicalThumbnail: () => {
+        // Snapshot mesh transform, force it to canonical (a modest
+        // scale that keeps the slime clearly inside a portrait-
+        // phone canvas, identity rotation, origin), render one
+        // frame, capture, then restore so the live view isn't
+        // disturbed. Scale 1 was oversized on narrow canvases and
+        // cropped the slime — 0.65 leaves comfortable margin so
+        // the thumbnail always shows the whole shape.
+        const savedScale = slime.mesh.scale.clone()
+        const savedQuat = slime.mesh.quaternion.clone()
+        const savedPos = slime.mesh.position.clone()
+        slime.mesh.scale.setScalar(0.5)
+        slime.mesh.quaternion.identity()
+        slime.mesh.position.set(0, 0, 0)
+        try {
+          renderer.render(scene, camera)
+          const src = canvas
+          const SIZE = 200
+          const off = document.createElement('canvas')
+          off.width = SIZE
+          off.height = SIZE
+          const ctx = off.getContext('2d')
+          if (!ctx) return undefined
+          const side = Math.min(src.width, src.height)
+          const sx = (src.width - side) * 0.5
+          const sy = (src.height - side) * 0.5
+          ctx.drawImage(src, sx, sy, side, side, 0, 0, SIZE, SIZE)
+          return off.toDataURL('image/jpeg', 0.7)
+        } catch {
+          return undefined
+        } finally {
+          slime.mesh.scale.copy(savedScale)
+          slime.mesh.quaternion.copy(savedQuat)
+          slime.mesh.position.copy(savedPos)
+          // Render again with restored transform so the next frame
+          // draws from the correct state (the RAF loop would do this
+          // anyway but a manual render keeps the display seamless).
+          renderer.render(scene, camera)
+        }
       }
     }
     // Prime the wrap cache with the initial slime look so the very first
@@ -893,6 +1287,18 @@ export default function SlimeApp() {
 
     // Sound trigger state.
     let smoothedPressure = 0
+    // Minimum-hold window for tap sounds. After the smoothed pressure
+    // peaks (rising-edge tap), hold that peak level for a short window
+    // so a brief tap has enough sustained playback to be audible —
+    // otherwise the fade-in envelope + immediate release would cut a
+    // 100 ms tap off before Wak.mp3 / etc. finish attacking.
+    let soundHoldTimer = 0
+    let soundHoldLevel = 0
+    // Long enough for one full iteration of the wax / matte / metal /
+    // paper loops to be heard end-to-end on a single tap — otherwise
+    // a 100 ms tap only played a small slice and sounded nothing like
+    // the sustained long-press version.
+    const SOUND_HOLD_MS = 1100
 
     const ROT_SENS = 5.5 // radians per full-screen normalized delta
     const clamp = (v: number, a: number, b: number) =>
@@ -920,6 +1326,12 @@ export default function SlimeApp() {
         /** Accumulated pixel travel since pointerdown. Grows every
          *  move event; contributes to press strength alongside time. */
         dragDist: number
+        /** True if this pointer was part of a two-finger pinch gesture
+         *  at some point. Marked when a second pointer joins; stays
+         *  true until this pointer is released. Press physics skip
+         *  pointers with this flag so lifting one finger after a
+         *  pinch doesn't smoosh the slime with the remaining finger. */
+        pinchTouched: boolean
       }
     >()
     let pinchStartDist = 0
@@ -972,14 +1384,14 @@ export default function SlimeApp() {
       // dragging them would trigger sphere rotation / pinch anchor.
       const target = e.target as HTMLElement | null
       if (target?.closest('[data-hud]')) return
-      // Emoji click handling — take priority over normal gestures when
-      // the touch lands on an emoji sprite. Behaviour:
+      // Emoji click handling — only in emoji-move mode. Outside the
+      // mode, taps on the slime should always be presses, never
+      // accidentally selecting an emoji sprite. Behaviour when the
+      // mode is on:
       //  • clicking a NOT-selected emoji  → select it (glow ON) + start
       //    drag on this pointer,
       //  • clicking the ALREADY-selected  → deselect (glow OFF), no drag.
-      // Selection persists across pointerup, so a released drag leaves
-      // the glow lit; the user has to click the sprite again to clear it.
-      if (activePointers.size === 0) {
+      if (emojiMoveOnRef.current && activePointers.size === 0) {
         const spriteIdx = pickEmojiSprite(e)
         if (spriteIdx >= 0) {
           if (spriteIdx === selectedEmojiIndex) {
@@ -1000,7 +1412,8 @@ export default function SlimeApp() {
         prevX: e.clientX,
         prevY: e.clientY,
         startTime: performance.now(),
-        dragDist: 0
+        dragDist: 0,
+        pinchTouched: false
       })
       if (activePointers.size === 2) {
         // Entering two-finger mode — anchor both pinch scale and rotate
@@ -1010,6 +1423,22 @@ export default function SlimeApp() {
         const c = pinchCenter()
         twoFingerCenterX = c.x
         twoFingerCenterY = c.y
+        // Two-finger pinch overrides any in-flight single-finger press.
+        // Snap sound + smoothed pressure to 0 immediately so the user
+        // doesn't hear leftover Wak/foil while pinching, and zero the
+        // slime's per-vertex velocity so the current dent stops
+        // deepening (existing dent stays — kneading persists).
+        smoothedPressure = 0
+        soundHoldLevel = 0
+        soundHoldTimer = 0
+        slime.stopMotion()
+        // Mark BOTH active pointers as pinch-touched so lifting one
+        // finger (returning to size 1) doesn't let the remaining
+        // finger's press physics kick in — a "pinch release" should
+        // never turn into a slime press mid-gesture.
+        for (const p of activePointers.values()) {
+          p.pinchTouched = true
+        }
       }
     }
     const onPointerMove = (e: PointerEvent) => {
@@ -1208,7 +1637,59 @@ export default function SlimeApp() {
       overlayCtx.restore()
     }
 
+    // Background pause — while the app is hidden (screen off, home
+    // screen, another app on top) we stop scheduling RAFs, pause the
+    // video, and mute every looping sound so the phone doesn't burn
+    // battery / build heat with an invisible slime. Restarting is
+    // free: on visible again we reset lastTime (so dt doesn't spike
+    // from the pause interval) and re-arm the loop.
+    let paused = false
+    const soundMuteAll = () => {
+      const s = soundRef.current
+      if (!s) return
+      s.setSquishLevel(0)
+      s.setLoopingSampleLevel('matte', 0)
+      s.setLoopingSampleLevel('metal', 0)
+      s.setLoopingSampleLevel('wax', 0)
+      s.setLoopingSampleLevel('foil', 0)
+      s.setLoopingSampleLevel('paper', 0)
+      s.setLoopingSampleLevel('beads', 0)
+      s.setLoopingSampleLevel('emoji', 0)
+    }
+    const handleHide = () => {
+      if (paused) return
+      paused = true
+      cancelAnimationFrame(raf)
+      try {
+        video.pause()
+      } catch {
+        // already paused / no source
+      }
+      soundMuteAll()
+    }
+    const handleShow = () => {
+      if (!paused) return
+      paused = false
+      lastTime = performance.now()
+      // Only resume the camera if hand tracking is on; otherwise the
+      // stream itself is gone and there's nothing to restart.
+      if (skeletonOnRef.current) {
+        video.play().catch(() => {})
+      }
+      raf = requestAnimationFrame(loop)
+    }
+    const onVis = () => {
+      if (document.hidden) handleHide()
+      else handleShow()
+    }
+    document.addEventListener('visibilitychange', onVis)
+    // Android WebView sometimes skips visibilitychange when the app is
+    // sent to background — window blur/focus is a reliable fallback.
+    window.addEventListener('blur', handleHide)
+    window.addEventListener('focus', handleShow)
+
     const loop = () => {
+      if (paused) return
       raf = requestAnimationFrame(loop)
       const now = performance.now()
       const rawDt = (now - lastTime) / 1000
@@ -1222,7 +1703,11 @@ export default function SlimeApp() {
       const worldRadius =
         slime.params.radius * Math.max(slime.mesh.scale.x, 1e-6)
 
-      if (video.readyState >= 2 && video.videoWidth > 0) {
+      if (!skeletonOnRef.current) {
+        // Hand tracking off — make sure no stale hands linger and keep
+        // pressing the slime after the toggle flips.
+        if (latestHands.length > 0) latestHands = []
+      } else if (video.readyState >= 2 && video.videoWidth > 0) {
         // MediaPipe requires strictly increasing timestamps.
         const ts = Math.max(Math.floor(now), lastDetectMs + 1)
         lastDetectMs = ts
@@ -1334,7 +1819,27 @@ export default function SlimeApp() {
         const rh = rect.height || 1
         _restSphere.set(_center, worldRadius)
         const pt = activePointers.values().next().value
-        if (pt) {
+        // Pinch grace window — defer press physics for the first N ms
+        // after the initial pointer down. If a second finger arrives
+        // within the window it becomes a pinch (no press ever fires
+        // for the first finger). If the window expires with only one
+        // pointer still down, press physics kicks in normally.
+        // 70 ms catches most human two-finger placement gaps while
+        // keeping deliberate quick taps responsive.
+        const PINCH_GRACE_MS = 70
+        if (
+          pt &&
+          (pt.pinchTouched ||
+            performance.now() - pt.startTime < PINCH_GRACE_MS)
+        ) {
+          // Skip the tip-add path this frame:
+          //   • pinchTouched: this pointer was part of a pinch —
+          //     stays gated until the user fully releases (avoids
+          //     the "release one finger of the pinch, slime gets
+          //     pressed" bug).
+          //   • within grace window: waiting to see if a second
+          //     pointer arrives for a pinch.
+        } else if (pt) {
           const sx = (pt.x - rect.left) / rw
           const sy = (pt.y - rect.top) / rh
           // Non-mirrored NDC — unlike the video/hand path which mirrors
@@ -1360,40 +1865,76 @@ export default function SlimeApp() {
           if (inRange) {
             const pos = _worldPos.clone().applyMatrix4(inv)
             const dir = pos.clone().negate().normalize()
-            // Press strength ramps from a firm tap (1.5) up to a heavy
-            // long-press-and-drag knead (≤ 5.5). Time contributes up
-            // to +3.0 after ~0.6s of holding; drag contributes up to
-            // +2.0 per ~400px of accumulated travel. Together they cap
-            // at +4.0 so a sustained squeeze visibly deforms the slime.
+            // Press strength — cranked up for the press-machine
+            // physics. Base weight 6.0 makes a single tap already
+            // read as a firm two-plate squish; sustained hold ramps
+            // up to ~14 for heavy kneading. Widened radius (0.7) so
+            // the pancake flattening covers a satisfying area.
             const heldSec = (performance.now() - pt.startTime) / 1000
-            const timeBoost = Math.min(3.0, heldSec / 0.2)
-            const dragBoost = Math.min(2.0, pt.dragDist / 200)
-            const weight = 1.5 + Math.min(4.0, timeBoost + dragBoost)
-            localTips.push({ pos, dir, weight, radius: 0.32 })
+            const timeBoost = Math.min(5.0, heldSec / 0.15)
+            const dragBoost = Math.min(3.0, pt.dragDist / 200)
+            const weight = 6.0 + Math.min(8.0, timeBoost + dragBoost)
+            localTips.push({ pos, dir, weight, radius: 0.7 })
           }
         }
       }
 
-      // Coated chunk beads: SLIME body gets pressed from both sides
-      // (front tip + its antipode through the origin) so the slime
-      // visually pinches around the bead. Beads themselves see ONLY
-      // the original front tips — the antipode press is a slime-only
-      // effect. Otherwise a single tap would crack both the pressed
-      // bead AND its far-side counterpart, which reads as "all beads
-      // crack at once" rather than a targeted single-bead press.
-      const symmetricSlime =
-        beadCoatingRef.current !== 'none' && beadsActiveRef.current
-      const slimeTips = symmetricSlime
-        ? [
-            ...localTips,
-            ...localTips.map((t) => ({
-              pos: t.pos.clone().multiplyScalar(-1),
-              dir: t.dir.clone().multiplyScalar(-1),
-              weight: t.weight,
-              radius: t.radius
-            }))
-          ]
-        : localTips
+      // Screen-as-wall press physics — a tip pressing STRAIGHT INTO
+      // Suppress ALL press tips (hand + pointer) when:
+      //   • emoji move mode is on — tapping/dragging the slime is
+      //     reserved for repositioning emojis, not squishing.
+      //   • two or more pointers are down — a pinch gesture is in
+      //     progress for zoom, and any lingering press activity from
+      //     the first-finger frames should NOT deform the slime.
+      //   • collection browse mode is active AND preview-mode is
+      //     OFF — the whole screen is used for swipe navigation
+      //     between saved slimes, so no press physics runs. Toggling
+      //     preview-mode ON re-enables all interactions.
+      if (
+        emojiMoveOnRef.current ||
+        activePointers.size >= 2 ||
+        (browseIdxRef.current !== null && !previewModeRef.current)
+      ) {
+        localTips.length = 0
+      }
+      // Screen-as-wall press physics — a tip pressing STRAIGHT INTO
+      // the screen (aimed at the camera-facing pole of the slime) gets
+      // a matching antipode tip so the slime pancakes between the
+      // finger and the "wall" behind it. Tips grazing the SILHOUETTE
+      // edge (tangent to the camera) get no antipode — they just poke
+      // one side like ordinary pinch input. The blend is smooth via
+      // dot(tipOutward, cameraDir): 1 = dead centre facing camera → full
+      // symmetric press, 0 = at the equator → no antipode.
+      // Beads themselves still see only the original tips so their
+      // damage/crack routing isn't double-hit by the phantom antipode.
+      _closest.copy(camera.position).applyMatrix4(inv)
+      const camDist = _closest.length() || 1
+      const camDirLocalX = _closest.x / camDist
+      const camDirLocalY = _closest.y / camDist
+      const camDirLocalZ = _closest.z / camDist
+      const slimeTips: WeightedTip[] = []
+      for (const t of localTips) {
+        slimeTips.push(t)
+        const tipLen = t.pos.length() || 1
+        const tipDot =
+          (t.pos.x * camDirLocalX +
+            t.pos.y * camDirLocalY +
+            t.pos.z * camDirLocalZ) /
+          tipLen
+        // Smoothly ramp antipode weight: below 0.35 dot (past ~70°
+        // from front) no antipode; above 0.8 (within ~37° of front)
+        // full symmetric press.
+        const symStrength = Math.max(0, Math.min(1, (tipDot - 0.35) / 0.45))
+        if (symStrength > 0.02) {
+          slimeTips.push({
+            pos: t.pos.clone().multiplyScalar(-1),
+            dir: t.dir.clone().multiplyScalar(-1),
+            weight: t.weight * symStrength,
+            radius: t.radius
+          })
+        }
+      }
+      const symmetricSlime = slimeTips.length > localTips.length
       slime.update(slimeTips, dt)
       // Camera position transformed into slime-local frame — BeadsLayer
       // uses this to orient squished coated beads so their flat face
@@ -1423,13 +1964,49 @@ export default function SlimeApp() {
       // Sound: continuous squish tied to how much force is currently being
       // applied, plus a crack whenever damage crosses the next fracture step
       // (only under wax coating — other coatings don't render damage).
+      // Browse-mode "reset needed" detection — first frame of real
+      // pressure while previewing flips the flag so the top-centre
+      // reset button appears. Runs before the sound block so both
+      // paths see the same pressure signal.
+      if (
+        browseIdxRef.current !== null &&
+        !browsePressedRef.current &&
+        slime.pressureThisFrame > 3
+      ) {
+        browsePressedRef.current = true
+        setBrowsePressed(true)
+      }
+
       const sound = soundRef.current
       if (sound) {
         const rawPressure = slime.pressureThisFrame
         // Normalize very roughly; pushStrength * ~6 tips ~= 84 at max hard press.
         const target = Math.min(1, rawPressure / 55)
-        // Ease so it doesn't stutter as tips flicker on/off in tracking.
-        smoothedPressure += (target - smoothedPressure) * 0.25
+        // Rising-edge snap — on the very frame a press starts, jump
+        // smoothedPressure straight to the target so the FIRST tap
+        // produces immediate audible sound instead of easing in
+        // silently over several frames. Ongoing / trailing press
+        // still eases so tips flickering on/off don't stutter.
+        if (smoothedPressure < 0.05 && target > 0.05) {
+          smoothedPressure = target
+        } else {
+          smoothedPressure += (target - smoothedPressure) * 0.25
+        }
+        // Minimum sustain hold — a brief tap that releases immediately
+        // would otherwise decay to silence before Wak.mp3 / other loop
+        // samples finish their attack. Latch the recent peak level
+        // for SOUND_HOLD_MS after any activity so tap sounds have
+        // enough dwell time to be clearly audible.
+        if (smoothedPressure > soundHoldLevel * 0.98) {
+          soundHoldLevel = smoothedPressure
+          soundHoldTimer = SOUND_HOLD_MS
+        } else if (soundHoldTimer > 0) {
+          soundHoldTimer -= dt * 1000
+          if (soundHoldTimer < 0) soundHoldTimer = 0
+        } else {
+          soundHoldLevel = smoothedPressure
+        }
+        const soundLevel = Math.max(smoothedPressure, soundHoldLevel)
         // Matte and metal materials each replace the procedural squish
         // samples with their own looped sample (Sprinkle.mp3 for matte,
         // Popp.mp3 for metal). Both mute setSquishLevel so the default
@@ -1437,14 +2014,14 @@ export default function SlimeApp() {
         const currentMaterial = materialRef.current
         const isMatte = currentMaterial === 'matte'
         const isMetal = currentMaterial === 'metal'
-        sound.setSquishLevel(isMatte || isMetal ? 0 : smoothedPressure)
+        sound.setSquishLevel(isMatte || isMetal ? 0 : soundLevel)
         sound.setLoopingSampleLevel(
           'matte',
-          isMatte ? smoothedPressure : 0
+          isMatte ? soundLevel : 0
         )
         sound.setLoopingSampleLevel(
           'metal',
-          isMetal ? smoothedPressure : 0
+          isMetal ? soundLevel : 0
         )
 
         // Wax and foil (+ tube reusing foil) are CONTINUOUS ambient
@@ -1465,17 +2042,17 @@ export default function SlimeApp() {
         const beadCoatingId = beadCoatingRef.current
         const slimeCracks = slime.damageRenderingEnabled
         const slimeWaxLevel =
-          slimeCracks && coatingId === 'wax' ? smoothedPressure : 0
+          slimeCracks && coatingId === 'wax' ? soundLevel : 0
         const slimeFoilLevel =
           slimeCracks && (coatingId === 'foil' || coatingId === 'tube')
-            ? smoothedPressure
+            ? soundLevel
             : 0
         const slimeIsIce = slimeCracks && coatingId === 'ice'
         const beadWaxLevel =
-          beadCoatingId === 'wax' ? smoothedPressure : 0
+          beadCoatingId === 'wax' ? soundLevel : 0
         const beadFoilLevel =
           beadCoatingId === 'foil' || beadCoatingId === 'tube'
-            ? smoothedPressure
+            ? soundLevel
             : 0
         const beadIsIce = beadCoatingId === 'ice'
 
@@ -1505,15 +2082,15 @@ export default function SlimeApp() {
         // make a continuous recording sound like "치익 치익 치익".
         sound.setLoopingSampleLevel(
           'paper',
-          paperActiveRef.current ? smoothedPressure : 0
+          paperActiveRef.current ? soundLevel : 0
         )
         sound.setLoopingSampleLevel(
           'beads',
-          beadsActiveRef.current ? smoothedPressure : 0
+          beadsActiveRef.current ? soundLevel : 0
         )
         sound.setLoopingSampleLevel(
           'emoji',
-          emojiActiveRef.current ? smoothedPressure : 0
+          emojiActiveRef.current ? soundLevel : 0
         )
       }
 
@@ -1537,6 +2114,22 @@ export default function SlimeApp() {
       }
       rotVelY *= 0.88
       rotVelX *= 0.88
+
+      // Browse-mode auto-spin — every time the user switches to a
+      // different saved slime, spin one full turn around world-Y
+      // over 1 s so they see the piece from every angle before it
+      // settles. Kicked by autoSpinUntilRef.
+      const nowMs = performance.now()
+      if (autoSpinUntilRef.current > nowMs) {
+        const remaining = autoSpinUntilRef.current - nowMs
+        const spinSpeed = Math.PI * 2 // radians per second (full turn / 1s)
+        const spinDt = Math.min(dt, remaining / 1000)
+        const qSpin = new THREE.Quaternion().setFromAxisAngle(
+          new THREE.Vector3(0, 1, 0),
+          spinSpeed * spinDt
+        )
+        slime.mesh.quaternion.premultiply(qSpin)
+      }
 
       // Smoothly ease toward the target scale (slider or pinch → sizeRef).
       currentScale += (sizeRef.current - currentScale) * 0.18
@@ -1566,7 +2159,59 @@ export default function SlimeApp() {
       currentPanelShiftY += (targetShiftY - currentPanelShiftY) * 0.15
       currentPanelScale += (targetPanelScale - currentPanelScale) * 0.15
       slime.mesh.position.y = currentPanelShiftY
-      slime.mesh.scale.setScalar(currentScale * currentPanelScale)
+      // Browse mode gets a modest extra scale boost so the previewed
+      // slime reads slightly larger — the customization panel is
+      // hidden, so the extra room can be filled by the slime itself.
+      // During auto-spin, an additional "shrink" factor eases from a
+      // larger start down to the browse baseline over the spin
+      // window so each transition zooms out while spinning.
+      const inBrowse = browseIdxRef.current !== null
+      const browseScale = inBrowse ? 1.2 : 1
+      let spinShrink = 1
+      if (inBrowse && autoSpinUntilRef.current > nowMs) {
+        const t = (autoSpinUntilRef.current - nowMs) / 600
+        spinShrink = 1 + 0.35 * Math.max(0, Math.min(1, t))
+      }
+      slime.mesh.scale.setScalar(
+        currentScale * currentPanelScale * browseScale * spinShrink
+      )
+
+      // Carousel slide — offset mesh.position.x during the browse
+      // swipe transition. Old slime slides OUT in direction, midway
+      // through we swap state (offscreen), new slime slides IN from
+      // the opposite side back to centre.
+      const carousel = carouselRef.current
+      if (carousel) {
+        const elapsed = nowMs - carousel.startTime
+        const t = Math.min(1, elapsed / carousel.duration)
+        // World-Y-visible width at Z=0 = 2·CAMERA_Z·tan(fov/2).
+        // Use 1.4× the slime radius (radius ~ 1 in local × mesh
+        // scale) so the slime fully leaves the visible viewport.
+        const worldSideOffset =
+          Math.max(2.4, slime.mesh.scale.x * 2.6) * (t < 0.5 ? 1 : 1)
+        if (t < 0.5) {
+          // Slide OUT: 0 → direction * offset (eased-in).
+          const p = t / 0.5
+          const eased = p * p
+          slime.mesh.position.x = carousel.direction * worldSideOffset * eased
+        } else {
+          // Swap at midpoint (once), then slide IN from opposite side.
+          if (carousel.swap) {
+            carousel.swap()
+            carousel.swap = null
+          }
+          const p = (t - 0.5) / 0.5
+          const eased = 1 - (1 - p) * (1 - p)
+          slime.mesh.position.x =
+            -carousel.direction * worldSideOffset * (1 - eased)
+        }
+        if (t >= 1) {
+          slime.mesh.position.x = 0
+          carouselRef.current = null
+        }
+      } else {
+        slime.mesh.position.x = 0
+      }
 
       renderer.render(scene, camera)
       drawSkeleton()
@@ -1575,6 +2220,9 @@ export default function SlimeApp() {
 
     return () => {
       cancelAnimationFrame(raf)
+      document.removeEventListener('visibilitychange', onVis)
+      window.removeEventListener('blur', handleHide)
+      window.removeEventListener('focus', handleShow)
       ro.disconnect()
       container?.removeEventListener('pointerdown', onPointerDown)
       container?.removeEventListener('pointermove', onPointerMove)
@@ -1594,9 +2242,16 @@ export default function SlimeApp() {
     }
   }, [detect])
 
-  const busy = cameraStatus !== 'ready' || handStatus !== 'ready'
-  const busyLabel =
-    cameraStatus === 'requesting'
+  // Hand tracking off ⇒ camera/model state is irrelevant, the app is
+  // ready for touch-only interaction. Without this gate, toggling off
+  // flips cameraStatus 'ready' → 'idle' which would flash the loading
+  // overlay ("준비 중…") every time the user disables hand detection.
+  const busy = skeletonOn
+    ? cameraStatus !== 'ready' || handStatus !== 'ready'
+    : false
+  const busyLabel = !skeletonOn
+    ? ''
+    : cameraStatus === 'requesting'
       ? '카메라 권한 요청 중…'
       : handStatus === 'loading'
         ? '손 인식 모델 로딩 중…'
@@ -1618,7 +2273,88 @@ export default function SlimeApp() {
       <canvas ref={canvasRef} className={styles.canvas} />
       <canvas ref={overlayRef} className={styles.overlayCanvas} />
 
-      <div className={styles.topBar} data-hud>
+      <div
+        className={styles.topBar}
+        data-hud
+        style={browseIdx !== null ? { display: 'none' } : undefined}
+      >
+        {emojiBeads.emojis.length > 0 && emojiBeads.count > 0 && (
+          <button
+            type="button"
+            className={styles.iconButton}
+            data-active={emojiMoveOn}
+            onClick={() => setEmojiMoveOn((v) => !v)}
+            aria-label="이모지 위치 변경"
+            aria-pressed={emojiMoveOn}
+          >
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M5 9l-3 3 3 3" />
+              <path d="M9 5l3 -3 3 3" />
+              <path d="M15 19l-3 3 -3 -3" />
+              <path d="M19 9l3 3 -3 3" />
+              <line x1="2" y1="12" x2="22" y2="12" />
+              <line x1="12" y1="2" x2="12" y2="22" />
+            </svg>
+          </button>
+        )}
+        <div className={styles.collectionMenuWrap}>
+          <button
+            type="button"
+            className={styles.iconButton}
+            onClick={() => setCollectionMenuOpen((v) => !v)}
+            aria-label="컬렉션"
+            aria-expanded={collectionMenuOpen}
+          >
+            <svg
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+            </svg>
+          </button>
+          {collectionMenuOpen && (
+            <>
+              <div
+                className={styles.collectionMenuBackdrop}
+                onClick={() => setCollectionMenuOpen(false)}
+              />
+              <div className={styles.collectionMenu} data-hud>
+                <button
+                  type="button"
+                  className={styles.collectionMenuBtn}
+                  onClick={() => {
+                    beginSaveToCollection()
+                    setCollectionMenuOpen(false)
+                  }}
+                >
+                  저장하기
+                </button>
+                <button
+                  type="button"
+                  className={styles.collectionMenuBtn}
+                  onClick={startBrowsing}
+                >
+                  컬렉션 보기
+                </button>
+              </div>
+            </>
+          )}
+        </div>
         <button
           type="button"
           className={styles.iconButton}
@@ -1810,15 +2546,406 @@ export default function SlimeApp() {
         </div>
       )}
 
+      {browseIdx !== null && (() => {
+        const visible = collection.filter((c) => c.thumb)
+        if (visible.length === 0) return null
+        const idx = Math.max(0, Math.min(visible.length - 1, browseIdx))
+        const current = visible[idx]
+        return (
+          // Preview mode OFF ⇒ overlay eats touches for swipe-nav.
+          // Preview mode ON ⇒ overlay lets touches through so the
+          // slime can be pressed / rotated / pinched normally
+          // (only chrome buttons keep pointer-events on).
+          <div
+            className={
+              previewMode
+                ? `${styles.browseOverlay} ${styles.browseOverlayPreview}`
+                : styles.browseOverlay
+            }
+            data-hud
+            onPointerDown={
+              previewMode
+                ? undefined
+                : (e) => {
+                    ;(e.currentTarget as HTMLElement).dataset.swipeStartX =
+                      String(e.clientX)
+                  }
+            }
+            onPointerUp={
+              previewMode
+                ? undefined
+                : (e) => {
+                    const el = e.currentTarget as HTMLElement
+                    const startStr = el.dataset.swipeStartX
+                    delete el.dataset.swipeStartX
+                    if (!startStr) return
+                    const dx = e.clientX - parseFloat(startStr)
+                    if (Math.abs(dx) < 40) return
+                    if (dx < 0) setBrowsedIndex(idx + 1)
+                    else setBrowsedIndex(idx - 1)
+                  }
+            }
+            onPointerCancel={(e) => {
+              delete (e.currentTarget as HTMLElement).dataset.swipeStartX
+            }}
+          >
+            {/* Top-LEFT: share (reuses the app-wide handleShare on
+                the currently-loaded browsed slime) + delete icon. */}
+            <div className={styles.browseTopLeftBar}>
+              <button
+                type="button"
+                className={styles.iconButton}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  void handleShare()
+                }}
+                aria-label={`${current.name} 공유`}
+              >
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7" />
+                  <polyline points="16 6 12 2 8 6" />
+                  <line x1="12" y1="2" x2="12" y2="15" />
+                </svg>
+              </button>
+              <button
+                type="button"
+                className={styles.iconButton}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  const nextVisible = collection
+                    .filter((c) => c.thumb && c.id !== current.id)
+                  deleteFromCollection(current.id)
+                  if (nextVisible.length === 0) {
+                    setBrowseIdx(null)
+                  } else {
+                    setBrowsedIndex(Math.min(idx, nextVisible.length - 1))
+                  }
+                }}
+                aria-label={`${current.name} 삭제`}
+              >
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <polyline points="3 6 5 6 21 6" />
+                  <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                  <path d="M10 11v6M14 11v6" />
+                  <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+                </svg>
+              </button>
+            </div>
+            {/* Top-RIGHT: 모두보기 button (grid view). */}
+            <div className={styles.browseTopBar}>
+              <button
+                type="button"
+                className={styles.browseAllBtn}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setCollectionOpen(true)
+                }}
+              >
+                모두보기
+              </button>
+            </div>
+            {/* Name (renameable) + 프리뷰 (+ 리셋 while pressed)
+                stacked centrally BELOW the slime. Reset sits to
+                the right of the preview toggle, only visible after
+                the user has actually pressed the previewed slime. */}
+            <div className={styles.browseFooter}>
+              <button
+                type="button"
+                className={styles.browseTitle}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  beginRename(current.id)
+                }}
+                aria-label={`${current.name} 이름 수정`}
+              >
+                {current.name} · {idx + 1}/{visible.length}
+              </button>
+              <div className={styles.browseFooterActions}>
+                <button
+                  type="button"
+                  className={styles.browseActionBtn}
+                  data-preview-active={previewMode}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    setPreviewMode((v) => {
+                      if (v) setBrowsePressed(false)
+                      return !v
+                    })
+                  }}
+                  aria-pressed={previewMode}
+                >
+                  프리뷰
+                </button>
+                {previewMode && browsePressed && (
+                  <button
+                    type="button"
+                    className={styles.browseActionBtn}
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      applyStateSnapshot(current.state)
+                      applyRef.current?.reset()
+                      setBrowsePressed(false)
+                    }}
+                  >
+                    ↻ 리셋
+                  </button>
+                )}
+              </div>
+            </div>
+            {/* Bottom-LEFT check icon — commits the browsed slime
+                as the active editing state and leaves browse. */}
+            <button
+              type="button"
+              className={styles.browseUseBtn}
+              onClick={(e) => {
+                e.stopPropagation()
+                loadFromCollection(current.id)
+              }}
+              aria-label={`${current.name} 사용하기`}
+            >
+              <svg
+                width="24"
+                height="24"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="3"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+            </button>
+            {/* Bottom-right × — exit browse and RESTORE the state
+                the user had before opening the collection. */}
+            <button
+              type="button"
+              className={styles.browseCloseIconBtn}
+              onClick={(e) => {
+                e.stopPropagation()
+                if (preBrowseStateRef.current) {
+                  applyStateSnapshot(preBrowseStateRef.current)
+                }
+                applyRef.current?.reset()
+                setBrowseIdx(null)
+              }}
+              aria-label="닫기"
+            >
+              ×
+            </button>
+          </div>
+        )
+      })()}
+
+      {collectionOpen && (
+        <div
+          className={styles.modalBackdrop}
+          onClick={() => setCollectionOpen(false)}
+        >
+          <div
+            className={styles.modal}
+            data-hud
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className={styles.modalTitle}>컬렉션</div>
+            {(() => {
+              // Only entries with a captured thumbnail render — legacy
+              // saves made before the thumbnail feature (no `thumb`
+              // field) would otherwise show as a blank grey card with
+              // just the name, which the user flagged as noise.
+              const visibleItems = collection.filter((c) => c.thumb)
+              if (visibleItems.length === 0) {
+                return (
+                  <p className={styles.collectionEmpty}>
+                    저장된 슬라임이 아직 없어요
+                  </p>
+                )
+              }
+              const colCount = Math.ceil(visibleItems.length / 2)
+              return (
+                <div className={styles.collectionGridWrap}>
+                  <div
+                    className={styles.collectionGrid}
+                    style={{
+                      // Explicit column count with row-first flow so
+                      // items fill LEFT → RIGHT across the top row
+                      // first, then wrap into the bottom row
+                      // (top-left, top-right, bottom-left, bottom-right).
+                      gridTemplateColumns: `repeat(${colCount}, 133px)`
+                    }}
+                  >
+                    {visibleItems.map((item) => (
+                      <div key={item.id} className={styles.collectionCard}>
+                        <div
+                          className={styles.collectionCardBody}
+                          role="button"
+                          tabIndex={0}
+                          onClick={() => loadFromCollection(item.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              loadFromCollection(item.id)
+                            }
+                          }}
+                          aria-label={`${item.name} 불러오기`}
+                        >
+                          <img
+                            src={item.thumb}
+                            alt={item.name}
+                            className={styles.collectionThumb}
+                            draggable={false}
+                          />
+                          <button
+                            type="button"
+                            className={styles.collectionShareBtn}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              shareCollectionItem(item.id)
+                            }}
+                            aria-label={`${item.name} 공유`}
+                          >
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.5"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            >
+                              <path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7" />
+                              <polyline points="16 6 12 2 8 6" />
+                              <line x1="12" y1="2" x2="12" y2="15" />
+                            </svg>
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.collectionDeleteBtn}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              deleteFromCollection(item.id)
+                            }}
+                            aria-label={`${item.name} 삭제`}
+                          >
+                            ×
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          className={styles.collectionNameLabel}
+                          onClick={() => beginRename(item.id)}
+                          aria-label={`${item.name} 이름 수정`}
+                        >
+                          {item.name}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )
+            })()}
+            <button
+              type="button"
+              className={styles.modalClose}
+              onClick={() => setCollectionOpen(false)}
+            >
+              닫기
+            </button>
+          </div>
+        </div>
+      )}
+
+      {nameDialog && (
+        <div
+          className={styles.modalBackdrop}
+          onClick={() => setNameDialog(null)}
+        >
+          <div
+            className={styles.modal}
+            data-hud
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className={styles.modalTitle}>
+              {nameDialog.mode === 'save' ? '슬라임 이름' : '이름 수정'}
+            </div>
+            <input
+              type="text"
+              value={nameDialog.input}
+              autoFocus
+              onChange={(e) =>
+                setNameDialog(
+                  nameDialog
+                    ? { ...nameDialog, input: e.currentTarget.value }
+                    : null
+                )
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault()
+                  commitNameDialog()
+                } else if (e.key === 'Escape') {
+                  e.preventDefault()
+                  setNameDialog(null)
+                }
+              }}
+              className={styles.nameDialogInput}
+              maxLength={30}
+              placeholder="슬라임 이름"
+            />
+            <div className={styles.nameDialogActions}>
+              <button
+                type="button"
+                className={styles.modalClose}
+                onClick={() => setNameDialog(null)}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                className={styles.nameDialogSaveBtn}
+                onClick={commitNameDialog}
+              >
+                저장
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {toast && <div className={styles.toast}>{toast}</div>}
 
-      <div ref={controlsRef} className={styles.controls} data-hud>
+      <div
+        ref={controlsRef}
+        className={styles.controls}
+        data-hud
+        // Hide the customization panel + bottom toolbar entirely
+        // while browsing a saved collection — the user is picking a
+        // slime, not editing.
+        style={browseIdx !== null ? { display: 'none' } : undefined}
+      >
         <CustomizePanel
           colors={colors}
           material={material}
           coating={coating}
-          coatingColors={coatingColors}
-          foilColors={foilColors}
           shape={shape}
           beads={beads}
           sprinkles={sprinkles}
@@ -1826,8 +2953,6 @@ export default function SlimeApp() {
           onColors={setColors}
           onMaterial={setMaterial}
           onCoating={setCoating}
-          onCoatingColors={setCoatingColors}
-          onFoilColors={setFoilColors}
           onShape={setShape}
           onBeads={setBeads}
           onSprinkles={setSprinkles}
@@ -1840,10 +2965,10 @@ export default function SlimeApp() {
             className={styles.toggle}
             data-active={skeletonOn}
             onClick={() => setSkeletonOn((v) => !v)}
-            aria-label="손 인식 표시 토글"
+            aria-label="손 감지 토글"
             aria-pressed={skeletonOn}
           >
-            {skeletonOn ? '손 표시' : '손 숨김'}
+            {skeletonOn ? '손 감지 켬' : '손 감지 끔'}
           </button>
           <button
             type="button"

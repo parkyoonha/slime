@@ -48,14 +48,13 @@ const FONT_STACK =
 const GHOST_OPACITY = 0.4
 const GHOST_RENDER_ORDER = 0
 const MAIN_RENDER_ORDER = 100
-const GLOW_RENDER_ORDER = -10
 
 /** How aggressively vertex compression sinks the emoji. Multiplier applied
  *  to (restMagnitude − currentMagnitude, minus a small dead zone). Kept
  *  low so a light tap barely nudges the emoji and only a sustained press
  *  drags it into the bead layer — earlier tuning at 3.0 buried emojis on
  *  a single tap, which the user flagged as too fast. */
-const COMPRESSION_SINK_GAIN = 0.45
+const COMPRESSION_SINK_GAIN = 0.22
 /** Compression below this level doesn't sink the emoji at all. Filters
  *  out physics jitter and light contact so idle tracking noise can't drag
  *  the emoji down. */
@@ -100,11 +99,13 @@ export class EmojiBeadsLayer {
   private vertexIndices: number[] = []
   private materials = new Map<string, EmojiMatPair>()
   private config: EmojiBeadsConfig = { emojis: [], size: 0.15, count: 0 }
-  /** Blue soft-glow sprite rendered BEHIND the currently-selected emoji
-   *  so users get visual feedback that the item is now grabbed and can
-   *  be dragged. -1 = nothing selected, glow hidden. */
-  private selectedIndex = -1
-  private glowSprite: THREE.Sprite | null = null
+  /** Index of the currently-picked emoji (or -1). Kept as internal
+   *  state for the drag-anchor lookup even though the previous
+   *  blue-glow halo has been removed. */
+  private _selectedIndex = -1
+  get selectedIndex(): number {
+    return this._selectedIndex
+  }
   /** Ghost pass visibility — see class-level comment for what this does. */
   private ghostVisible = false
   /** Extra outward lift beyond the base size × 0.2, in world units. Set by
@@ -174,6 +175,12 @@ export class EmojiBeadsLayer {
   }
 
   setConfig(config: EmojiBeadsConfig, unitDirs: Float32Array) {
+    // Snapshot the previous per-sprite state BEFORE clearing so we can
+    // preserve moved emojis across a rebuild (e.g. adding a new emoji
+    // used to snap every existing sprite back to its default front-
+    // hemisphere anchor, losing the user's drags).
+    const prevIndices = this.vertexIndices.slice()
+
     this.config = { ...config, emojis: [...config.emojis] }
 
     for (const sprite of this.sprites) this.group.remove(sprite)
@@ -206,7 +213,35 @@ export class EmojiBeadsLayer {
       (a, b) => unitDirs[b * 3 + 2] - unitDirs[a * 3 + 2]
     )
     const effectiveCount = Math.min(totalRequested, frontIndices.length, 200)
-    this.vertexIndices = frontIndices.slice(0, effectiveCount)
+    // Preserve previous per-sprite vertex assignments where possible so a
+    // config change (adding an emoji, bumping count) doesn't reset the
+    // positions the user manually dragged. Sprites that existed before
+    // keep their old vertex; only freshly-added slots (i >= prev length)
+    // pull a fresh default anchor from the front-facing pool. The pool
+    // skips already-used vertices so a new sprite doesn't spawn on top
+    // of a preserved one.
+    const usedVerts = new Set<number>()
+    this.vertexIndices = []
+    for (let i = 0; i < effectiveCount; i++) {
+      const prev = i < prevIndices.length ? prevIndices[i] : -1
+      if (prev >= 0) {
+        this.vertexIndices.push(prev)
+        usedVerts.add(prev)
+      } else {
+        // Take the next unused front-facing vertex from the sorted pool.
+        let picked = -1
+        for (const cand of frontIndices) {
+          if (!usedVerts.has(cand)) {
+            picked = cand
+            break
+          }
+        }
+        // Fall back to any front vertex if the pool is fully used.
+        if (picked < 0) picked = frontIndices[i % frontIndices.length]
+        this.vertexIndices.push(picked)
+        usedVerts.add(picked)
+      }
+    }
 
     for (let i = 0; i < effectiveCount; i++) {
       // Cycle emoji index per sprite so consecutive placements alternate
@@ -249,60 +284,15 @@ export class EmojiBeadsLayer {
     return this.sprites
   }
 
-  /** Mark a sprite as SELECTED (or `null` to clear). A blue radial glow
-   *  is rendered behind the picked sprite so users see instantly that
-   *  the emoji is now grabbed and can be dragged around the slime. */
+  /** Mark a sprite as SELECTED (or `null` to clear). The previous
+   *  blue-glow halo has been removed — the selection is now silent
+   *  visually (the picked emoji simply follows drag input) so the
+   *  slime background stays clean when emoji-move mode is active. */
   setSelected(index: number | null) {
-    this.selectedIndex =
+    this._selectedIndex =
       index === null || index < 0 || index >= this.sprites.length
         ? -1
         : index
-    const glow = this.ensureGlowSprite()
-    if (this.selectedIndex >= 0) {
-      // Glow is ~1.7× the emoji's world diameter so the ring shows a
-      // clear halo margin around the picked sprite.
-      const s = this.config.size * 1.7
-      glow.scale.set(s, s, 1)
-      glow.visible = true
-    } else {
-      glow.visible = false
-    }
-  }
-
-  private ensureGlowSprite(): THREE.Sprite {
-    if (this.glowSprite) return this.glowSprite
-    const canvas = document.createElement('canvas')
-    canvas.width = 256
-    canvas.height = 256
-    const ctx = canvas.getContext('2d')
-    if (ctx) {
-      const g = ctx.createRadialGradient(128, 128, 32, 128, 128, 128)
-      // Blue glow: strong core, softer mid, transparent edge. Using
-      // additive blending on the material makes it read as pure light
-      // regardless of the slime tint underneath.
-      g.addColorStop(0, 'rgba(120, 190, 255, 0.9)')
-      g.addColorStop(0.45, 'rgba(60, 140, 255, 0.55)')
-      g.addColorStop(1, 'rgba(30, 100, 220, 0)')
-      ctx.fillStyle = g
-      ctx.fillRect(0, 0, 256, 256)
-    }
-    const tex = new THREE.CanvasTexture(canvas)
-    tex.colorSpace = THREE.SRGBColorSpace
-    const mat = new THREE.SpriteMaterial({
-      map: tex,
-      transparent: true,
-      depthWrite: false,
-      depthTest: false,
-      blending: THREE.AdditiveBlending
-    })
-    const sprite = new THREE.Sprite(mat)
-    // Render BEHIND every emoji pass (ghost at 0, main at 100). Additive
-    // blending + depthTest off means the glow always halos the selection.
-    sprite.renderOrder = GLOW_RENDER_ORDER
-    sprite.visible = false
-    this.glowSprite = sprite
-    this.group.add(sprite)
-    return sprite
   }
 
   /** Re-anchor a placed sprite onto a different mesh vertex. Called mid-
@@ -351,10 +341,7 @@ export class EmojiBeadsLayer {
    *  restPositions the compression sink is skipped. */
   update(currentPositions: Float32Array, restPositions?: Float32Array) {
     const n = this.sprites.length
-    if (n === 0) {
-      if (this.glowSprite) this.glowSprite.visible = false
-      return
-    }
+    if (n === 0) return
     // Base lift — 30% of the sprite hidden below the slime surface at
     // rest for a "sitting in the slime" look. beadLift is added on top
     // by SlimeApp when beads are active so the emoji clears the bead
@@ -364,7 +351,7 @@ export class EmojiBeadsLayer {
     // far below the surface that its selection halo becomes unclickable.
     // Roughly one radius below the surface is plenty for the "buried"
     // read without losing the sprite entirely.
-    const MIN_LIFT = -this.config.size * 0.5
+    const MIN_LIFT = -this.config.size * 0.22
     // Asymmetric ease — sinking into the slime is deliberately molasses
     // slow (SINK_EASE) so an emoji doesn't jump downward as soon as a
     // finger touches, but rising back is much snappier (RISE_EASE) so
@@ -372,7 +359,7 @@ export class EmojiBeadsLayer {
     // The behaviour therefore depends on HOW the user presses: press &
     // hold → gradual burial; brief press + release → sprite pops back
     // up almost immediately.
-    const SINK_EASE = 0.008
+    const SINK_EASE = 0.001
     const RISE_EASE = 0.08
     if (
       this.smoothedLifts === null ||
@@ -422,15 +409,6 @@ export class EmojiBeadsLayer {
       this.sprites[i].position.set(px, py, pz)
       this.ghostSprites[i]?.position.set(px, py, pz)
     }
-    // Selection glow follows the currently-selected sprite.
-    if (
-      this.glowSprite &&
-      this.selectedIndex >= 0 &&
-      this.selectedIndex < n
-    ) {
-      this.glowSprite.position.copy(this.sprites[this.selectedIndex].position)
-      this.glowSprite.visible = true
-    }
   }
 
   dispose() {
@@ -445,13 +423,6 @@ export class EmojiBeadsLayer {
     }
     this.materials.clear()
     this.vertexIndices = []
-    if (this.glowSprite) {
-      this.group.remove(this.glowSprite)
-      const mat = this.glowSprite.material as THREE.SpriteMaterial
-      if (mat.map) mat.map.dispose()
-      mat.dispose()
-      this.glowSprite = null
-    }
-    this.selectedIndex = -1
+    this._selectedIndex = -1
   }
 }

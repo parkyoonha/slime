@@ -310,7 +310,7 @@ export class SoundEngine {
    * Below the threshold, the source fades out and stops. Use for
    * beads / sprinkle sounds; keep setNamedLevel for crack pops.
    */
-  setLoopingSampleLevel(name: string, intensity: number, fadeTime = 0.05) {
+  setLoopingSampleLevel(name: string, intensity: number, fadeTime = 0.008) {
     if (!this.enabled) return
     const ctx = this.ensureCtx()
     if (!ctx || !this.masterGain) return

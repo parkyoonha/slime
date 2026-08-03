@@ -4,8 +4,9 @@ import {
   BEAD_COMBOS,
   BEAD_MATERIALS,
   BEAD_SHAPES,
+  BEADS_DEFAULT,
   BEADS_LIMITS,
-  COATING_COLORS,
+  beadShapesMinSize,
   COATINGS,
   COLORS,
   EMOJI_BEADS_LIMITS,
@@ -24,7 +25,6 @@ import {
   type BeadColorId,
   type BeadShapeId,
   type BeadsConfig,
-  type CoatingColorId,
   type CoatingId,
   type ColorId,
   type EmojiBeadsConfig,
@@ -96,8 +96,6 @@ interface Props {
   colors: readonly ColorId[]
   material: MaterialId
   coating: CoatingId
-  coatingColors: readonly ColorId[]
-  foilColors: readonly CoatingColorId[]
   shape: ShapeId
   beads: BeadsConfig
   sprinkles: SprinklesConfig
@@ -105,8 +103,6 @@ interface Props {
   onColors: (v: ColorId[]) => void
   onMaterial: (v: MaterialId) => void
   onCoating: (v: CoatingId) => void
-  onCoatingColors: (v: ColorId[]) => void
-  onFoilColors: (v: CoatingColorId[]) => void
   onShape: (v: ShapeId) => void
   onBeads: (v: BeadsConfig) => void
   onSprinkles: (v: SprinklesConfig) => void
@@ -121,8 +117,6 @@ export default function CustomizePanel({
   colors,
   material,
   coating,
-  coatingColors,
-  foilColors,
   shape,
   beads,
   sprinkles,
@@ -130,8 +124,6 @@ export default function CustomizePanel({
   onColors,
   onMaterial,
   onCoating,
-  onCoatingColors,
-  onFoilColors,
   onShape,
   onBeads,
   onSprinkles,
@@ -238,9 +230,57 @@ export default function CustomizePanel({
 
   /* ── Slime: sub-cat chips + active control on one panel ───── */
   if (category === 'slime') {
+    // Build removable tags for every currently-selected slime option.
+    // Color tags remove one from the multi-select (last one is locked
+    // so slime always has ≥ 1 colour); other tags revert their field
+    // to the default so removing a tag lands the slime back on the
+    // "unselected / neutral" value for that dimension.
+    const slimeTags: SelectionTag[] = []
+    colors.forEach((cid) => {
+      const c = COLORS.find((x) => x.id === cid)
+      if (!c) return
+      slimeTags.push({
+        key: `color-${cid}`,
+        label: c.label,
+        onRemove: () => {
+          if (colors.length <= 1) return
+          onColors(colors.filter((x) => x !== cid))
+        }
+      })
+    })
+    if (material !== 'crystal') {
+      const m = MATERIALS.find((x) => x.id === material)
+      if (m) {
+        slimeTags.push({
+          key: `mat-${material}`,
+          label: m.label,
+          onRemove: () => onMaterial('crystal')
+        })
+      }
+    }
+    if (coating !== 'none') {
+      const c = COATINGS.find((x) => x.id === coating)
+      if (c) {
+        slimeTags.push({
+          key: `coat-${coating}`,
+          label: c.label,
+          onRemove: () => onCoating('none')
+        })
+      }
+    }
+    if (shape !== 'sphere') {
+      const s = SHAPES.find((x) => x.id === shape)
+      if (s) {
+        slimeTags.push({
+          key: `shape-${shape}`,
+          label: s.label,
+          onRemove: () => onShape('sphere')
+        })
+      }
+    }
     return (
       <div className={styles.panel} data-hud>
-        <Header title={catLabel} onBack={goBack} />
+        <Header title={catLabel} onBack={goBack} tags={slimeTags} />
         <div className={styles.tabs}>
           {SLIME_SUBS.map((s) => (
             <button
@@ -306,91 +346,18 @@ export default function CustomizePanel({
           </div>
         )}
         {slimeSub === 'coating' && (
-          <div className={styles.beadsGrid}>
-            <div className={styles.options}>
-              {COATINGS.map((c) => (
-                <button
-                  key={c.id}
-                  className={styles.chip}
-                  data-active={coating === c.id}
-                  type="button"
-                  onClick={() => onCoating(c.id)}
-                >
-                  <span className={styles.chipLabel}>{c.label}</span>
-                </button>
-              ))}
-            </div>
-            {coating === 'foil' ? (
-              <div className={styles.options}>
-                {COATING_COLORS.map((c) => {
-                  // Multi-select for foil colours — 2+ picks paint a
-                  // top-to-bottom gradient across the metallic sheet.
-                  // Last remaining pick is locked so there's always ≥1
-                  // colour driving the tint (otherwise it'd fall back
-                  // to a hardcoded default).
-                  const active = foilColors.includes(c.id)
-                  return (
-                    <button
-                      key={c.id}
-                      className={styles.chip}
-                      data-active={active}
-                      type="button"
-                      onClick={() => {
-                        if (active) {
-                          if (foilColors.length <= 1) return
-                          onFoilColors(foilColors.filter((x) => x !== c.id))
-                        } else {
-                          onFoilColors([...foilColors, c.id])
-                        }
-                      }}
-                      aria-label={c.label}
-                      aria-pressed={active}
-                    >
-                      <span
-                        className={styles.swatch}
-                        style={{ background: hexToCss(c.hex) }}
-                      />
-                      <span className={styles.chipLabel}>{c.label}</span>
-                    </button>
-                  )
-                })}
-              </div>
-            ) : coating !== 'none' ? (
-              <div className={styles.options}>
-                {COLORS.map((c) => {
-                  // Multi-select for wax / ice coating colours — same
-                  // rules as foil, drawing from the general COLORS
-                  // palette instead of the metallic one.
-                  const active = coatingColors.includes(c.id)
-                  return (
-                    <button
-                      key={c.id}
-                      className={styles.chip}
-                      data-active={active}
-                      type="button"
-                      onClick={() => {
-                        if (active) {
-                          if (coatingColors.length <= 1) return
-                          onCoatingColors(
-                            coatingColors.filter((x) => x !== c.id)
-                          )
-                        } else {
-                          onCoatingColors([...coatingColors, c.id])
-                        }
-                      }}
-                      aria-label={c.label}
-                      aria-pressed={active}
-                    >
-                      <span
-                        className={styles.swatch}
-                        style={{ background: hexToCss(c.hex) }}
-                      />
-                      <span className={styles.chipLabel}>{c.label}</span>
-                    </button>
-                  )
-                })}
-              </div>
-            ) : null}
+          <div className={styles.options}>
+            {COATINGS.map((c) => (
+              <button
+                key={c.id}
+                className={styles.chip}
+                data-active={coating === c.id}
+                type="button"
+                onClick={() => onCoating(c.id)}
+              >
+                <span className={styles.chipLabel}>{c.label}</span>
+              </button>
+            ))}
           </div>
         )}
         {slimeSub === 'shape' && (
@@ -427,9 +394,61 @@ export default function CustomizePanel({
       ? beadsSub
       : (subs[0]?.id ?? '')
     const showDetail = beadsDrilled && subs.length > 0
+    // Tags for every currently-active bead selection.
+    const beadTags: SelectionTag[] = []
+    if (beads.combo !== 'none') {
+      const combo = BEAD_COMBOS.find((c) => c.id === beads.combo)
+      if (combo) {
+        beadTags.push({
+          key: `combo-${beads.combo}`,
+          label: combo.label,
+          onRemove: () => onBeads({ ...beads, ...BEADS_DEFAULT })
+        })
+      }
+      beads.colors.forEach((cid) => {
+        const c = BEAD_COLORS.find((x) => x.id === cid)
+        if (!c) return
+        beadTags.push({
+          key: `bc-${cid}`,
+          label: c.label,
+          onRemove: () =>
+            onBeads({ ...beads, colors: beads.colors.filter((x) => x !== cid) })
+        })
+      })
+      beads.shapes.forEach((sid) => {
+        const s = BEAD_SHAPES.find((x) => x.id === sid)
+        if (!s || beads.shapes.length <= 1) return
+        beadTags.push({
+          key: `bs-${sid}`,
+          label: s.label,
+          onRemove: () =>
+            onBeads({ ...beads, shapes: beads.shapes.filter((x) => x !== sid) })
+        })
+      })
+      if (beads.material !== 'plastic') {
+        const bm = BEAD_MATERIALS.find((x) => x.id === beads.material)
+        if (bm) {
+          beadTags.push({
+            key: `bm-${beads.material}`,
+            label: bm.label,
+            onRemove: () => onBeads({ ...beads, material: 'plastic' })
+          })
+        }
+      }
+      if (beads.coating !== 'none') {
+        const bc = COATINGS.find((x) => x.id === beads.coating)
+        if (bc) {
+          beadTags.push({
+            key: `bcoat-${beads.coating}`,
+            label: bc.label,
+            onRemove: () => onBeads({ ...beads, coating: 'none' })
+          })
+        }
+      }
+    }
     return (
       <div className={styles.panel} data-hud>
-        <Header title={catLabel} onBack={goBack} />
+        <Header title={catLabel} onBack={goBack} tags={beadTags} />
         {/* Combo picker only shows in Step 1 (undrilled). Once the user has
             drilled into a combo, the picker collapses so the panel focuses
             on the sub-cat chips + control below. Back arrow returns here. */}
@@ -537,7 +556,16 @@ export default function CustomizePanel({
         )}
         {showDetail && activeSub === 'size' && (() => {
           const combo = BEAD_COMBOS.find((c) => c.id === beads.combo)
-          const sizeMin = combo?.sizeMin ?? BEADS_LIMITS.sizeMin
+          const comboMin = combo?.sizeMin ?? BEADS_LIMITS.sizeMin
+          // Per-shape min applies ONLY to the compact (mini) combo.
+          // Chunk beads are always ≥ 0.3 which already dwarfs the
+          // cube corner-rounding, so the shape-based floor is
+          // irrelevant there.
+          const shapeMin =
+            beads.combo === 'compact'
+              ? beadShapesMinSize(beads.shapes)
+              : 0
+          const sizeMin = Math.max(comboMin, shapeMin)
           const sizeMax = combo?.sizeMax ?? BEADS_LIMITS.sizeMax
           const clampedSize = Math.min(Math.max(beads.size, sizeMin), sizeMax)
           return (
@@ -640,9 +668,73 @@ export default function CustomizePanel({
         : sprinkleType === 'powder'
           ? SPRINKLES_LIMITS.powderCountMax
           : SPRINKLES_LIMITS.inkCountMax
+    // Per-type minimum count. Powder needs at least 85 grains to
+    // read as a real dust layer; other types can start at 0.
+    const countMin =
+      sprinkleType === 'powder'
+        ? SPRINKLES_LIMITS.powderCountMin
+        : SPRINKLES_LIMITS.countMin
+    // Tags for currently-active sprinkle type's selections. Removing
+    // a color tag drops it from that type's palette; removing an
+    // 'active' tag zeroes the count so the whole type turns off.
+    const sprinkleTags: SelectionTag[] = []
+    if (typeCfg.count > 0 || ('fill' in typeCfg && typeCfg.fill)) {
+      const tLabel = SPRINKLE_TYPES.find((t) => t.id === sprinkleType)?.label
+      if (tLabel) {
+        sprinkleTags.push({
+          key: `stype-${sprinkleType}`,
+          label: `${tLabel} 사용중`,
+          onRemove: () => {
+            if (sprinkleType === 'paper') {
+              onSprinkles({
+                ...sprinkles,
+                paper: { ...sprinkles.paper, count: 0, fill: false }
+              })
+            } else if (sprinkleType === 'powder') {
+              onSprinkles({
+                ...sprinkles,
+                powder: { ...sprinkles.powder, count: 0, fill: false }
+              })
+            } else {
+              onSprinkles({
+                ...sprinkles,
+                ink: { ...sprinkles.ink, count: 0 }
+              })
+            }
+          }
+        })
+      }
+      typeCfg.colors.forEach((cid) => {
+        const c = SPRINKLE_COLORS.find((x) => x.id === cid)
+        if (!c) return
+        sprinkleTags.push({
+          key: `sc-${sprinkleType}-${cid}`,
+          label: c.label,
+          onRemove: () => {
+            const next = typeCfg.colors.filter((x) => x !== cid)
+            if (sprinkleType === 'paper') {
+              onSprinkles({
+                ...sprinkles,
+                paper: { ...sprinkles.paper, colors: next }
+              })
+            } else if (sprinkleType === 'powder') {
+              onSprinkles({
+                ...sprinkles,
+                powder: { ...sprinkles.powder, colors: next }
+              })
+            } else {
+              onSprinkles({
+                ...sprinkles,
+                ink: { ...sprinkles.ink, colors: next }
+              })
+            }
+          }
+        })
+      })
+    }
     return (
       <div className={styles.panel} data-hud>
-        <Header title={catLabel} onBack={goBack} />
+        <Header title={catLabel} onBack={goBack} tags={sprinkleTags} />
         {/* Type picker only shows in Step 1 (undrilled). Once drilled, the
             picker collapses so the panel focuses on the sub-cat chips +
             control below. Back arrow returns here to switch types. */}
@@ -730,7 +822,7 @@ export default function CustomizePanel({
               <div className={styles.sliderRow}>
                 <input
                   type="range"
-                  min={SPRINKLES_LIMITS.countMin}
+                  min={countMin}
                   max={countMax}
                   step={1}
                   value={typeCfg.count}
@@ -866,9 +958,18 @@ export default function CustomizePanel({
         count: nextCount
       })
     }
+    const emojiTags: SelectionTag[] = emojiBeads.emojis.map((e) => ({
+      key: `em-${e}`,
+      label: e,
+      onRemove: () =>
+        onEmojiBeads({
+          ...emojiBeads,
+          emojis: emojiBeads.emojis.filter((x) => x !== e)
+        })
+    }))
     return (
       <div className={styles.panel} data-hud>
-        <Header title={catLabel} onBack={goBack} />
+        <Header title={catLabel} onBack={goBack} tags={emojiTags} />
         <div className={styles.options}>
           {THEMES.map((t) => (
             <button
@@ -877,17 +978,21 @@ export default function CustomizePanel({
               className={styles.chip}
               data-active={emojiBeads.themeId === t.id}
               onClick={() => {
+                // Switching themes NO LONGER clears the selected
+                // emoji list — cross-theme picks accumulate so a
+                // user can combine e.g. spring flowers + winter
+                // snowflakes on one slime. Toggling the active
+                // theme off just hides the palette; existing
+                // emojis stay placed.
                 if (emojiBeads.themeId === t.id) {
                   onEmojiBeads({
                     ...emojiBeads,
-                    themeId: null,
-                    emojis: []
+                    themeId: null
                   })
                 } else {
                   onEmojiBeads({
                     ...emojiBeads,
-                    themeId: t.id,
-                    emojis: []
+                    themeId: t.id
                   })
                 }
               }}
@@ -963,12 +1068,20 @@ export default function CustomizePanel({
   return null
 }
 
+type SelectionTag = {
+  key: string
+  label: string
+  onRemove: () => void
+}
+
 function Header({
   title,
-  onBack
+  onBack,
+  tags
 }: {
   title: string | undefined
   onBack: () => void
+  tags?: readonly SelectionTag[]
 }) {
   return (
     <div className={styles.detailHeader}>
@@ -995,6 +1108,23 @@ function Header({
         </svg>
       </button>
       <span className={styles.detailTitle}>{title}</span>
+      {tags && tags.length > 0 && (
+        <div className={styles.detailTagRow}>
+          {tags.map((t) => (
+            <span key={t.key} className={styles.detailTag}>
+              <span className={styles.detailTagLabel}>{t.label}</span>
+              <button
+                type="button"
+                className={styles.detailTagRemove}
+                onClick={t.onRemove}
+                aria-label={`${t.label} 제거`}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

@@ -29,7 +29,9 @@
   font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  transition: background 120ms ease, color 120ms ease;
+  /* Instant selection swap — no fade — so the highlight disappears
+     the frame the user deselects. */
+  transition: none;
 }
 
 .tab[data-active='true'] {
@@ -102,6 +104,68 @@
   letter-spacing: 0.02em;
   color: var(--color-text);
   opacity: 0.95;
+  flex-shrink: 0;
+}
+
+/* Horizontally-scrolling tag row placed to the right of the header
+   title. Each tag summarises one active selection in the current
+   primary category (color, material, coating, shape, bead combo,
+   sprinkle type, picked emoji…) with an inline × to remove it. */
+.detailTagRow {
+  display: flex;
+  gap: 6px;
+  flex: 1;
+  overflow-x: auto;
+  overflow-y: hidden;
+  min-width: 0;
+  padding: 2px 2px 4px;
+  scrollbar-width: thin;
+}
+
+.detailTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 4px 6px 4px 10px;
+  border-radius: 999px;
+  background: var(--bg-chip);
+  color: var(--color-text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.detailTagLabel {
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detailTagRemove {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  outline: none;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.detailTagRemove:hover,
+.detailTagRemove:focus-visible {
+  background: rgba(0, 0, 0, 0.6);
+  outline: none;
 }
 
 .options {
@@ -130,7 +194,10 @@
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  transition: background 120ms ease, transform 120ms ease;
+  /* No background transition — deselecting an option should drop the
+     active highlight instantly instead of fading out over 120ms, which
+     felt sluggish. Transform still animates for the press feedback. */
+  transition: transform 120ms ease;
 }
 
 .chip:hover {
@@ -218,7 +285,8 @@
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.25);
   display: flex;
   flex-direction: column;
-  transition: border-color 150ms ease, box-shadow 150ms ease;
+  /* Instant selection swap. */
+  transition: none;
 }
 
 .themeCard[data-active='true'] {
@@ -300,7 +368,8 @@
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.03em;
-  transition: background 120ms ease, border-color 120ms ease;
+  /* Instant selection swap. */
+  transition: none;
   flex-shrink: 0;
 }
 
