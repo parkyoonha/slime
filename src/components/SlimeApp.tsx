@@ -4,12 +4,21 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { useHandLandmarker } from '../hooks/useHandLandmarker'
 import { SlimeSphere, type WeightedTip } from '../slime/SlimeSphere'
 import { BeadsLayer } from '../slime/BeadsLayer'
+import { CustomBeadsLayer } from '../slime/CustomBeadsLayer'
 import { EmojiBeadsLayer } from '../slime/EmojiBeadsLayer'
 import { SprinklesLayer } from '../slime/SprinklesLayer'
 import {
+  BEAD_MATERIALS,
+  BEAD_SHAPES,
   BEADS_DEFAULT,
-  COLORS,
+  COATINGS,
+  CUSTOM_BEADS_DEFAULT,
   EMOJI_BEADS_DEFAULT,
+  MATERIALS,
+  SHAPES,
+  resolveColorHex,
+  resolveColorLabel,
+  type ColorAdjustments,
   SPRINKLE_COLORS,
   SPRINKLES_DEFAULT,
   SPRINKLES_LIMITS,
@@ -17,6 +26,7 @@ import {
   type CoatingColorId,
   type CoatingId,
   type ColorId,
+  type CustomBeadsConfig,
   type EmojiBeadsConfig,
   type MaterialId,
   type ShapeId,
@@ -30,7 +40,7 @@ import {
   fingerCurl
 } from '../lib/coords'
 import { SoundEngine } from '../sound/SoundEngine'
-import CustomizePanel from './CustomizePanel'
+import CustomizePanel, { type SelectionTag } from './CustomizePanel'
 import styles from './SlimeApp.module.css'
 
 const CAMERA_Z = 3.4
@@ -166,7 +176,40 @@ export default function SlimeApp() {
   // Slime colour is a MULTI-SELECT — picking one paints solid, picking two
   // or more paints a vertical gradient (colors[0] → colors[n-1] top-to-
   // bottom). Empty is treated as the default 'white' by the slime.
-  const [colors, setColors] = useState<ColorId[]>(['pearl'])
+  // Empty default — no colour is pre-selected so first-run users
+  // see a plain (near-white via SlimeSphere's null-colour fallback)
+  // slime and pick their own colour on entry. 진주 pre-select felt
+  // like a fake commitment they hadn't made yet.
+  const [colors, setColors] = useState<ColorId[]>([])
+  // Per-colour HSL deltas the user has dialled in via the adjustment
+  // sliders under each colour chip. Keyed on preset id so an adjusted
+  // 아쿠아 stays adjusted whether the user's editing slime or beads.
+  // Persisted so tweaks survive across sessions.
+  const [colorAdjustments, setColorAdjustments] = useState<ColorAdjustments>(
+    () => {
+      if (typeof window === 'undefined') return {}
+      try {
+        const raw = window.localStorage.getItem('wakbu-color-adjustments')
+        const parsed = raw ? JSON.parse(raw) : {}
+        return parsed && typeof parsed === 'object'
+          ? (parsed as ColorAdjustments)
+          : {}
+      } catch {
+        return {}
+      }
+    }
+  )
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      window.localStorage.setItem(
+        'wakbu-color-adjustments',
+        JSON.stringify(colorAdjustments)
+      )
+    } catch {
+      // localStorage may be unavailable in private mode — just skip.
+    }
+  }, [colorAdjustments])
   const [material, setMaterial] = useState<MaterialId>('crystal')
   const [coating, setCoating] = useState<CoatingId>('none')
   // Wax / ice coating tint — multi-select array so 2+ colours paint a
@@ -181,6 +224,21 @@ export default function SlimeApp() {
   const [foilColors, setFoilColors] = useState<CoatingColorId[]>(['silver'])
   const [shape, setShape] = useState<ShapeId>('sphere')
   const [beads, setBeads] = useState<BeadsConfig>(BEADS_DEFAULT)
+  // 속슬라임 — a second BeadsConfig that renders as an inner squishy
+  // inclusion inside the slime. Same option surface as 속비즈 (chunk)
+  // — colours / count / size / shape / material / coating — but its
+  // dedicated BeadsLayer instance runs a soft compress-on-press pass
+  // so it visibly squishes with slime deformation.
+  const [innerSlime, setInnerSlime] = useState<BeadsConfig>(BEADS_DEFAULT)
+  // 커스텀비즈 — emoji-style additive layer of coloured 3D bead meshes.
+  // Placed and moved like emojis; palette + shape live here so the
+  // config persists independently of the main beads config.
+  const [customBeads, setCustomBeads] =
+    useState<CustomBeadsConfig>(CUSTOM_BEADS_DEFAULT)
+  // Single shared photo texture printed onto every custom bead's
+  // outward face. Null = no photo (normal coloured beads).
+  const [customBeadsPhoto, setCustomBeadsPhoto] =
+    useState<THREE.Texture | null>(null)
   const [sprinkles, setSprinkles] =
     useState<SprinklesConfig>(SPRINKLES_DEFAULT)
   // Emoji beads — an additive sprinkle-style layer of emoji characters.
@@ -194,10 +252,53 @@ export default function SlimeApp() {
   // Top-right menu / guide modal — both start closed, guide opens from
   // the menu, menu itself opens on button click and closes on outside tap.
   const [menuOpen, setMenuOpen] = useState(false)
-  const [guideOpen, setGuideOpen] = useState(false)
-  // Collection dropdown — bookmark button top-right toggles a small
+  // Collection dropdown — bookmark button top-left toggles a small
   // menu with "저장하기" and "컬렉션 보기" buttons.
   const [collectionMenuOpen, setCollectionMenuOpen] = useState(false)
+  // Bottom-area mode toggle. 'options' shows CustomizePanel + tag
+  // row (default). 'collection' hides those and replaces them with
+  // an inline swipeable collection carousel — toggled via the
+  // bottom-row right side collection button.
+  const [bottomMode, setBottomMode] = useState<'options' | 'collection'>(
+    'options'
+  )
+  const bottomModeRef = useRef(bottomMode)
+  useEffect(() => {
+    bottomModeRef.current = bottomMode
+  }, [bottomMode])
+  // Which slime the inline carousel has centered. -1 = no
+  // selection (initial + on every entry to collection mode) so
+  // the user must explicitly tap a card before the action buttons
+  // appear. Ignored when `bottomMode !== 'collection'`.
+  const [carouselIdx, setCarouselIdx] = useState(-1)
+  useEffect(() => {
+    if (bottomMode === 'collection') setCarouselIdx(-1)
+  }, [bottomMode])
+  // Delete mode — activated by long-pressing a collection card.
+  // Every card gains a checkbox and the action row swaps to
+  // 취소 / 삭제(N) so the user can multi-select entries to drop.
+  const [deleteMode, setDeleteMode] = useState(false)
+  const [selectedForDelete, setSelectedForDelete] = useState<Set<string>>(
+    new Set()
+  )
+  useEffect(() => {
+    if (bottomMode !== 'collection') {
+      setDeleteMode(false)
+      setSelectedForDelete(new Set())
+    }
+  }, [bottomMode])
+  // 사진 슬라임 (스티커) — file picker lives inside the slime tab's
+  // Header (right-slot camera button). `stickerOn` toggles the button
+  // between "add" and "clear" modes.
+  const [stickerOn, setStickerOn] = useState(false)
+  // Up to 4 photo beads — big chunk-style beads on the slime's front
+  // hemisphere with a photo decal on each. Managed as a fixed-length
+  // slots array so users can add / remove specific slots without
+  // reshuffling the others. `null` = empty slot. Textures are
+  // disposed when the slot is cleared or replaced.
+  const [photoBeads, setPhotoBeads] = useState<(THREE.Texture | null)[]>(
+    () => [null, null, null, null]
+  )
   // Full-screen grid modal — opened from the browse view via
   // "모두보기". Shows saved slimes as a 2-row × N-column preview grid.
   const [collectionOpen, setCollectionOpen] = useState(false)
@@ -299,6 +400,59 @@ export default function SlimeApp() {
       // Private-mode storage error — collection still works for the session.
     }
   }, [collection])
+  // One-shot migration for pre-PNG saves: old thumbnails were saved as
+  // JPEG which fills the transparent WebGL bg with pure black, creating
+  // a visible dark rectangle around each slime that doesn't match the
+  // pill background. Convert every JPEG entry to a chroma-keyed PNG
+  // (near-black → transparent) so the pill's page tone shows through.
+  useEffect(() => {
+    const jpegEntries = collection.filter((c) =>
+      c.thumb?.startsWith('data:image/jpeg')
+    )
+    if (jpegEntries.length === 0) return
+    let cancelled = false
+    ;(async () => {
+      const migrated = await Promise.all(
+        collection.map(async (entry) => {
+          if (!entry.thumb?.startsWith('data:image/jpeg')) return entry
+          try {
+            const img = new Image()
+            img.src = entry.thumb
+            await new Promise<void>((resolve, reject) => {
+              img.onload = () => resolve()
+              img.onerror = () => reject(new Error('load failed'))
+            })
+            const c = document.createElement('canvas')
+            c.width = img.naturalWidth
+            c.height = img.naturalHeight
+            const ctx = c.getContext('2d')
+            if (!ctx) return entry
+            ctx.drawImage(img, 0, 0)
+            const px = ctx.getImageData(0, 0, c.width, c.height)
+            const d = px.data
+            // Chroma-key near-black to transparent. Threshold is
+            // generous so JPEG compression halos around the slime
+            // silhouette also drop out cleanly.
+            for (let i = 0; i < d.length; i += 4) {
+              if (d[i] < 12 && d[i + 1] < 12 && d[i + 2] < 12) {
+                d[i + 3] = 0
+              }
+            }
+            ctx.putImageData(px, 0, 0)
+            return { ...entry, thumb: c.toDataURL('image/png') }
+          } catch {
+            return entry
+          }
+        })
+      )
+      if (cancelled) return
+      setCollection(migrated)
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   // Emoji move mode — modal toggle. When ON, slime press is
   // disabled and any tap/drag on the slime moves emojis instead.
   // Off is the normal state (press works, emojis stay put).
@@ -337,7 +491,7 @@ export default function SlimeApp() {
     // Keep the WebGL background orb in sync so the scene doesn't stay
     // dark inside a light-mode UI. Colours match the CSS --bg-orb tokens.
     applyRef.current?.setSceneBackground(
-      theme === 'light' ? 0xe5deec : 0x1a1130
+      theme === 'light' ? 0xe5deec : 0x000000
     )
   }, [theme])
 
@@ -359,6 +513,28 @@ export default function SlimeApp() {
      *  light / dark theme so the scene stops reading as dark inside the
      *  light-mode UI. */
     setSceneBackground: (hex: number) => void
+    /** Push per-colour HSL deltas from the adjustment sliders. Both
+     *  slime and beads re-resolve palette hex through these deltas
+     *  so an 아쿠아 tweak reads the same across surfaces. */
+    setColorAdjustments: (adjustments: ColorAdjustments) => void
+    /** Apply (or clear) the 촬영 스티커 photo decal on the slime's
+     *  front hemisphere. Pass null to disable and dispose the
+     *  underlying texture. */
+    setPhotoDecal: (texture: THREE.Texture | null) => void
+    /** Push the full set of photo bead textures (up to 4) into the
+     *  bead layer. Non-null entries print onto the existing beads —
+     *  the pool is split evenly so 1 photo = all beads, 2 = half+half,
+     *  etc. Passing all-null clears photos entirely. */
+    setPhotoBeads: (textures: (THREE.Texture | null)[]) => void
+    /** Push a 속슬라임 config (BeadsConfig shape) into the dedicated
+     *  inner BeadsLayer instance. Applies squish-on-press physics on
+     *  top of the standard chunk render. */
+    setInnerSlime: (v: BeadsConfig) => void
+    /** Push 커스텀비즈 config into the additive layer. */
+    setCustomBeads: (v: CustomBeadsConfig) => void
+    /** Set (or clear) the shared photo texture printed on every
+     *  custom bead's outward face. */
+    setCustomBeadsPhoto: (texture: THREE.Texture | null) => void
     reset: () => void
     /** Snapshot the slime with a CANONICAL scale (1) and identity
      *  rotation so every thumbnail in the collection reads at a
@@ -370,6 +546,14 @@ export default function SlimeApp() {
   useEffect(() => {
     applyRef.current?.setColors(colors)
   }, [colors])
+  useEffect(() => {
+    // Push adjustments FIRST so the layer classes cache them, then
+    // re-emit setColors so the slime + wrap materials pick up the
+    // freshly-adjusted hex. Also re-run setBeads via the beads state
+    // effect below (colorAdjustments doesn't invalidate beads config
+    // but triggers re-emit through setColorAdjustments in the layer).
+    applyRef.current?.setColorAdjustments(colorAdjustments)
+  }, [colorAdjustments])
   useEffect(() => {
     applyRef.current?.setMaterial(material)
   }, [material])
@@ -388,13 +572,11 @@ export default function SlimeApp() {
     // visually consistent (wax coating in the same tone as the
     // slime, foil in the same tone, etc.). Single pick → flat tint,
     // 2+ picks → gradient handled by slime.setCoatingColors.
-    const hexes = colors
-      .map((id) => COLORS.find((c) => c.id === id)?.hex)
-      .filter((h): h is number => typeof h === 'number')
+    const hexes = colors.map((id) => resolveColorHex(id, colorAdjustments))
     applyRef.current?.setCoatingColors(
       hexes.length > 0 ? hexes : [0xfbf7f2]
     )
-  }, [coating, colors])
+  }, [coating, colors, colorAdjustments])
   useEffect(() => {
     applyRef.current?.setShape(shape)
   }, [shape])
@@ -402,11 +584,26 @@ export default function SlimeApp() {
     applyRef.current?.setBeads(beads)
   }, [beads])
   useEffect(() => {
+    applyRef.current?.setInnerSlime(innerSlime)
+  }, [innerSlime])
+  useEffect(() => {
+    applyRef.current?.setCustomBeads(customBeads)
+  }, [customBeads])
+  useEffect(() => {
+    applyRef.current?.setCustomBeadsPhoto(customBeadsPhoto)
+  }, [customBeadsPhoto])
+  useEffect(() => {
     applyRef.current?.setSprinkles(sprinkles)
   }, [sprinkles])
   useEffect(() => {
     applyRef.current?.setEmojiBeads(emojiBeads)
   }, [emojiBeads])
+  useEffect(() => {
+    // Push the whole slot array — BeadsLayer rebuilds its atlas +
+    // per-instance quadrant assignment based on which slots are
+    // non-null and how many active beads exist.
+    applyRef.current?.setPhotoBeads(photoBeads)
+  }, [photoBeads])
   // Emoji visibility — two independent knobs:
   //  • Ghost pass (dim fill-in through opaque geometry) is on for CRYSTAL
   //    slime only, so the buried portion of an emoji reads faintly through
@@ -450,14 +647,74 @@ export default function SlimeApp() {
   // slime, no beads / sprinkles / emojis) AND clear any physics deformation.
   // Distinct from the plain 리셋 button, which only wipes the slime's
   // current dents/velocities without touching config.
+  // Undo history — every user state change pushes the previous
+  // snapshot here so the 이전 bottom-bar button can walk back
+  // step by step. Capped at 30 entries; suppression flag stops
+  // undo-triggered applies from feeding themselves back in.
+  const undoHistoryRef = useRef<unknown[]>([])
+  const suppressHistoryRef = useRef(false)
+  const lastSnapshotRef = useRef<unknown>(null)
+  // Tracks whether the current in-editor slime has been modified
+  // since it was last saved to the collection. Drives the
+  // beforeunload confirm prompt so users don't accidentally lose
+  // their in-progress slime by closing the tab / navigating away.
+  const hasUnsavedChangesRef = useRef(false)
+  useEffect(() => {
+    const cur = buildStateSnapshot()
+    if (lastSnapshotRef.current === null) {
+      lastSnapshotRef.current = cur
+      return
+    }
+    if (suppressHistoryRef.current) {
+      suppressHistoryRef.current = false
+      lastSnapshotRef.current = cur
+      return
+    }
+    undoHistoryRef.current.push(lastSnapshotRef.current)
+    if (undoHistoryRef.current.length > 30) {
+      undoHistoryRef.current.shift()
+    }
+    lastSnapshotRef.current = cur
+    hasUnsavedChangesRef.current = true
+    // Only depend on the mutable state fields — refs / functions
+    // are stable across renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    colors,
+    material,
+    coating,
+    coatingColors,
+    foilColors,
+    shape,
+    beads,
+    innerSlime,
+    customBeads,
+    sprinkles,
+    emojiBeads
+  ])
+  // Warn the user before leaving with unsaved slime changes so they
+  // don't accidentally lose an in-progress design. Modern browsers
+  // ignore the custom message and show their own generic prompt.
+  useEffect(() => {
+    const handler = (e: BeforeUnloadEvent) => {
+      if (!hasUnsavedChangesRef.current) return
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', handler)
+    return () => window.removeEventListener('beforeunload', handler)
+  }, [])
+
   const resetToDefaults = () => {
-    setColors(['pearl'])
+    setColors([])
     setMaterial('crystal')
     setCoating('none')
     setCoatingColors(['gold'])
     setFoilColors(['silver'])
     setShape('sphere')
     setBeads(BEADS_DEFAULT)
+    setInnerSlime(BEADS_DEFAULT)
+    setCustomBeads(CUSTOM_BEADS_DEFAULT)
     setSprinkles(SPRINKLES_DEFAULT)
     setEmojiBeads(EMOJI_BEADS_DEFAULT)
     applyRef.current?.reset()
@@ -479,7 +736,9 @@ export default function SlimeApp() {
     sh: shape,
     b: beads,
     sp: sprinkles,
-    e: emojiBeads
+    e: emojiBeads,
+    is: innerSlime,
+    cb: customBeads
   })
 
   // Apply a decoded snapshot to the live customisation. Missing /
@@ -505,6 +764,83 @@ export default function SlimeApp() {
       setSprinkles(s.sp as SprinklesConfig)
     if (s.e && typeof s.e === 'object')
       setEmojiBeads(s.e as EmojiBeadsConfig)
+    if (s.is && typeof s.is === 'object')
+      setInnerSlime(s.is as BeadsConfig)
+    if (s.cb && typeof s.cb === 'object')
+      setCustomBeads(s.cb as CustomBeadsConfig)
+  }
+
+  /** Load an image file into a square, centre-cropped CanvasTexture
+   *  ready for use as a shader decal. Shared by the slime sticker
+   *  and the photo bead pipelines so both get identical crop / size /
+   *  colour-space treatment. Returns null when the browser can't
+   *  decode the image so callers can silently no-op. */
+  const loadPhotoTexture = async (
+    file: File
+  ): Promise<THREE.CanvasTexture | null> => {
+    const url = URL.createObjectURL(file)
+    try {
+      const img = new Image()
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve()
+        img.onerror = () => reject(new Error('image load failed'))
+        img.src = url
+      })
+      const side = Math.min(img.naturalWidth, img.naturalHeight)
+      const canvas = document.createElement('canvas')
+      const size = Math.min(512, side)
+      canvas.width = size
+      canvas.height = size
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return null
+      const sx = (img.naturalWidth - side) / 2
+      const sy = (img.naturalHeight - side) / 2
+      ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size)
+      const tex = new THREE.CanvasTexture(canvas)
+      tex.colorSpace = THREE.SRGBColorSpace
+      tex.needsUpdate = true
+      return tex
+    } catch {
+      return null
+    } finally {
+      URL.revokeObjectURL(url)
+    }
+  }
+
+  const handlePhotoSticker = async (file: File) => {
+    const tex = await loadPhotoTexture(file)
+    if (!tex) return
+    applyRef.current?.setPhotoDecal(tex)
+    setStickerOn(true)
+  }
+
+  const clearSticker = () => {
+    applyRef.current?.setPhotoDecal(null)
+    setStickerOn(false)
+  }
+
+  const setPhotoBeadAt = async (index: number, file: File) => {
+    const tex = await loadPhotoTexture(file)
+    if (!tex) return
+    setPhotoBeads((prev) => {
+      const next = prev.slice()
+      // Dispose the outgoing texture so replacing a slot doesn't
+      // slowly leak GPU memory across many photo picks.
+      if (next[index]) next[index]!.dispose()
+      next[index] = tex
+      return next
+    })
+  }
+
+  const clearPhotoBeadAt = (index: number) => {
+    setPhotoBeads((prev) => {
+      const next = prev.slice()
+      if (next[index]) {
+        next[index]!.dispose()
+        next[index] = null
+      }
+      return next
+    })
   }
 
   const encodeShareUrlFromState = (state: unknown): string => {
@@ -552,6 +888,10 @@ export default function SlimeApp() {
           thumb: nameDialog.pendingThumb
         }
       ])
+      // Fresh save — clear the unsaved-changes gate so the
+      // beforeunload confirm won't fire until the user tweaks
+      // something new.
+      hasUnsavedChangesRef.current = false
       setToast(`${name} 저장됨`)
       window.setTimeout(() => setToast(null), 2000)
     } else {
@@ -613,26 +953,6 @@ export default function SlimeApp() {
       setToast('공유 실패')
       window.setTimeout(() => setToast(null), 2000)
     }
-  }
-
-  // Enter browse mode — load the FIRST saved slime and let the user
-  // swipe horizontally through the rest.
-  const startBrowsing = () => {
-    const visible = collection.filter((c) => c.thumb)
-    if (visible.length === 0) {
-      setToast('저장된 슬라임이 없어요')
-      window.setTimeout(() => setToast(null), 2000)
-      return
-    }
-    // Snapshot the CURRENT work-in-progress state before loading a
-    // saved slime so the × close button can restore it later.
-    preBrowseStateRef.current = buildStateSnapshot()
-    setBrowseIdx(0)
-    applyStateSnapshot(visible[0].state)
-    setPreviewMode(false)
-    setBrowsePressed(false)
-    autoSpinUntilRef.current = performance.now() + 600
-    setCollectionMenuOpen(false)
   }
 
   // Swipe to a specific browsed item (clamped to range) and apply
@@ -765,6 +1085,15 @@ export default function SlimeApp() {
   useEffect(() => {
     beadCoatingRef.current = beads.coating
   }, [beads.coating])
+  // 속슬라임 coating mirror — separate from beadCoatingRef so wax /
+  // foil crack sounds fire independently when the user has coated
+  // the inner slime inclusion. Both are Max'd into one sample slot
+  // per coating type so any of the three surfaces (slime / beads /
+  // inner slime) can drive playback without stepping on the others.
+  const innerSlimeCoatingRef = useRef<CoatingId>('none')
+  useEffect(() => {
+    innerSlimeCoatingRef.current = innerSlime.coating
+  }, [innerSlime.coating])
   const beadsActiveRef = useRef<boolean>(false)
   useEffect(() => {
     // Compact "미니 꽉 채우기" packs densely via `fill: true` while count
@@ -914,7 +1243,7 @@ export default function SlimeApp() {
     // drawer switch, so the WebGL scene stops flashing dark inside a
     // light-mode UI.
     const bgMaterial = new THREE.MeshBasicMaterial({
-      color: theme === 'light' ? 0xe5deec : 0x1a1130,
+      color: theme === 'light' ? 0xe5deec : 0x000000,
       side: THREE.BackSide
     })
     const bg = new THREE.Mesh(new THREE.SphereGeometry(4, 32, 32), bgMaterial)
@@ -950,6 +1279,24 @@ export default function SlimeApp() {
     // opaque wrap shells and the aerated look disappears.
     beadsLayer.setMatteFoamUniform(slime.getMatteFoamUniform())
 
+    // Second BeadsLayer instance dedicated to 속슬라임 — mirrors the
+    // main bead layer's slime-uniform wiring so its wrap shell picks
+    // up the same ink / gradient / matte foam. Its per-frame update
+    // additionally runs a soft compress-on-press pass so the inner
+    // chunk visibly squishes when the slime is pressed.
+    const innerBeadsLayer = new BeadsLayer()
+    slime.mesh.add(innerBeadsLayer.group)
+    innerBeadsLayer.setInkUniforms(
+      inkUniforms.colorUniform,
+      inkUniforms.amountUniform
+    )
+    innerBeadsLayer.setSlimeGradientUniforms(
+      gradientUniforms.useUniform,
+      gradientUniforms.texUniform,
+      gradientUniforms.radiusUniform
+    )
+    innerBeadsLayer.setMatteFoamUniform(slime.getMatteFoamUniform())
+
     // Two independent SprinklesLayers so paper + powder can render together.
     // Each takes a type-specific slice of SprinklesConfig. Ink is a shader
     // effect, not a layer — routed straight to slime.setInk.
@@ -960,6 +1307,13 @@ export default function SlimeApp() {
 
     const emojiBeadsLayer = new EmojiBeadsLayer()
     slime.mesh.add(emojiBeadsLayer.group)
+
+    // 커스텀비즈 — additive layer of coloured 3D bead meshes placed on
+    // the front hemisphere. Physics is a simple snap-to-nearest-vertex
+    // (like emoji beads) so beads follow slime deformation without
+    // touching the main bead layer's InstancedMesh state.
+    const customBeadsLayer = new CustomBeadsLayer()
+    slime.mesh.add(customBeadsLayer.group)
     // Prime the ghost + bead-lift to match the initial React state — the
     // state-tracking useEffect above fires BEFORE this scene effect on
     // first mount (applyRef.current is still null), so without priming a
@@ -1011,6 +1365,11 @@ export default function SlimeApp() {
           slime.restPositionArray,
           slime.shape
         )
+        innerBeadsLayer.reseat(
+          slime.unitDirsArray,
+          slime.restPositionArray,
+          slime.shape
+        )
         const shapeInfluence = beadsLayer.computeBeadInfluence(
           slime.unitDirsArray
         )
@@ -1032,6 +1391,7 @@ export default function SlimeApp() {
           currentBeadInfo()
         )
         emojiBeadsLayer.reseat(slime.unitDirsArray)
+        customBeadsLayer.reseat(slime.unitDirsArray)
       },
       setBeads: (v) => {
         beadsLayer.setConfig(
@@ -1144,6 +1504,26 @@ export default function SlimeApp() {
       setEmojiGhost: (v) => emojiBeadsLayer.setGhostVisible(v),
       setEmojiBeadLift: (h) => emojiBeadsLayer.setBeadLift(h),
       setSceneBackground: (hex) => bgMaterial.color.setHex(hex),
+      setColorAdjustments: (adj) => {
+        slime.setColorAdjustments(adj)
+        beadsLayer.setColorAdjustments(adj)
+        innerBeadsLayer.setColorAdjustments(adj)
+        customBeadsLayer.setColorAdjustments(adj)
+      },
+      setPhotoDecal: (texture) => slime.setPhotoDecal(texture),
+      setPhotoBeads: (textures) => beadsLayer.setPhotos(textures),
+      setInnerSlime: (v) => {
+        innerBeadsLayer.setConfig(
+          v,
+          slime.unitDirsArray,
+          slime.restPositionArray,
+          slime.shape
+        )
+      },
+      setCustomBeads: (v) => {
+        customBeadsLayer.setConfig(v, slime.unitDirsArray)
+      },
+      setCustomBeadsPhoto: (texture) => customBeadsLayer.setPhoto(texture),
       reset: () => {
         slime.reset()
         // Wipe any accumulated per-bead crack damage — otherwise a
@@ -1153,6 +1533,12 @@ export default function SlimeApp() {
         // coating too).
         beadsLayer.resetDamage()
         beadsLayer.reseat(
+          slime.unitDirsArray,
+          slime.restPositionArray,
+          slime.shape
+        )
+        innerBeadsLayer.resetDamage()
+        innerBeadsLayer.reseat(
           slime.unitDirsArray,
           slime.restPositionArray,
           slime.shape
@@ -1170,21 +1556,52 @@ export default function SlimeApp() {
           currentBeadInfo()
         )
         emojiBeadsLayer.reseat(slime.unitDirsArray)
+        customBeadsLayer.reseat(slime.unitDirsArray)
       },
       captureCanonicalThumbnail: () => {
-        // Snapshot mesh transform, force it to canonical (a modest
-        // scale that keeps the slime clearly inside a portrait-
-        // phone canvas, identity rotation, origin), render one
-        // frame, capture, then restore so the live view isn't
-        // disturbed. Scale 1 was oversized on narrow canvases and
-        // cropped the slime — 0.65 leaves comfortable margin so
-        // the thumbnail always shows the whole shape.
+        // Snapshot mesh transform + all mutable physics/damage state
+        // so we can reset to the "options-applied" baseline for the
+        // capture, then restore whatever the user was actually doing
+        // (mid-squish, rotated, etc.) without disturbing the live view.
         const savedScale = slime.mesh.scale.clone()
         const savedQuat = slime.mesh.quaternion.clone()
         const savedPos = slime.mesh.position.clone()
-        slime.mesh.scale.setScalar(0.5)
+        const stateSnap = slime.snapshotMutableState()
+        // Hide the environment-tint background sphere for the capture
+        // frame so the thumbnail is a true slime cutout on transparent
+        // pixels — otherwise the sphere fills every non-slime pixel
+        // with the theme's page tone and each thumbnail reads as a
+        // painted rectangle behind the slime.
+        const savedBgVisible = bg.visible
+        bg.visible = false
+        // Slimes that DON'T have a full-fill bead shell read visually
+        // smaller in the thumbnail than slimes that do — the outer
+        // radius of a bead-shelled slime = slime radius + bead radius
+        // (× visual bulk from beads' specular sparkle). Scale up
+        // naked slimes proportionally so every thumbnail reads at a
+        // consistent apparent size.
+        const beadsCfg = beadsLayer.currentConfig
+        const hasFullBeadShell =
+          beadsCfg.fill &&
+          beadsCfg.shapes.length > 0 &&
+          beadsCfg.colors.length > 0
+        // Baseline scale with a full bead shell. When beads aren't
+        // filling the surface, add the bead layer's radius contribution
+        // (× a bulk factor to account for specular halo bloom that
+        // makes bead-covered slimes read even larger than pure
+        // geometry). Using compact bead default size 0.13 → factor of
+        // roughly 1.30, i.e. naked scale ~0.65.
+        const beadRadius = 0.13
+        const bulk = 2.3
+        const captureScale = hasFullBeadShell
+          ? 0.5
+          : 0.5 * (1 + beadRadius * bulk)
+        slime.mesh.scale.setScalar(captureScale)
         slime.mesh.quaternion.identity()
         slime.mesh.position.set(0, 0, 0)
+        // Undeformed rest shape — no crack, no squish — so the
+        // saved thumbnail reads as the finished slime configuration.
+        slime.reset()
         try {
           renderer.render(scene, camera)
           const src = canvas
@@ -1198,13 +1615,32 @@ export default function SlimeApp() {
           const sx = (src.width - side) * 0.5
           const sy = (src.height - side) * 0.5
           ctx.drawImage(src, sx, sy, side, side, 0, 0, SIZE, SIZE)
-          return off.toDataURL('image/jpeg', 0.7)
+          // Chroma-key the near-black envelope that WebGL's
+          // premultiplied-alpha compositing bleeds around the slime
+          // silhouette. Any pixel that's essentially black AND semi-
+          // or fully transparent gets pushed to fully transparent so
+          // the exported PNG really is a background-less cutout.
+          const px = ctx.getImageData(0, 0, SIZE, SIZE)
+          const d = px.data
+          for (let i = 0; i < d.length; i += 4) {
+            const r = d[i]
+            const g = d[i + 1]
+            const b = d[i + 2]
+            const a = d[i + 3]
+            if (a < 250 && r < 24 && g < 24 && b < 24) {
+              d[i + 3] = 0
+            }
+          }
+          ctx.putImageData(px, 0, 0)
+          return off.toDataURL('image/png')
         } catch {
           return undefined
         } finally {
           slime.mesh.scale.copy(savedScale)
           slime.mesh.quaternion.copy(savedQuat)
           slime.mesh.position.copy(savedPos)
+          slime.restoreMutableState(stateSnap)
+          bg.visible = savedBgVisible
           // Render again with restored transform so the next frame
           // draws from the correct state (the RAF loop would do this
           // anyway but a manual render keeps the display seamless).
@@ -1957,9 +2393,20 @@ export default function SlimeApp() {
       // resolved position for tip-distance testing. Uncoated beads /
       // non-chunk combos early-exit inside the method.
       beadsLayer.applyPressDamage(localTips, dt)
+      // 속슬라임 uses the SAME update path — its BeadsLayer is another
+      // independent instance rendering into slime.mesh. Squish-on-press
+      // is applied inside SlimeApp (post-update pos shim) so we don't
+      // touch BeadsLayer internals for a single-tab behavior tweak.
+      innerBeadsLayer.update(
+        slime.positionArray,
+        slime.pressureThisFrame,
+        slimeLocalCameraPos
+      )
+      innerBeadsLayer.applyPressDamage(localTips, dt)
       paperLayer.update(slime.positionArray, slime.normalArray)
       powderLayer.update(slime.positionArray, slime.normalArray)
       emojiBeadsLayer.update(slime.positionArray, slime.restPositionArray)
+      customBeadsLayer.update(slime.positionArray)
 
       // Sound: continuous squish tied to how much force is currently being
       // applied, plus a crack whenever damage crosses the next fracture step
@@ -2040,6 +2487,7 @@ export default function SlimeApp() {
         // collapses tube→foil for its damage shader.
         const coatingId = coatingRef.current
         const beadCoatingId = beadCoatingRef.current
+        const innerCoatingId = innerSlimeCoatingRef.current
         const slimeCracks = slime.damageRenderingEnabled
         const slimeWaxLevel =
           slimeCracks && coatingId === 'wax' ? soundLevel : 0
@@ -2055,20 +2503,30 @@ export default function SlimeApp() {
             ? soundLevel
             : 0
         const beadIsIce = beadCoatingId === 'ice'
+        const innerWaxLevel =
+          innerCoatingId === 'wax' ? soundLevel : 0
+        const innerFoilLevel =
+          innerCoatingId === 'foil' || innerCoatingId === 'tube'
+            ? soundLevel
+            : 0
+        const innerIsIce = innerCoatingId === 'ice'
 
         sound.setLoopingSampleLevel(
           'wax',
-          Math.max(slimeWaxLevel, beadWaxLevel)
+          Math.max(slimeWaxLevel, beadWaxLevel, innerWaxLevel)
         )
         sound.setLoopingSampleLevel(
           'foil',
-          Math.max(slimeFoilLevel, beadFoilLevel)
+          Math.max(slimeFoilLevel, beadFoilLevel, innerFoilLevel)
         )
         // Ice / caramel: procedural crack fires on the slime's per-frame
-        // press stress crossing 0.5. Slime-ice and bead-ice trigger
-        // through the same press metric — bead-specific pressure isn't
-        // tracked separately.
-        if ((slimeIsIce || beadIsIce) && slime.pressureThisFrame > 0.5) {
+        // press stress crossing 0.5. Slime-ice, bead-ice, and inner-ice
+        // trigger through the same press metric — none of them track a
+        // separate pressure signal.
+        if (
+          (slimeIsIce || beadIsIce || innerIsIce) &&
+          slime.pressureThisFrame > 0.5
+        ) {
           sound.playCrack(
             Math.min(1, 0.4 + slime.pressureThisFrame / 45)
           )
@@ -2154,8 +2612,20 @@ export default function SlimeApp() {
       // so a fully expanded panel lifts the sphere well clear of it.
       const viewportWorldHeight =
         2 * CAMERA_Z * Math.tan((camera.fov * Math.PI) / 360)
-      const targetShiftY = frac * viewportWorldHeight * 0.3
-      const targetPanelScale = 1 - frac * 0.1
+      // Collection carousel view: the bottom carousel is taller than
+      // the CustomizePanel so the auto-fit would otherwise push the
+      // slime way up the screen. Skip both lift and shrink from the
+      // panel-size channel while in collection mode — the dedicated
+      // collectionCarouselShrink (below) handles the visual downsizing.
+      const inCollectionCarousel =
+        bottomModeRef.current === 'collection' &&
+        browseIdxRef.current === null
+      const targetShiftY = inCollectionCarousel
+        ? 0
+        : frac * viewportWorldHeight * 0.5
+      const targetPanelScale = inCollectionCarousel
+        ? 1
+        : 1 - frac * 0.22
       currentPanelShiftY += (targetShiftY - currentPanelShiftY) * 0.15
       currentPanelScale += (targetPanelScale - currentPanelScale) * 0.15
       slime.mesh.position.y = currentPanelShiftY
@@ -2232,6 +2702,8 @@ export default function SlimeApp() {
       container?.removeEventListener('wheel', onWheel)
       applyRef.current = null
       beadsLayer.dispose()
+      innerBeadsLayer.dispose()
+      customBeadsLayer.dispose()
       paperLayer.dispose()
       powderLayer.dispose()
       emojiBeadsLayer.dispose()
@@ -2273,6 +2745,42 @@ export default function SlimeApp() {
       <canvas ref={canvasRef} className={styles.canvas} />
       <canvas ref={overlayRef} className={styles.overlayCanvas} />
 
+
+      {/* Top-left cluster hosts the persistent action icons — collection
+          bookmark (save / view menu) and share. They live on the left so
+          the top-right stays reserved for the hamburger menu + any
+          contextual toggles (emoji move). */}
+      {/* Top-left cluster now hosts just the 공유 button — the
+          컬렉션 button moved into the bottom-row drop-up menu so
+          save + browse live near the primary action cluster. */}
+      <div
+        className={styles.topLeftBar}
+        data-hud
+        style={browseIdx !== null ? { display: 'none' } : undefined}
+      >
+        <button
+          type="button"
+          className={styles.iconButton}
+          onClick={handleShare}
+          aria-label="공유"
+        >
+          <svg
+            width="20"
+            height="20"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7" />
+            <polyline points="16 6 12 2 8 6" />
+            <line x1="12" y1="2" x2="12" y2="15" />
+          </svg>
+        </button>
+      </div>
+
       <div
         className={styles.topBar}
         data-hud
@@ -2306,97 +2814,6 @@ export default function SlimeApp() {
             </svg>
           </button>
         )}
-        <div className={styles.collectionMenuWrap}>
-          <button
-            type="button"
-            className={styles.iconButton}
-            onClick={() => setCollectionMenuOpen((v) => !v)}
-            aria-label="컬렉션"
-            aria-expanded={collectionMenuOpen}
-          >
-            <svg
-              width="20"
-              height="20"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
-            </svg>
-          </button>
-          {collectionMenuOpen && (
-            <>
-              <div
-                className={styles.collectionMenuBackdrop}
-                onClick={() => setCollectionMenuOpen(false)}
-              />
-              <div className={styles.collectionMenu} data-hud>
-                <button
-                  type="button"
-                  className={styles.collectionMenuBtn}
-                  onClick={() => {
-                    beginSaveToCollection()
-                    setCollectionMenuOpen(false)
-                  }}
-                >
-                  저장하기
-                </button>
-                <button
-                  type="button"
-                  className={styles.collectionMenuBtn}
-                  onClick={startBrowsing}
-                >
-                  컬렉션 보기
-                </button>
-              </div>
-            </>
-          )}
-        </div>
-        <button
-          type="button"
-          className={styles.iconButton}
-          onClick={() => setGuideOpen(true)}
-          aria-label="가이드"
-        >
-          <svg
-            width="20"
-            height="20"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <circle cx="12" cy="12" r="9" />
-            <path d="M9.5 9.5a2.5 2.5 0 0 1 5 0c0 1.5-2.5 2-2.5 3.5" />
-            <line x1="12" y1="17" x2="12" y2="17.01" />
-          </svg>
-        </button>
-        <button
-          type="button"
-          className={styles.iconButton}
-          onClick={handleShare}
-          aria-label="공유"
-        >
-          <svg
-            width="20"
-            height="20"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7" />
-            <polyline points="16 6 12 2 8 6" />
-            <line x1="12" y1="2" x2="12" y2="15" />
-          </svg>
-        </button>
         <button
           type="button"
           className={styles.iconButton}
@@ -2516,34 +2933,6 @@ export default function SlimeApp() {
             </nav>
           </aside>
         </>
-      )}
-
-      {guideOpen && (
-        <div
-          className={styles.modalBackdrop}
-          onClick={() => setGuideOpen(false)}
-        >
-          <div
-            className={styles.modal}
-            data-hud
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className={styles.modalTitle}>사용 가이드</div>
-            <ul className={styles.modalList}>
-              <li>손 펴서 눌러 납작하게</li>
-              <li>손 오므리면 힘 뺌</li>
-              <li>드래그: 회전</li>
-              <li>핀치: 크기</li>
-            </ul>
-            <button
-              type="button"
-              className={styles.modalClose}
-              onClick={() => setGuideOpen(false)}
-            >
-              닫기
-            </button>
-          </div>
-        </div>
       )}
 
       {browseIdx !== null && (() => {
@@ -2942,6 +3331,108 @@ export default function SlimeApp() {
         // slime, not editing.
         style={browseIdx !== null ? { display: 'none' } : undefined}
       >
+        {/* Top-of-controls action row — sits directly above the
+            options panel. Hand toggle pinned left, shape reset in
+            the centre, collection opener pinned right. Replaces the
+            previous bottom bar (undo + default + reset trio). */}
+        <div className={styles.topButtonRow}>
+          <button
+            type="button"
+            className={styles.sideBtn}
+            data-active={skeletonOn}
+            onClick={() => setSkeletonOn((v) => !v)}
+            aria-label={skeletonOn ? '손 감지 끄기' : '손 감지 켜기'}
+            aria-pressed={skeletonOn}
+          >
+            <svg
+              width="24"
+              height="24"
+              viewBox="0 0 56 56"
+              fill="currentColor"
+            >
+              <path d="M 2.1952 36.8945 C 3.0156 36.8711 3.6015 36.2383 3.6250 35.3945 C 3.8828 25.1992 9.1328 17.6523 17.1015 14.6992 L 22.5625 29.6992 C 22.6093 29.8164 22.5859 29.9101 22.4687 29.9570 C 22.3749 30.0039 22.3046 29.9570 22.2343 29.8867 L 19.4687 26.8867 C 17.6640 24.9414 15.3671 24.8008 13.5859 26.3008 C 11.5703 28.0117 11.5468 30.5664 13.5156 32.9805 L 21.3671 42.4727 C 27.2968 49.6445 34.2578 51.8711 42.0390 49.0352 C 51.3438 45.6602 55.3047 37.1289 51.5545 26.8164 L 49.7967 22.0117 C 47.9689 16.9258 44.4765 14.8398 40.3749 16.2695 C 39.2734 14.8398 37.5859 14.3477 35.7578 15.0039 C 35.1250 15.2383 34.5156 15.5899 33.9296 16.0352 C 32.7343 14.4883 30.8828 13.9258 28.9609 14.6055 C 28.4452 14.7930 27.9530 15.0742 27.4843 15.4023 L 24.8125 8.0899 C 23.8046 5.3008 21.2734 4.1289 18.6718 5.0664 C 16.0468 6.0274 14.8749 8.5352 15.8828 11.3242 L 16.0703 11.8398 C 6.9999 15.2383 .6953 23.9805 .6953 35.3477 C .6953 36.1914 1.3984 36.9179 2.1952 36.8945 Z M 41.0312 45.9648 C 34.8906 48.2148 29.1250 47.0664 23.7109 40.5274 L 15.8593 31.0820 C 15.0156 30.0977 15.0156 29.1367 15.7656 28.4805 C 16.4687 27.8477 17.4296 28.0586 18.2030 28.8555 L 23.6171 34.4570 C 24.5312 35.3945 25.3281 35.4883 26.1015 35.2070 C 27.0156 34.8789 27.4140 33.8945 27.0390 32.8867 L 18.7421 10.0586 C 18.3906 9.1211 18.8125 8.2305 19.7030 7.9023 C 20.6171 7.5742 21.4609 8.0195 21.8125 8.9570 L 27.7421 25.2461 C 28.0234 26.0195 28.8906 26.3711 29.6640 26.0899 C 30.4140 25.8086 30.8125 24.9883 30.5312 24.2383 L 28.3984 18.3555 C 28.7265 18.0508 29.1718 17.7461 29.6171 17.5820 C 30.7187 17.1836 31.6328 17.6758 32.0546 18.8242 L 33.9296 23.9570 C 34.2109 24.7539 35.0781 25.0586 35.8281 24.7774 C 36.5546 24.5195 37.0234 23.7461 36.7187 22.9258 L 35.1952 18.7774 C 35.5234 18.4492 35.9687 18.1445 36.4140 17.9805 C 37.5156 17.5820 38.4296 18.0742 38.8515 19.2227 L 40.0937 22.6445 C 40.3984 23.4648 41.2656 23.7695 42.0156 23.4883 C 42.7421 23.2305 43.1874 22.4336 42.9062 21.6367 L 41.9687 19.1055 C 43.9374 18.4023 45.7892 19.9961 47.0545 23.5117 L 48.5310 27.5195 C 51.7422 36.3789 48.8123 43.1289 41.0312 45.9648 Z" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className={styles.sideBtn}
+            onClick={() => applyRef.current?.reset()}
+            aria-label="슬라임 리셋"
+          >
+            <svg
+              width="22"
+              height="22"
+              viewBox="0 0 512 512"
+              fill="currentColor"
+            >
+              <path d="M64,256H34A222,222,0,0,1,430,118.15V85h30V190H355V160h67.27A192.21,192.21,0,0,0,256,64C150.13,64,64,150.13,64,256Zm384,0c0,105.87-86.13,192-192,192A192.21,192.21,0,0,1,89.73,352H157V322H52V427H82V393.85A222,222,0,0,0,478,256Z" />
+            </svg>
+          </button>
+          <div className={styles.sideBtnWrap}>
+            <button
+              type="button"
+              className={styles.sideBtn}
+              data-active={
+                bottomMode === 'collection' || collectionMenuOpen
+              }
+              onClick={() => {
+                if (bottomMode === 'collection') {
+                  setBottomMode('options')
+                  setCollectionMenuOpen(false)
+                } else {
+                  setCollectionMenuOpen((v) => !v)
+                }
+              }}
+              aria-label="컬렉션"
+              aria-expanded={collectionMenuOpen}
+            >
+              <svg
+                width="22"
+                height="22"
+                viewBox="0 -0.5 21 21"
+                fill="currentColor"
+              >
+                <path d="M17.85,11 L14.7,11 C12.96015,11 11.55,12.343 11.55,14 L11.55,17 C11.55,18.657 12.96015,20 14.7,20 L17.85,20 C19.58985,20 21,18.657 21,17 L21,14 C21,12.343 19.58985,11 17.85,11 M6.3,11 L3.15,11 C1.41015,11 0,12.343 0,14 L0,17 C0,18.657 1.41015,20 3.15,20 L6.3,20 C8.03985,20 9.45,18.657 9.45,17 L9.45,14 C9.45,12.343 8.03985,11 6.3,11 M17.85,0 L14.7,0 C12.96015,0 11.55,1.343 11.55,3 L11.55,6 C11.55,7.657 12.96015,9 14.7,9 L17.85,9 C19.58985,9 21,7.657 21,6 L21,3 C21,1.343 19.58985,0 17.85,0 M9.45,3 L9.45,6 C9.45,7.657 8.03985,9 6.3,9 L3.15,9 C1.41015,9 0,7.657 0,6 L0,3 C0,1.343 1.41015,0 3.15,0 L6.3,0 C8.03985,0 9.45,1.343 9.45,3" />
+              </svg>
+            </button>
+            {collectionMenuOpen && (
+              <>
+                <div
+                  className={styles.collectionMenuBackdrop}
+                  onClick={() => setCollectionMenuOpen(false)}
+                />
+                <div
+                  className={`${styles.collectionMenu} ${styles.collectionMenuUp}`}
+                  data-hud
+                >
+                  <button
+                    type="button"
+                    className={styles.collectionMenuBtn}
+                    onClick={() => {
+                      beginSaveToCollection()
+                      setCollectionMenuOpen(false)
+                    }}
+                  >
+                    저장하기
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.collectionMenuBtn}
+                    onClick={() => {
+                      setBottomMode('collection')
+                      setCollectionMenuOpen(false)
+                    }}
+                  >
+                    컬렉션 보기
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+        <div className={styles.controlsInner}>
+        {bottomMode === 'options' ? (
+        <>
         <CustomizePanel
           colors={colors}
           material={material}
@@ -2957,36 +3448,493 @@ export default function SlimeApp() {
           onBeads={setBeads}
           onSprinkles={setSprinkles}
           onEmojiBeads={setEmojiBeads}
+          stickerOn={stickerOn}
+          onPickSticker={handlePhotoSticker}
+          onClearSticker={clearSticker}
+          photoBeadSlots={photoBeads.map((t) => t !== null)}
+          onPickPhotoBead={(i, f) => void setPhotoBeadAt(i, f)}
+          onClearPhotoBead={clearPhotoBeadAt}
+          colorAdjustments={colorAdjustments}
+          onColorAdjustment={(id, dh, dl) => {
+            setColorAdjustments((prev) => {
+              const next = { ...prev }
+              if (dh === 0 && dl === 0) delete next[id]
+              else next[id] = [dh, dl]
+              return next
+            })
+          }}
+          innerSlime={innerSlime}
+          onInnerSlime={setInnerSlime}
+          customBeads={customBeads}
+          onCustomBeads={setCustomBeads}
+          customBeadsPhotoOn={customBeadsPhoto !== null}
+          onPickCustomBeadsPhoto={async (file) => {
+            const tex = await loadPhotoTexture(file)
+            if (!tex) return
+            setCustomBeadsPhoto(tex)
+          }}
+          onClearCustomBeadsPhoto={() => setCustomBeadsPhoto(null)}
         />
-
-        <div className={styles.compactRow}>
-          <button
-            type="button"
-            className={styles.toggle}
-            data-active={skeletonOn}
-            onClick={() => setSkeletonOn((v) => !v)}
-            aria-label="손 감지 토글"
-            aria-pressed={skeletonOn}
-          >
-            {skeletonOn ? '손 감지 켬' : '손 감지 끔'}
-          </button>
-          <button
-            type="button"
-            className={styles.toggle}
-            onClick={() => applyRef.current?.reset()}
-            aria-label="슬라임 리셋"
-          >
-            ↻ 리셋
-          </button>
-          <button
-            type="button"
-            className={styles.toggle}
-            onClick={resetToDefaults}
-            aria-label="디폴트로 되돌리기"
-          >
-            ✦ 디폴트
-          </button>
+        {(() => {
+          // Unified selected-option tag row — aggregates every
+          // active tweak across all categories into one strip
+          // between the CustomizePanel and the bottom bar. Each
+          // chip has its own × to drop that specific option
+          // regardless of which primary category is currently open.
+          const allTags: SelectionTag[] = []
+          colors.forEach((cid) => {
+            allTags.push({
+              key: `sc-${cid}`,
+              label: resolveColorLabel(cid),
+              onRemove: () => setColors(colors.filter((x) => x !== cid))
+            })
+          })
+          if (material !== 'crystal') {
+            const m = MATERIALS.find((x) => x.id === material)
+            if (m) {
+              allTags.push({
+                key: `sm-${material}`,
+                label: m.label,
+                onRemove: () => setMaterial('crystal')
+              })
+            }
+          }
+          if (coating !== 'none') {
+            const c = COATINGS.find((x) => x.id === coating)
+            if (c) {
+              allTags.push({
+                key: `sco-${coating}`,
+                label: c.label,
+                onRemove: () => setCoating('none')
+              })
+            }
+          }
+          if (shape !== 'sphere') {
+            const s = SHAPES.find((x) => x.id === shape)
+            if (s) {
+              allTags.push({
+                key: `ssh-${shape}`,
+                label: s.label,
+                onRemove: () => setShape('sphere')
+              })
+            }
+          }
+          if (stickerOn) {
+            allTags.push({
+              key: 'sticker',
+              label: '사진 슬라임',
+              onRemove: clearSticker
+            })
+          }
+          // 미니비즈 / 속비즈 (both bind to `beads`). Active-layer tag
+          // (label reflects the combo) appears any time the user has
+          // dragged a count or toggled fill — removing it wipes the
+          // whole bead layer back to the neutral default.
+          if (
+            beads.combo === 'compact' &&
+            (beads.fill || beads.count > 0)
+          ) {
+            allTags.push({
+              key: 'b-compact',
+              label: beads.fill
+                ? '비즈 꽉'
+                : `비즈 ${beads.count}개`,
+              onRemove: () => setBeads(BEADS_DEFAULT)
+            })
+          }
+          if (beads.combo === 'chunk' && beads.count > 0) {
+            allTags.push({
+              key: 'b-chunk',
+              label: `비즈볼 ${beads.count}개`,
+              onRemove: () => setBeads(BEADS_DEFAULT)
+            })
+          }
+          if (beads.combo !== 'none') {
+            beads.colors.forEach((cid) => {
+              allTags.push({
+                key: `bc-${cid}`,
+                label: `비즈 ${resolveColorLabel(cid)}`,
+                onRemove: () =>
+                  setBeads({
+                    ...beads,
+                    colors: beads.colors.filter((x) => x !== cid)
+                  })
+              })
+            })
+            beads.shapes.forEach((sid) => {
+              if (beads.shapes.length <= 1) return
+              const s = BEAD_SHAPES.find((x) => x.id === sid)
+              if (!s) return
+              allTags.push({
+                key: `bs-${sid}`,
+                label: `비즈 ${s.label}`,
+                onRemove: () =>
+                  setBeads({
+                    ...beads,
+                    shapes: beads.shapes.filter((x) => x !== sid)
+                  })
+              })
+            })
+            if (beads.material !== 'plastic') {
+              const bm = BEAD_MATERIALS.find((x) => x.id === beads.material)
+              if (bm) {
+                allTags.push({
+                  key: `bm-${beads.material}`,
+                  label: `비즈 ${bm.label}`,
+                  onRemove: () => setBeads({ ...beads, material: 'plastic' })
+                })
+              }
+            }
+          }
+          photoBeads.forEach((tex, i) => {
+            if (!tex) return
+            allTags.push({
+              key: `pb-${i}`,
+              label: `사진 비즈 ${i + 1}`,
+              onRemove: () => clearPhotoBeadAt(i)
+            })
+          })
+          // 속슬라임 — active-layer tag first, then any per-detail
+          // tweaks (colors / coating).
+          if (innerSlime.combo !== 'none' && innerSlime.count > 0) {
+            allTags.push({
+              key: 'is-active',
+              label: `슬라임볼 ${innerSlime.count}개`,
+              onRemove: () => setInnerSlime(BEADS_DEFAULT)
+            })
+          }
+          if (innerSlime.combo !== 'none') {
+            innerSlime.colors.forEach((cid) => {
+              allTags.push({
+                key: `isc-${cid}`,
+                label: `슬라임볼 ${resolveColorLabel(cid)}`,
+                onRemove: () =>
+                  setInnerSlime({
+                    ...innerSlime,
+                    colors: innerSlime.colors.filter((x) => x !== cid)
+                  })
+              })
+            })
+            if (innerSlime.coating !== 'none') {
+              const bc = COATINGS.find((x) => x.id === innerSlime.coating)
+              if (bc) {
+                allTags.push({
+                  key: `isco-${innerSlime.coating}`,
+                  label: `슬라임볼 ${bc.label}`,
+                  onRemove: () =>
+                    setInnerSlime({ ...innerSlime, coating: 'none' })
+                })
+              }
+            }
+          }
+          // 커스텀비즈 — active-layer tag when count > 0, then colours.
+          if (customBeads.count > 0) {
+            allTags.push({
+              key: 'cb-active',
+              label: `커스텀비즈 ${customBeads.count}개`,
+              onRemove: () => setCustomBeads(CUSTOM_BEADS_DEFAULT)
+            })
+          }
+          customBeads.colors.forEach((cid) => {
+            allTags.push({
+              key: `cbc-${cid}`,
+              label: `커스텀 ${resolveColorLabel(cid)}`,
+              onRemove: () =>
+                setCustomBeads({
+                  ...customBeads,
+                  colors: customBeads.colors.filter((x) => x !== cid)
+                })
+            })
+          })
+          if (customBeadsPhoto) {
+            allTags.push({
+              key: 'cbp',
+              label: '커스텀 사진',
+              onRemove: () => setCustomBeadsPhoto(null)
+            })
+          }
+          // 스프링클 (per type) — active-layer tag per type, then any
+          // per-colour tags. Removing the active tag zeroes the count
+          // (and fill for paper/powder) so the type turns off cleanly.
+          ;(['paper', 'powder', 'ink'] as const).forEach((typeId) => {
+            const cfg = sprinkles[typeId]
+            const isFilled = 'fill' in cfg && cfg.fill
+            if (cfg.count === 0 && !isFilled) return
+            const typeLabel =
+              typeId === 'paper' ? '납작종이' : typeId === 'powder' ? '가루' : '잉크'
+            allTags.push({
+              key: `sp-${typeId}-active`,
+              label: isFilled
+                ? `${typeLabel} 꽉`
+                : `${typeLabel} ${cfg.count}개`,
+              onRemove: () => {
+                if (typeId === 'ink') {
+                  setSprinkles({
+                    ...sprinkles,
+                    ink: { ...sprinkles.ink, count: 0 }
+                  })
+                } else {
+                  setSprinkles({
+                    ...sprinkles,
+                    [typeId]: {
+                      ...sprinkles[typeId],
+                      count: 0,
+                      fill: false
+                    }
+                  })
+                }
+              }
+            })
+            cfg.colors.forEach((cid) => {
+              const c = SPRINKLE_COLORS.find((x) => x.id === cid)
+              if (!c) return
+              allTags.push({
+                key: `sp-${typeId}-${cid}`,
+                label: `${typeLabel} ${c.label}`,
+                onRemove: () => {
+                  const next = cfg.colors.filter((x) => x !== cid)
+                  setSprinkles({
+                    ...sprinkles,
+                    [typeId]: { ...cfg, colors: next }
+                  })
+                }
+              })
+            })
+          })
+          // 이모지
+          emojiBeads.emojis.forEach((e) => {
+            allTags.push({
+              key: `em-${e}`,
+              label: e,
+              onRemove: () =>
+                setEmojiBeads({
+                  ...emojiBeads,
+                  emojis: emojiBeads.emojis.filter((x) => x !== e)
+                })
+            })
+          })
+          if (allTags.length === 0) return null
+          return (
+            <div className={styles.unifiedTagRow}>
+              <button
+                type="button"
+                className={styles.unifiedTagResetBtn}
+                onClick={resetToDefaults}
+                aria-label="모든 옵션 초기화"
+                title="모든 옵션 초기화"
+              >
+                <svg
+                  width="14"
+                  height="14"
+                  viewBox="0 0 512 512"
+                  fill="currentColor"
+                  aria-hidden="true"
+                >
+                  <path d="M64,256H34A222,222,0,0,1,430,118.15V85h30V190H355V160h67.27A192.21,192.21,0,0,0,256,64C150.13,64,64,150.13,64,256Zm384,0c0,105.87-86.13,192-192,192A192.21,192.21,0,0,1,89.73,352H157V322H52V427H82V393.85A222,222,0,0,0,478,256Z" />
+                </svg>
+              </button>
+              {allTags.map((t) => (
+                <span key={t.key} className={styles.unifiedTag}>
+                  <span className={styles.unifiedTagLabel}>{t.label}</span>
+                  <button
+                    type="button"
+                    className={styles.unifiedTagRemove}
+                    onClick={t.onRemove}
+                    aria-label={`${t.label} 제거`}
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )
+        })()}
+        </>
+        ) : (() => {
+          const items = collection.filter((c) => c.thumb)
+          if (items.length === 0) {
+            return (
+              <div className={styles.collectionCarouselEmpty}>
+                저장된 슬라임이 없습니다
+              </div>
+            )
+          }
+          // -1 preserved as "nothing selected". Only positive indices
+          // are clamped to the items range; a stale index that's
+          // beyond the current items length falls back to no-selection
+          // instead of silently snapping to the last card.
+          const clamped =
+            carouselIdx < 0 || carouselIdx > items.length - 1
+              ? -1
+              : carouselIdx
+          return (
+            <div className={styles.collectionCarousel}>
+              <div className={styles.collectionCarouselScroller}>
+              <div className={styles.collectionCarouselTrack}>
+                {items.map((entry, i) => {
+                  const isSel = i === clamped
+                  return (
+                    <div
+                      key={entry.id}
+                      className={styles.collectionCarouselCard}
+                      data-selected={
+                        deleteMode ? selectedForDelete.has(entry.id) : isSel
+                      }
+                      onPointerDown={(e) => {
+                        const el = e.currentTarget as HTMLElement
+                        window.clearTimeout(
+                          Number(el.dataset.longPressTimer ?? 0)
+                        )
+                        const id = window.setTimeout(() => {
+                          setDeleteMode(true)
+                          setSelectedForDelete(new Set([entry.id]))
+                        }, 500)
+                        el.dataset.longPressTimer = String(id)
+                      }}
+                      onPointerUp={(e) => {
+                        const el = e.currentTarget as HTMLElement
+                        window.clearTimeout(
+                          Number(el.dataset.longPressTimer ?? 0)
+                        )
+                        delete el.dataset.longPressTimer
+                      }}
+                      onPointerLeave={(e) => {
+                        const el = e.currentTarget as HTMLElement
+                        window.clearTimeout(
+                          Number(el.dataset.longPressTimer ?? 0)
+                        )
+                        delete el.dataset.longPressTimer
+                      }}
+                      onClick={() => {
+                        if (deleteMode) {
+                          setSelectedForDelete((prev) => {
+                            const next = new Set(prev)
+                            if (next.has(entry.id)) next.delete(entry.id)
+                            else next.add(entry.id)
+                            return next
+                          })
+                        } else {
+                          setCarouselIdx(i)
+                        }
+                      }}
+                    >
+                      <div className={styles.collectionCarouselThumb}>
+                        {entry.thumb && (
+                          <img
+                            src={entry.thumb}
+                            alt={entry.name}
+                            draggable={false}
+                          />
+                        )}
+                      </div>
+                      <div className={styles.collectionCarouselName}>
+                        {entry.name}
+                      </div>
+                      {deleteMode && (
+                        <div
+                          className={styles.collectionCarouselCheckbox}
+                          data-checked={selectedForDelete.has(entry.id)}
+                          aria-label={
+                            selectedForDelete.has(entry.id)
+                              ? '삭제 선택 해제'
+                              : '삭제 선택'
+                          }
+                        >
+                          {selectedForDelete.has(entry.id) ? '✓' : ''}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+              </div>
+              {deleteMode ? (
+                <div className={styles.collectionCarouselActions}>
+                  <button
+                    type="button"
+                    className={styles.collectionCarouselAction}
+                    onClick={() => {
+                      setDeleteMode(false)
+                      setSelectedForDelete(new Set())
+                    }}
+                  >
+                    취소
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.collectionCarouselAction}
+                    data-danger="true"
+                    disabled={selectedForDelete.size === 0}
+                    onClick={() => {
+                      setCollection((c) =>
+                        c.filter((entry) => !selectedForDelete.has(entry.id))
+                      )
+                      setDeleteMode(false)
+                      setSelectedForDelete(new Set())
+                      setCarouselIdx(-1)
+                    }}
+                  >
+                    삭제 ({selectedForDelete.size})
+                  </button>
+                </div>
+              ) : clamped >= 0 && items[clamped] && (
+                <div className={styles.collectionCarouselActions}>
+                  <button
+                    type="button"
+                    className={styles.collectionCarouselAction}
+                    onClick={() => {
+                      applyStateSnapshot(items[clamped].state)
+                      setBottomMode('options')
+                    }}
+                  >
+                    만져보기
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.collectionCarouselAction}
+                    onClick={() => {
+                      applyStateSnapshot(items[clamped].state)
+                      setBottomMode('options')
+                    }}
+                  >
+                    수정하기
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.collectionCarouselShare}
+                    onClick={() => {
+                      const url = encodeShareUrlFromState(items[clamped].state)
+                      if (navigator.share) {
+                        void navigator.share({ url }).catch(() => {})
+                      } else if (navigator.clipboard) {
+                        void navigator.clipboard.writeText(url).catch(() => {})
+                        setToast('링크 복사됨')
+                      }
+                    }}
+                    aria-label="공유"
+                  >
+                    <svg
+                      width="18"
+                      height="18"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7" />
+                      <polyline points="16 6 12 2 8 6" />
+                      <line x1="12" y1="2" x2="12" y2="15" />
+                    </svg>
+                  </button>
+                </div>
+              )}
+            </div>
+          )
+        })()}
         </div>
+
       </div>
 
       {busy && (

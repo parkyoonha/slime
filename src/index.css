@@ -14,10 +14,10 @@
    value, so a designer swap only touches this file. */
 :root,
 :root[data-theme='dark'] {
-  --bg-page-start: #1a1030;
-  --bg-page-middle: #0b0b12;
-  --bg-page-end: #050308;
-  --bg-orb: #1a1130;
+  --bg-page-start: #0f0f0f;
+  --bg-page-middle: #000000;
+  --bg-page-end: #000000;
+  --bg-orb: #000000;
   /* Panel is fully transparent — the tabs and controls provide their
      own surfaces, and dropping the card lets the page gradient show
      through without a visible seam behind the option bar. */
@@ -30,6 +30,10 @@
      the active chip so the picked option reads as pressed in / recessed
      against the surrounding gray chips instead of raised out of them. */
   --bg-chip-selected: rgba(20, 20, 24, 0.95);
+  /* Selection-summary tag pills (unified + per-detail rows) — a darker
+     surface than the chip default so the read-only tags visually
+     recede below the interactive option chips. */
+  --bg-tag: rgba(38, 38, 44, 0.9);
   /* Muted border — replaces the pure-white outline on the back button
      and other bordered controls so the border reads as a subtle rim
      rather than a strong stroke against the dark gray fill. */
@@ -45,6 +49,10 @@
   --bg-slider-fill: rgba(255, 255, 255, 0.18);
   --bg-toggle: rgba(40, 40, 46, 0.85);
   --bg-toggle-hover: rgba(60, 60, 68, 0.9);
+  /* Bottom action bar — the filled rounded rectangle behind the
+     3 bottom buttons. Dark mode = deep grey, light mode = pale
+     grey. Kept as a token so tuning follows the theme system. */
+  --bg-bottom-bar: rgba(35, 35, 42, 0.95);
   --bg-toast: rgba(40, 40, 46, 0.96);
   --bg-drawer-backdrop: rgba(0, 0, 0, 0.45);
   --bg-modal-backdrop: rgba(0, 0, 0, 0.55);
@@ -72,7 +80,9 @@
   /* See dark-theme comment above — light mode's "selected" surface is a
      deeper mid-gray so it still reads as pressed against the pale chips. */
   --bg-chip-selected: rgba(150, 150, 158, 0.95);
+  --bg-tag: rgba(170, 170, 182, 0.95);
   --color-border-muted: rgba(150, 150, 158, 0.85);
+  --bg-bottom-bar: rgba(225, 225, 232, 0.95);
   /* Light-mode selected pair — white pill + dark ink so the picked
      control still pops against the pale surrounding panel. */
   --bg-selected: #fff;

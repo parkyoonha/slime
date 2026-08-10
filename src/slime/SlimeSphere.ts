@@ -2,13 +2,14 @@ import * as THREE from 'three'
 import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import {
   COATINGS,
-  COLORS,
   MATERIALS,
+  resolveColorHex,
+  type ColorAdjustments,
   type CoatingId,
   type ColorId,
   type MaterialId,
   type ShapeId,
-  shapeScale
+  shapeTransform
 } from './presets'
 
 export interface SlimeParams {
@@ -161,6 +162,11 @@ export class SlimeSphere {
     value: null
   }
   private readonly gradientRadiusUniform = { value: 1.0 }
+  /** Latest colour ids + per-colour HSL deltas, cached so
+   *  setColorAdjustments can re-resolve hex without SlimeApp having
+   *  to re-emit the id list. */
+  private currentColorIds: readonly ColorId[] = []
+  private currentColorAdjustments: ColorAdjustments = {}
   private gradientTexture: THREE.DataTexture | null = null
   // Coating gradient — mirrors the slime gradient infra but paints the
   // wax / foil surface tint instead of the base slime colour. When only
@@ -184,6 +190,20 @@ export class SlimeSphere {
   // stretch. Radius = bead radius in world units; amount is a 0/1 gate.
   private readonly beadRadiusUniform = { value: 0 }
   private readonly beadWrapAmountUniform = { value: 0 }
+  // 촬영 → 스티커 uniforms. When on, the fragment shader replaces the
+  // slime's base colour with a photo texture on the front hemisphere.
+  // Sampled in REST frame so the sticker sticks to the slime body and
+  // stretches / dents with kneading like a printed decal. The radial
+  // fade at the sticker edge keeps it circular rather than a square
+  // cut, and the front-hemisphere gate hides it from the back face
+  // (which would otherwise show a mirror of the photo through the
+  // translucent slime).
+  private readonly photoUseUniform = { value: 0.0 }
+  private readonly photoMapUniform: { value: THREE.Texture | null } = {
+    value: null
+  }
+  private readonly photoRadiusUniform = { value: 0.9 }
+  private photoTexture: THREE.Texture | null = null
   /** Per-vertex nearest-bead unit direction stored as an attribute. */
   private beadDirAttr!: THREE.BufferAttribute
   private accumulatedForce = 0
@@ -309,7 +329,10 @@ export class SlimeSphere {
       this.gradientTexUniform,
       this.gradientRadiusUniform,
       this.coatingGradientUseUniform,
-      this.coatingGradientTexUniform
+      this.coatingGradientTexUniform,
+      this.photoUseUniform,
+      this.photoMapUniform,
+      this.photoRadiusUniform
     )
 
     this.mesh = new THREE.Mesh(this.geometry, material)
@@ -330,10 +353,10 @@ export class SlimeSphere {
       const nx = this.unitDirs[i]
       const ny = this.unitDirs[i + 1]
       const nz = this.unitDirs[i + 2]
-      const [sx, sy, sz] = shapeScale(shape, nx, ny, nz)
-      rest[i] = nx * sx * r
-      rest[i + 1] = ny * sy * r
-      rest[i + 2] = nz * sz * r
+      const [tx, ty, tz] = shapeTransform(shape, nx, ny, nz)
+      rest[i] = tx * r
+      rest[i + 1] = ty * r
+      rest[i + 2] = tz * r
     }
     arr.set(rest)
     for (let i = 0; i < this.velocities.length; i++) this.velocities[i] *= 0.3
@@ -374,12 +397,17 @@ export class SlimeSphere {
    *  and turns the gradient sampler on in the shader. The material's own
    *  `color` is set to the first entry as a fallback for surface-param
    *  consumers (bead wrap sync) that can't render a gradient themselves. */
-  setColors(ids: readonly ColorId[]) {
-    const hexes: number[] = []
-    for (const id of ids) {
-      const preset = COLORS.find((c) => c.id === id)
-      if (preset) hexes.push(preset.hex)
-    }
+  setColors(
+    ids: readonly ColorId[],
+    adjustments?: ColorAdjustments
+  ) {
+    // Cache both so a later setColorAdjustments call can re-emit
+    // without SlimeApp having to re-push the ids.
+    this.currentColorIds = ids
+    if (adjustments !== undefined) this.currentColorAdjustments = adjustments
+    const hexes: number[] = ids.map((id) =>
+      resolveColorHex(id, this.currentColorAdjustments)
+    )
     const mat = this.mesh.material as THREE.MeshPhysicalMaterial
     if (hexes.length === 0) {
       mat.color.setHex(0xfbf7f2)
@@ -393,6 +421,14 @@ export class SlimeSphere {
     }
     this.rebuildGradientTexture(hexes)
     this.gradientUseUniform.value = 1
+  }
+
+  /** Update the per-colour HSL deltas without changing which ids are
+   *  active. Re-runs setColors with the cached id list so the material
+   *  colour + gradient texture pick up the new hex values. */
+  setColorAdjustments(adjustments: ColorAdjustments) {
+    this.currentColorAdjustments = adjustments
+    this.setColors(this.currentColorIds)
   }
 
   private rebuildGradientTexture(hexes: readonly number[]) {
@@ -565,6 +601,21 @@ export class SlimeSphere {
   setInk(colorHex: number, amount: number) {
     this.inkColorUniform.value.setHex(colorHex)
     this.inkAmountUniform.value = Math.max(0, Math.min(1, amount))
+  }
+
+  /** Apply (or clear) a photo decal on the front hemisphere. Pass a
+   *  loaded Texture to enable the sticker; pass null to disable and
+   *  dispose the previous texture. `radius` is the sticker's radial
+   *  extent in slime-radius units (0.9 fills most of the visible
+   *  face, 1.0 reaches the silhouette). */
+  setPhotoDecal(texture: THREE.Texture | null, radius: number = 0.9) {
+    if (this.photoTexture && this.photoTexture !== texture) {
+      this.photoTexture.dispose()
+    }
+    this.photoTexture = texture
+    this.photoMapUniform.value = texture
+    this.photoUseUniform.value = texture ? 1.0 : 0.0
+    this.photoRadiusUniform.value = Math.max(0.05, Math.min(1.0, radius))
   }
 
   /** Set per-vertex nearest-bead directions and bead radius so the slime
@@ -766,7 +817,7 @@ export class SlimeSphere {
     // propagation pass instead. Other coatings fall back to the default.
     const damageRate =
       this.currentCoatingId === 'foil'
-        ? 0.32
+        ? 0.14
         : this.currentCoatingId === 'wax'
           ? 0.24
           : this.currentCoatingId === 'ice'
@@ -876,7 +927,11 @@ export class SlimeSphere {
             this.currentCoatingId === 'tube') &&
           this.crackLevel[vi] < 5
         ) {
-          this.crackLevel[vi] = Math.min(5, this.crackLevel[vi] + 1)
+          // Foil/tube: smaller per-tap bump so the first tap only
+          // barely nudges the vertex under the visibility threshold —
+          // the sheet has to be repeatedly pressed (or held) to
+          // meaningfully tear, giving the reveal a slower ramp-up.
+          this.crackLevel[vi] = Math.min(5, this.crackLevel[vi] + 0.45)
           crackLevelChanged = true
         }
         this.wasBeingPressed[vi] = 1
@@ -900,7 +955,14 @@ export class SlimeSphere {
       ) {
         const cap =
           this.currentCoatingId === 'ice' ? 3 : 5
-        const growRate = 0.7 // level per second under a firm press
+        // Foil/tube tear more slowly under continuous press than
+        // ice/wax — sustained hold still spreads the tear, but a
+        // brief mash no longer gapes the sheet all at once.
+        const growRate =
+          this.currentCoatingId === 'foil' ||
+          this.currentCoatingId === 'tube'
+            ? 0.32
+            : 0.7
         const next = Math.min(cap, this.crackLevel[vi] + growRate * dt)
         if (next > this.crackLevel[vi]) {
           this.crackLevel[vi] = next
@@ -1128,6 +1190,51 @@ export class SlimeSphere {
     this.geometry.computeVertexNormals()
   }
 
+  /** Snapshot everything the physics + damage passes mutate so a
+   *  thumbnail-capture path can call reset() → render → restore()
+   *  without disturbing the live squish/crack state. */
+  snapshotMutableState(): {
+    positions: Float32Array
+    velocities: Float32Array
+    damage: Float32Array
+    crackLevel: Float32Array
+    prevCrackLevel: Float32Array
+    wasBeingPressed: Uint8Array
+    wasPressing: boolean
+    restoreTargetPos: Float32Array | null
+  } {
+    const posAttr = this.geometry.attributes.position as THREE.BufferAttribute
+    return {
+      positions: new Float32Array(posAttr.array as Float32Array),
+      velocities: new Float32Array(this.velocities),
+      damage: new Float32Array(this.damage),
+      crackLevel: new Float32Array(this.crackLevel),
+      prevCrackLevel: new Float32Array(this.prevCrackLevel),
+      wasBeingPressed: new Uint8Array(this.wasBeingPressed),
+      wasPressing: this.wasPressing,
+      restoreTargetPos: this.restoreTargetPos
+        ? new Float32Array(this.restoreTargetPos)
+        : null
+    }
+  }
+
+  restoreMutableState(snap: ReturnType<SlimeSphere['snapshotMutableState']>) {
+    const posAttr = this.geometry.attributes.position as THREE.BufferAttribute
+    const arr = posAttr.array as Float32Array
+    arr.set(snap.positions)
+    this.velocities.set(snap.velocities)
+    this.damage.set(snap.damage)
+    this.crackLevel.set(snap.crackLevel)
+    this.prevCrackLevel.set(snap.prevCrackLevel)
+    this.wasBeingPressed.set(snap.wasBeingPressed)
+    this.wasPressing = snap.wasPressing
+    this.restoreTargetPos = snap.restoreTargetPos
+    posAttr.needsUpdate = true
+    this.damageAttr.needsUpdate = true
+    this.crackLevelAttr.needsUpdate = true
+    this.geometry.computeVertexNormals()
+  }
+
   /** Zero the crack pattern without touching the geometry. */
   clearDamage() {
     this.damage.fill(0)
@@ -1189,6 +1296,10 @@ export class SlimeSphere {
     if (this.coatingGradientTexture) {
       this.coatingGradientTexture.dispose()
       this.coatingGradientTexture = null
+    }
+    if (this.photoTexture) {
+      this.photoTexture.dispose()
+      this.photoTexture = null
     }
     this.geometry.dispose()
     ;(this.mesh.material as THREE.Material).dispose()
@@ -1258,7 +1369,10 @@ function installDamageShader(
   gradientTexUniform: { value: THREE.Texture | null },
   gradientRadiusUniform: { value: number },
   coatingGradientUseUniform: { value: number },
-  coatingGradientTexUniform: { value: THREE.Texture | null }
+  coatingGradientTexUniform: { value: THREE.Texture | null },
+  photoUseUniform: { value: number },
+  photoMapUniform: { value: THREE.Texture | null },
+  photoRadiusUniform: { value: number }
 ) {
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uDamageEnabled = enabledUniform
@@ -1276,6 +1390,9 @@ function installDamageShader(
     shader.uniforms.uGradientRadius = gradientRadiusUniform
     shader.uniforms.uUseCoatingGradient = coatingGradientUseUniform
     shader.uniforms.uCoatingGradient = coatingGradientTexUniform
+    shader.uniforms.uPhotoUse = photoUseUniform
+    shader.uniforms.uPhotoMap = photoMapUniform
+    shader.uniforms.uPhotoRadius = photoRadiusUniform
 
     shader.vertexShader =
       `attribute float damage;
@@ -1342,6 +1459,9 @@ function installDamageShader(
        uniform float uGradientRadius;
        uniform float uUseCoatingGradient;
        uniform sampler2D uCoatingGradient;
+       uniform float uPhotoUse;
+       uniform sampler2D uPhotoMap;
+       uniform float uPhotoRadius;
        varying float vDamage;
        varying float vCrackLevel;
        varying vec3 vRest;
@@ -1462,6 +1582,36 @@ function installDamageShader(
                1.0
              );
              diffuseColor.rgb = texture2D(uGradient, vec2(gt, 0.5)).rgb;
+           }
+           // 촬영 스티커: front-hemisphere photo decal. Sample the photo
+           // in REST frame so kneading stretches the picture with the
+           // mesh instead of sliding it around. Circular alpha fade
+           // keeps the sticker round (no square cut), and the vRest.z
+           // gate hides it from the back face so a translucent slime
+           // doesn't show a mirrored ghost of the photo through itself.
+           if (uPhotoUse > 0.5) {
+             vec2 pUV = vec2(
+               (vRest.x / uGradientRadius) * 0.5 + 0.5,
+               1.0 - ((vRest.y / uGradientRadius) * 0.5 + 0.5)
+             );
+             float rXY = length(vec2(
+               vRest.x / uGradientRadius,
+               vRest.y / uGradientRadius
+             ));
+             // 4% wide soft edge so the sticker rim doesn't read as a
+             // hard cutout — matches the mosaic path's front-hemisphere
+             // aesthetic (round patch, softened silhouette).
+             float radialMask =
+               1.0 - smoothstep(uPhotoRadius - 0.04, uPhotoRadius, rXY);
+             // Front-hemisphere ramp: fully opaque near +Z, fades to 0
+             // at the equator so the sticker doesn't wrap onto the
+             // rim / back where it would look weirdly stretched.
+             float zMask = smoothstep(0.0, 0.35, vRest.z / uGradientRadius);
+             float photoAlpha = radialMask * zMask;
+             if (photoAlpha > 0.001) {
+               vec3 photoRGB = texture2D(uPhotoMap, pUV).rgb;
+               diffuseColor.rgb = mix(diffuseColor.rgb, photoRGB, photoAlpha);
+             }
            }
            // Slime body colour that shows THROUGH crack / tear reveals
            // is forced to pure WHITE whenever a crack-drawing coating
@@ -1676,7 +1826,7 @@ function installDamageShader(
              // exposing large patches of slime through the torn sheet.
              // Cracks have SOFT wispy edges rather than wax's hard
              // fragment boundaries.
-             else if (uCoatingIsFoil > 0.5 && vCrackLevel > 0.5) {
+             else if (uCoatingIsFoil > 0.5 && vCrackLevel > 0.4) {
                vec2 v = damageVoronoi(vRest * 2.3);
 
                // Visibility is LOCAL to the press site only — damage
@@ -1687,22 +1837,25 @@ function installDamageShader(
                // triggered visibility the whole ball would flash tears
                // on a single tap. Now a tap only rips the coating
                // right where the finger landed.
+               // Visibility ramps in more gradually — a light tap only
+               // hints at hairline tears, and repeated / sustained
+               // pressure opens the reveal further.
                float visibility = max(
-                 smoothstep(0.05, 0.2, vDamage),
-                 smoothstep(0.5, 1.0, vCrackLevel)
+                 smoothstep(0.12, 0.35, vDamage),
+                 smoothstep(0.6, 1.4, vCrackLevel)
                );
 
                // Tear width — damage + crackLevel drive it. Stretch
                // is DROPPED here too so bulged non-pressed regions
                // don't get widened tears just from volume preservation.
-               // Pressed vertices still get a strong width because
-               // their vDamage is high.
-               float damageWidth = smoothstep(0.18, 0.7, vDamage) * 0.55;
+               // Widths grow more slowly than before so the inner
+               // slime is unveiled gradually rather than all at once.
+               float damageWidth = smoothstep(0.28, 0.85, vDamage) * 0.32;
                float spreadWidth =
-                 smoothstep(0.5, 3.5, vCrackLevel) * 0.32;
+                 smoothstep(1.0, 4.5, vCrackLevel) * 0.22;
                float perCell = 0.3 + v.y * 1.8;
                float crackWidth =
-                 min((damageWidth + spreadWidth) * perCell, 0.88);
+                 min((damageWidth + spreadWidth) * perCell, 0.62);
 
                // Soft 15% edge band — torn foil has wispy, feathered
                // edges, not the hard-edged perimeter ice fragments

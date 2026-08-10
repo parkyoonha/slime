@@ -1,30 +1,34 @@
 .panel {
   pointer-events: auto;
-  width: min(520px, 100%);
-  padding: 10px 12px 12px;
-  border-radius: 20px;
-  background: var(--bg-panel);
+  width: 100%;
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--color-text);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 4px;
   touch-action: none;
+  border: none;
 }
 
 .tabs {
   display: flex;
   gap: 4px;
-  padding: 3px;
+  padding: 3px 0;
   background: transparent;
   border-radius: 999px;
+  justify-content: flex-start;
 }
 
 .tab {
-  flex: 1;
-  padding: 8px 6px;
+  flex: 0 0 auto;
+  padding: 6px 12px;
   border-radius: 999px;
   background: transparent;
   border: none;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
   color: var(--color-text-muted);
   font-size: 13px;
   font-weight: 600;
@@ -33,6 +37,11 @@
      the frame the user deselects. */
   transition: none;
 }
+.tab::-moz-focus-inner {
+  border: 0;
+  padding: 0;
+}
+
 
 .tab[data-active='true'] {
   /* Theme-driven selected fill — dark-gray + white text in dark mode,
@@ -40,6 +49,189 @@
   background: var(--bg-selected);
   color: var(--color-selected-text);
   border: none;
+}
+
+/* Persistent primary chip row: non-selected chips fade to 50% opacity
+   so the selected group visually pops while the full nav stays in
+   view. At root (nothing selected yet), every primary chip is dim by
+   default so the panel doesn't false-highlight one. */
+.tab[data-dim='true'] {
+  opacity: 0.5;
+}
+
+/* Circular "+" placeholder button that lives at the front of a sub-cat
+   tab strip — click to open the photo picker (사진 스티커 / 사진 비즈
+   / 커스텀비즈 photo). Dashed outline reads as an "add slot" affordance;
+   flips to a solid blue outline when a photo is currently applied. */
+.addPhotoChip {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  /* Extra breathing room between the leading camera chip and the
+     first sub-cat tab to its right — the row's own 4px gap felt
+     too tight against the dashed circle outline. */
+  margin-right: 8px;
+  border-radius: 50%;
+  border: 1.5px dashed var(--color-border-muted);
+  background: transparent;
+  color: var(--color-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.addPhotoChip:hover:not(:disabled),
+.addPhotoChip:focus-visible:not(:disabled) {
+  border-color: var(--color-text);
+  outline: none;
+}
+
+.addPhotoChip[data-active='true'] {
+  border-style: solid;
+  border-color: rgba(180, 235, 255, 0.85);
+  color: #4a9eff;
+}
+
+.addPhotoChip:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* Photo sub-options tray — appears below the sub-cat tab strip when
+   the leading camera chip is toggled on. Contains one "+" per empty
+   photo slot plus small "×" thumbs for currently-applied photos so
+   users can remove or add without leaving the panel. */
+.photoTray {
+  display: flex;
+  gap: 8px;
+  padding: 4px 4px 0;
+  align-items: center;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.photoTray::-webkit-scrollbar {
+  display: none;
+}
+
+.photoTrayThumb {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(180, 235, 255, 0.85);
+  background: rgba(180, 235, 255, 0.18);
+  color: var(--color-text);
+  font-size: 15px;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Persistent top-of-panel category strip — 8 chips exceed a phone's
+   width so this scrolls horizontally with the scrollbar hidden.
+   Each chip keeps its natural width (no flex fill) so labels don't
+   truncate; touch drag / trackpad swipe reveals the rest.
+   Mask-image bleeds both edges into a soft gradient so labels that
+   are mid-scroll off-screen fade out instead of hard-clipping. */
+.primaryChips {
+  display: flex;
+  gap: 10px;
+  padding: 2px 0;
+  background: transparent;
+  border-radius: 999px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  touch-action: pan-x;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  justify-content: flex-start;
+  --fade-left: transparent 0, black 4%;
+  --fade-right: black 92%, transparent 100%;
+  -webkit-mask-image: linear-gradient(
+    to right,
+    var(--fade-left),
+    var(--fade-right)
+  );
+  mask-image: linear-gradient(
+    to right,
+    var(--fade-left),
+    var(--fade-right)
+  );
+}
+
+/* When the row is scrolled all the way to the left, drop the left-edge
+   fade so the FIRST chip stays fully opaque instead of dimming out
+   toward the panel edge. Same idea on the right when we're at the end
+   — the LAST chip reads crisply. Fades only appear on sides that
+   actually have more content to reveal. */
+.primaryChips[data-at-start='true'] {
+  --fade-left: black 0, black 0;
+}
+
+.primaryChips[data-at-end='true'] {
+  --fade-right: black 100%, black 100%;
+}
+
+.primaryChips::-webkit-scrollbar {
+  display: none;
+}
+
+.primaryChip {
+  flex-shrink: 0;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: transparent;
+  border: none;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+  color: var(--color-text-muted);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  transition: font-size 120ms ease;
+  cursor: pointer;
+}
+.primaryChip::-moz-focus-inner {
+  border: 0;
+  padding: 0;
+}
+.primaryChip:first-child {
+  padding-left: 4px;
+}
+
+.primaryChip[data-active='true'] {
+  /* Border-less active state — no pill background. Instead the
+     selected chip pops via a bumped font-size and full opacity
+     while non-selected chips stay at the base size + 50% opacity. */
+  background: transparent;
+  color: var(--color-text);
+  font-weight: 700;
+  font-size: 18px;
+}
+
+.primaryChip[data-dim='true'] {
+  opacity: 0.5;
+}
+
+.primaryChip:not([data-active='true']):hover,
+.primaryChip:not([data-active='true']):focus-visible {
+  color: var(--color-text);
+  outline: none;
+}
+
+.primaryChip:focus,
+.primaryChip:focus-visible,
+.primaryChip:active {
+  outline: none;
 }
 
 /* Hover / focus preview only on UNSELECTED tabs — otherwise a lingering
@@ -63,7 +255,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 2px 4px 4px;
+  padding: 0 4px 0;
 }
 
 .backButton {
@@ -107,6 +299,40 @@
   flex-shrink: 0;
 }
 
+/* Right-slot icon button in the panel Header — hosts the 사진 슬라임
+   camera trigger. Sized to match the back button (32px circle) so the
+   header row keeps a symmetric feel with the back arrow on the left
+   and the action on the right. */
+.headerIconButton {
+  margin-left: auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--bg-chip);
+  border: none;
+  outline: none;
+  color: var(--color-text);
+  transition: background 120ms ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.headerIconButton:hover,
+.headerIconButton:focus-visible {
+  background: var(--bg-chip-hover);
+  outline: none;
+}
+
+.headerIconButton[data-active='true'] {
+  background: var(--bg-selected);
+  color: var(--color-selected-text);
+}
+
 /* Horizontally-scrolling tag row placed to the right of the header
    title. Each tag summarises one active selection in the current
    primary category (color, material, coating, shape, bead combo,
@@ -129,7 +355,7 @@
   flex-shrink: 0;
   padding: 4px 6px 4px 10px;
   border-radius: 999px;
-  background: var(--bg-chip);
+  background: var(--bg-tag);
   color: var(--color-text);
   font-size: 11px;
   font-weight: 600;
@@ -173,8 +399,21 @@
   gap: 8px;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 2px 2px 4px;
+  padding: 2px 0 4px;
   scrollbar-width: none;
+  justify-content: flex-start;
+  -webkit-mask-image: linear-gradient(
+    to right,
+    black 0,
+    black 92%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    black 0,
+    black 92%,
+    transparent 100%
+  );
 }
 
 .options::-webkit-scrollbar {
@@ -185,11 +424,13 @@
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 6px;
+  padding: 6px 10px;
   border-radius: 999px;
   background: transparent;
   border: none;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
   color: var(--color-text);
   font-size: 12px;
   font-weight: 600;
@@ -198,6 +439,16 @@
      active highlight instantly instead of fading out over 120ms, which
      felt sluggish. Transform still animates for the press feedback. */
   transition: transform 120ms ease;
+}
+
+.chip:focus,
+.chip:focus-visible,
+.chip::-moz-focus-inner {
+  outline: none;
+  border: 0;
+}
+.chip:first-child {
+  margin-left: 2px;
 }
 
 .chip:hover {
@@ -219,13 +470,73 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  border: 1.5px solid rgba(255, 255, 255, 0.8);
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  border: none;
+  box-shadow: none;
   flex-shrink: 0;
 }
 
 .chipLabel {
   white-space: nowrap;
+}
+
+/* Per-colour adjustment sliders — mounted below the chip row when a
+   chip is focused. Two rows (색조 + 명도), sharing the same track
+   styling as the bead size slider so the panel feels consistent. */
+.adjustRows {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  /* Zero horizontal padding matches the primary chip row so both
+     rows share the same left / right visual alignment inside the
+     panel. */
+  padding: 4px 0 0;
+  width: 100%;
+  min-width: 0;
+}
+
+.adjustRows > .sliderRow {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  /* Each slider (색조 / 명도) gets its own rounded-rectangle rim so
+     the two channels read as discrete controls, matching the visual
+     weight of the primary chip strip above. */
+  border: 1px solid var(--color-border-muted);
+  border-radius: 10px;
+  background: transparent;
+}
+
+.adjustHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px;
+}
+
+.adjustHeaderLabel {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--color-text);
+  opacity: 0.9;
+}
+
+.adjustReset {
+  margin-left: auto;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: none;
+  background: var(--bg-chip);
+  color: var(--color-text);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.adjustReset:hover,
+.adjustReset:focus-visible {
+  background: var(--bg-chip-hover);
+  outline: none;
 }
 
 /* Theme-palette emoji chips render the emoji as a preview icon rather
@@ -415,20 +726,23 @@
 .sliderRow {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 4px 10px;
+  gap: 6px;
+  padding: 4px 8px;
   border-radius: 999px;
   background: var(--bg-slider-track);
+  min-width: 0;
 }
 
 .sliderRow .subLabel {
   padding: 0;
   flex-shrink: 0;
-  min-width: 26px;
+  min-width: 0;
 }
 
 .slider {
-  flex: 1;
+  flex: 1 1 0;
+  min-width: 0;
+  width: 100%;
   appearance: none;
   -webkit-appearance: none;
   height: 4px;
@@ -438,6 +752,8 @@
   accent-color: var(--color-outline-focus);
   cursor: pointer;
   touch-action: none;
+  padding: 0;
+  margin: 0;
 }
 
 .slider::-webkit-slider-thumb {
@@ -446,9 +762,9 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #b4ebff;
-  border: 2px solid rgba(255, 255, 255, 0.9);
-  box-shadow: 0 0 8px rgba(180, 235, 255, 0.5);
+  background: var(--color-text);
+  border: none;
+  box-shadow: none;
   cursor: grab;
 }
 
@@ -456,9 +772,9 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #b4ebff;
-  border: 2px solid rgba(255, 255, 255, 0.9);
-  box-shadow: 0 0 8px rgba(180, 235, 255, 0.5);
+  background: var(--color-text);
+  border: none;
+  box-shadow: none;
   cursor: grab;
 }
 
@@ -466,7 +782,7 @@
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   opacity: 0.8;
-  min-width: 34px;
+  min-width: 0;
   text-align: right;
   flex-shrink: 0;
 }

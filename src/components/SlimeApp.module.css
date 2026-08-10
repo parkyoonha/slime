@@ -2,12 +2,10 @@
   position: fixed;
   inset: 0;
   overflow: hidden;
-  background: radial-gradient(
-      circle at 50% 40%,
-      var(--bg-page-start) 0%,
-      var(--bg-page-middle) 60%,
-      var(--bg-page-end) 100%
-    );
+  /* Solid page fill drawn from the same palette stop the collection
+     pill uses, so the pill wrapper visually merges with the page
+     background — card + carousel + screen all read as one surface. */
+  background: var(--bg-page-middle);
   transition: background 220ms ease;
 }
 
@@ -45,8 +43,21 @@
 
 .topBar {
   position: absolute;
-  top: max(16px, env(safe-area-inset-top));
-  right: max(16px, env(safe-area-inset-right));
+  top: max(22px, env(safe-area-inset-top));
+  right: max(12px, env(safe-area-inset-right));
+  z-index: 4;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Symmetric top-left cluster hosting the persistent
+   collection + share icons — kept on the left so they don't
+   compete with the top-right hamburger + contextual toggles. */
+.topLeftBar {
+  position: absolute;
+  top: max(22px, env(safe-area-inset-top));
+  left: max(12px, env(safe-area-inset-left));
   z-index: 4;
   display: flex;
   gap: 8px;
@@ -60,19 +71,17 @@
   border-radius: 50%;
   border: none;
   outline: none;
-  background: var(--bg-toggle);
+  background: transparent;
   color: var(--color-text);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  backdrop-filter: blur(10px);
-  transition: background 120ms ease;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .iconButton:hover,
 .iconButton:focus-visible {
-  background: var(--bg-toggle-hover);
   outline: none;
 }
 
@@ -300,6 +309,16 @@
   background: var(--bg-panel-strong);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
   backdrop-filter: blur(10px);
+}
+
+/* Drop-UP variant — the collection menu triggered from the bottom
+   row anchors to the trigger button's top edge (rises above the
+   bar) instead of the default drop-down position. */
+.collectionMenuUp {
+  top: auto;
+  bottom: calc(100% + 6px);
+  right: 0;
+  flex-direction: column;
 }
 
 .collectionMenuBtn {
@@ -709,16 +728,178 @@
 
 .controls {
   position: absolute;
-  bottom: max(20px, env(safe-area-inset-bottom));
+  bottom: max(4px, env(safe-area-inset-bottom));
   left: 0;
   right: 0;
   z-index: 2;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 10px;
+  align-items: stretch;
+  gap: 24px;
   pointer-events: none;
-  padding: 0 16px;
+}
+
+/* Slim action row that sits directly above the CustomizePanel —
+   hand toggle at the far left, slime reset in the centre, collection
+   opener at the far right. Replaces the old bottom bar with three
+   buttons + a filled pill background. */
+.topButtonRow {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  /* Small gap so the centre reset pill sits close to but not
+     touching the flanking hand + collection buttons. */
+  gap: 6px;
+  width: 100%;
+  padding: 0 12px;
+  /* Sits BELOW the options card via flex order. Small bottom margin
+     lifts the whole trio a few pixels off the safe-area bottom edge. */
+  order: 1;
+  margin-bottom: 10px;
+}
+
+/* Every button inside .topButtonRow shares one flat surface —
+   borderless, same fill for the trio. */
+.topButtonRow > button,
+.topButtonRow > .sideBtnWrap > button {
+  background: var(--bg-toggle);
+  border: none;
+  border-radius: 12px;
+  width: 52px;
+  height: 46px;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Central reset stretches to fill the row so its own pill touches
+   the flanking hand + collection buttons on both sides. */
+.topButtonRow > button.sideBtn:nth-child(2) {
+  flex: 1;
+  width: auto;
+}
+
+/* Reset (centre button) — quick tap flash: darker fill while
+   pressed, springs back to the default toggle colour on release
+   with no lingering hover state. */
+.topButtonRow > button.sideBtn:nth-child(2),
+.topButtonRow > button.sideBtn:nth-child(2):hover,
+.topButtonRow > button.sideBtn:nth-child(2):focus,
+.topButtonRow > button.sideBtn:nth-child(2):focus-visible {
+  background: var(--bg-toggle);
+  color: var(--color-text);
+  outline: none;
+}
+.topButtonRow > button.sideBtn:nth-child(2):active {
+  background: var(--bg-toggle-hover);
+}
+
+/* CustomizePanel + unified tag row live inside a padded inner
+   wrapper so they stay 16px in from the edges, while the bottom
+   bar strip sits outside this padding to span the full width. */
+.controlsInner {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 10px 18px 0;
+  background: transparent;
+  border: none;
+}
+
+/* Unified selected-option tag row rendered between CustomizePanel
+   and the bottom bar. Aggregates chips from every category so the
+   user sees the whole customisation state at a glance regardless
+   of which primary category is currently open. */
+.unifiedTagRow {
+  pointer-events: auto;
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  align-self: flex-start;
+  width: 100%;
+  /* Left padding matches the panel's inner left padding (4px) so the
+     first tag lines up with the first chip in .options below it. */
+  padding: 2px 4px;
+  /* Render above the CustomizePanel inside .controlsInner (column flex).
+     Negative order pulls this element to the top of the stack while
+     leaving the DOM order unchanged. */
+  order: -1;
+}
+
+.unifiedTag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 4px 6px 4px 10px;
+  border-radius: 999px;
+  background: var(--bg-tag);
+  color: var(--color-text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* Leading reset chip inside the unified tag row — clears every
+   active tag and returns the slime to its default options. Sized
+   to match the tag pills so it reads as part of the row. */
+.unifiedTagResetBtn {
+  flex-shrink: 0;
+  /* Height matches the tag pill total height (18px × button +
+     8px vertical padding = 26px) so the reset chip sits flush in
+     the row instead of reading as a smaller free-floating dot. */
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: none;
+  outline: none;
+  background: var(--bg-tag);
+  color: var(--color-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.unifiedTagResetBtn:hover,
+.unifiedTagResetBtn:focus-visible {
+  background: var(--bg-chip-hover);
+  outline: none;
+}
+
+.unifiedTagLabel {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unifiedTagRemove {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: none;
+  outline: none;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.unifiedTagRemove:hover,
+.unifiedTagRemove:focus-visible {
+  background: rgba(0, 0, 0, 0.6);
+  outline: none;
 }
 
 .compactRow {
@@ -728,6 +909,312 @@
   width: min(520px, 100%);
   flex-wrap: wrap;
   justify-content: center;
+}
+
+/* Full-width action bar at the bottom of the HUD — three action
+   buttons share a single rounded rectangle with a filled neutral
+   background (dark grey in dark mode, light grey in light mode).
+   No inner dividers; the buttons blend into one panel. */
+/* Bottom action row — hosts a side hand-toggle button, the central
+   filled pill (undo / default / reset), and a side collection
+   button. Full-width layout with the centre pill flex-1 so it
+   dominates while the side buttons sit at natural size. */
+.bottomRow {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 0 12px;
+}
+
+/* Wrap around the right-side collection button so the drop-up
+   menu positions relative to the button. */
+.sideBtnWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.sideBtn {
+  pointer-events: auto;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  /* Borderless / transparent — the icon reads on its own without a
+     fill or outline against the page. */
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--color-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.sideBtn[data-active='true'] {
+  color: #4a9eff;
+}
+
+.bottomBar {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  border-radius: 18px;
+  border: none;
+  background: var(--bg-bottom-bar);
+}
+
+.bottomBtn {
+  flex: 1;
+  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  transition: color 120ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.bottomBtn:hover,
+.bottomBtn:focus,
+.bottomBtn:focus-visible {
+  outline: none;
+  background: transparent;
+}
+
+.bottomBtn[data-active='true'] {
+  /* On-state tints only the icon (via currentColor), keeping the
+     shared bar background untouched. */
+  color: #4a9eff;
+}
+
+/* Centre button (디폴트) reads as the primary action — larger tap
+   target + a solid filled circle icon inside, per the reference
+   layout the user shared. */
+.bottomBtnCenter {
+  flex: 0 0 auto;
+}
+
+.bottomBtn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.collectionCarouselEmpty {
+  pointer-events: auto;
+  width: min(520px, 100%);
+  padding: 40px 12px;
+  color: var(--color-text-muted);
+  text-align: center;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Inline collection carousel that replaces the CustomizePanel while
+   the user is browsing saved slimes. The track is centred via a
+   50% offset that puts the currently-selected card in the middle
+   of the viewport; neighbours peek on either side. Smooth CSS
+   transform animation makes the swipe feel continuous. */
+.collectionCarousel {
+  pointer-events: auto;
+  position: relative;
+  /* Widen the pill past the controlsInner padding — negative
+     horizontal margins let the carousel span the full viewport
+     width so more of the collection is visible at once. */
+  width: calc(100% + 30px);
+  margin-left: -15px;
+  margin-right: -15px;
+  height: 240px;
+  overflow: hidden;
+  border-radius: 20px;
+  background: var(--bg-page-middle);
+  margin-bottom: -18px;
+  animation: carouselIn 260ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Inner scroll surface — native horizontal overflow drives free
+   scrolling. Selection state (the outline) stays on whichever card
+   the user tapped and does NOT snap or follow the scroll position. */
+.collectionCarouselScroller {
+  position: absolute;
+  inset: 14px 0 0 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  touch-action: pan-x;
+}
+
+.collectionCarouselScroller::-webkit-scrollbar {
+  display: none;
+}
+
+@keyframes carouselIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.collectionCarouselTrack {
+  display: flex;
+  gap: 10px;
+  /* Left inset matches the pill's top inset (14px, see .collectionCarouselScroller)
+     so the selection outline sits equidistant from the pill's left and
+     top edges when the first card is picked. */
+  padding: 0 15px 0 14px;
+  width: max-content;
+  height: 100%;
+}
+
+.collectionCarouselCard {
+  position: relative;
+  flex-shrink: 0;
+  width: 150px;
+  height: 170px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 6px 0;
+  border-radius: 14px;
+  background: transparent;
+  cursor: pointer;
+  opacity: 1;
+  /* Transparent outline slot reserved so applying/removing the
+     selection outline doesn't reflow the card (outline lives
+     outside the border box). */
+  outline: 2px solid transparent;
+  outline-offset: -2px;
+}
+
+.collectionCarouselCard[data-selected='true'] {
+  /* --color-text is white in dark mode and near-black in light
+     mode, giving the selection ring high contrast against the
+     page background in either theme without a hard-coded colour. */
+  outline-color: var(--color-text);
+}
+
+/* Delete-mode checkbox in the card corner. Empty circle when
+   unpicked, filled + check when the card is queued for deletion. */
+.collectionCarouselCheckbox {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--color-text);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--color-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  pointer-events: none;
+  z-index: 3;
+}
+
+.collectionCarouselCheckbox[data-checked='true'] {
+  background: var(--color-text);
+  color: var(--bg-page-middle);
+}
+
+.collectionCarouselThumb {
+  width: 130px;
+  height: 130px;
+  border-radius: 0;
+  overflow: hidden;
+  background: transparent;
+  display: grid;
+  place-items: center;
+}
+
+.collectionCarouselThumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.collectionCarouselName {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 140px;
+}
+
+/* Action buttons pinned to the far right of the carousel viewport,
+   below the row so they float independently of the track scroll. */
+.collectionCarouselActions {
+  pointer-events: auto;
+  position: absolute;
+  right: 12px;
+  bottom: 6px;
+  display: flex;
+  gap: 6px;
+  z-index: 2;
+}
+
+.collectionCarouselAction {
+  padding: 9px 15px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(255, 255, 255, 0.95);
+  color: #1a1030;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.collectionCarouselAction[data-danger='true'] {
+  background: rgba(220, 80, 80, 0.95);
+  color: #fff;
+}
+
+.collectionCarouselAction:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.collectionCarouselShare {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.95);
+  color: #1a1030;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .toggle {

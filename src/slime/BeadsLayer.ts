@@ -1,14 +1,15 @@
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
 import {
-  BEAD_COLORS,
   BEAD_MATERIAL_PARAMS,
   COATINGS,
+  resolveColorHex,
   type BeadColorId,
   type BeadMaterialId,
   type BeadShapeId,
   type BeadsConfig,
   type CoatingId,
+  type ColorAdjustments,
   type ShapeId
 } from './presets'
 import { type WeightedTip } from './SlimeSphere'
@@ -58,6 +59,13 @@ interface ShapeSlot {
    *  cone expanding from where the finger first landed on the bead,
    *  rather than shredding the whole shell uniformly. */
   pressPointAttr: THREE.InstancedBufferAttribute
+  /** Per-instance photo quadrant index (0-3) — which slot of the
+   *  2×2 photo atlas this bead samples when 사진 비즈 is active.
+   *  A value of -1 means "no photo assigned"; the fragment shader
+   *  early-outs the photo mix in that case even when uBeadPhotoUse
+   *  is on, so photo beads and plain beads can coexist within one
+   *  layer (each instance decides independently). */
+  photoQuadrantAttr: THREE.InstancedBufferAttribute
 }
 
 export class BeadsLayer {
@@ -222,6 +230,33 @@ export class BeadsLayer {
    *  fully-embedded bead would otherwise only rip in a narrow patch
    *  facing the last press, reading as wax-style angular cracks. */
   private readonly beadFoilFullSurfaceUniform = { value: 0.0 }
+  // 사진 비즈 uniforms. `uBeadPhotoUse` gates the whole photo pass so
+  // beads without a photo assigned early-out. The atlas is a 2×2 grid
+  // (up to 4 photos, each in one quadrant) so a single sampler carries
+  // every active photo without needing WebGL 2 sampler arrays. Each
+  // instance picks its quadrant via aPhotoQuadrant (0..3, or -1 for
+  // "no photo"). uBeadPhotoSlotCount is unused in the shader but kept
+  // as a hook for future logic (e.g. randomising within slots).
+  private readonly beadPhotoUseUniform = { value: 0.0 }
+  private readonly beadPhotoAtlasUniform: {
+    value: THREE.Texture | null
+  } = { value: null }
+  private beadPhotoAtlas: THREE.CanvasTexture | null = null
+  /** Currently-applied photo textures (up to 4). Null entries are empty
+   *  slots. Kept as state so setConfig can rebuild per-instance quadrant
+   *  assignments when the bead count changes without SlimeApp having to
+   *  re-push the photos. */
+  private currentPhotos: (THREE.Texture | null)[] = [null, null, null, null]
+  /** Per-colour HSL deltas applied to bead palette hexes via the
+   *  adjustment sliders. Read by colorsToHex during setConfig / re-
+   *  colour so nudging a colour ripples immediately without any
+   *  external re-emit of the config. */
+  private currentColorAdjustments: ColorAdjustments = {}
+  /** Cached inputs to the last color-assignment pass, used by
+   *  setColorAdjustments to re-run just the colour loop without
+   *  rebuilding instance matrices / geometry. */
+  private lastUnitDirs: Float32Array = new Float32Array(0)
+  private lastEffectiveCount = 0
 
   private config: BeadsConfig = {
     combo: 'none',
@@ -438,6 +473,16 @@ export class BeadsLayer {
       )
       pressPointAttr.setUsage(THREE.DynamicDrawUsage)
       geo.setAttribute('aPressPoint', pressPointAttr)
+      // Photo quadrant defaults to -1 (no photo) — setPhotos + setConfig
+      // overwrite this whenever the assignment changes so plain beads
+      // keep their neutral value.
+      const photoQuadrantAttr = new THREE.InstancedBufferAttribute(
+        new Float32Array(MAX_BEADS),
+        1
+      )
+      ;(photoQuadrantAttr.array as Float32Array).fill(-1)
+      photoQuadrantAttr.setUsage(THREE.DynamicDrawUsage)
+      geo.setAttribute('aPhotoQuadrant', photoQuadrantAttr)
       this.group.add(im)
       const wim = new THREE.InstancedMesh(geo, this.wrapMaterial, MAX_BEADS)
       wim.frustumCulled = false
@@ -451,7 +496,8 @@ export class BeadsLayer {
         count: 0,
         damageAttr,
         crackLevelAttr,
-        pressPointAttr
+        pressPointAttr,
+        photoQuadrantAttr
       })
     }
   }
@@ -692,6 +738,8 @@ export class BeadsLayer {
     const isIceU = this.beadIsIceUniform
     const isFoilU = this.beadIsFoilUniform
     const foilFullU = this.beadFoilFullSurfaceUniform
+    const photoUseU = this.beadPhotoUseUniform
+    const photoAtlasU = this.beadPhotoAtlasUniform
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uBeadGradientUse = useU
       shader.uniforms.uBeadGradient = texU
@@ -704,6 +752,11 @@ export class BeadsLayer {
       shader.uniforms.uBeadCoatingIsIce = isIceU
       shader.uniforms.uBeadCoatingIsFoil = isFoilU
       shader.uniforms.uBeadFoilFullSurface = foilFullU
+      // 사진 비즈 uniforms — atlas is a 2×2 grid of up to 4 photos.
+      // aPhotoQuadrant tells each instance which quadrant to sample
+      // (0..3, -1 = no photo).
+      shader.uniforms.uBeadPhotoUse = photoUseU
+      shader.uniforms.uBeadPhotoAtlas = photoAtlasU
 
       shader.vertexShader =
         `varying float vBeadGradT;
@@ -715,11 +768,13 @@ export class BeadsLayer {
          attribute float aDamage;
          attribute float aCrackLevel;
          attribute vec3 aPressPoint;
+         attribute float aPhotoQuadrant;
          varying float vBeadDamage;
          varying float vBeadCrackLevel;
          varying vec3 vBeadLocal;
          varying vec3 vBeadPressDir;
          varying vec3 vBeadVertexDir;
+         varying float vBeadPhotoQuadrant;
         ` +
         shader.vertexShader.replace(
           '#include <begin_vertex>',
@@ -727,11 +782,7 @@ export class BeadsLayer {
            vBeadDamage = aDamage;
            vBeadCrackLevel = aCrackLevel;
            vBeadPressDir = aPressPoint;
-           // Sample voronoi in the bead's OWN local frame (before any
-           // instance transform) so the crack pattern is anchored to
-           // the bead — repositioning the bead doesn't slide cracks
-           // across its surface, and every bead gets its own pattern
-           // seeded by its rest coordinates.
+           vBeadPhotoQuadrant = aPhotoQuadrant;
            vBeadLocal = position;
            // Direction from bead centre to this vertex, expressed in
            // the SLIME-local frame (same frame press-point lives in).
@@ -770,12 +821,15 @@ export class BeadsLayer {
          uniform float uBeadCoatingIsIce;
          uniform float uBeadCoatingIsFoil;
          uniform float uBeadFoilFullSurface;
+         uniform float uBeadPhotoUse;
+         uniform sampler2D uBeadPhotoAtlas;
          varying float vBeadGradT;
          varying float vBeadDamage;
          varying float vBeadCrackLevel;
          varying vec3 vBeadLocal;
          varying vec3 vBeadPressDir;
          varying vec3 vBeadVertexDir;
+         varying float vBeadPhotoQuadrant;
 
          float beadCrackHash(vec2 p) {
            p = fract(p * vec2(233.34, 851.73));
@@ -825,6 +879,39 @@ export class BeadsLayer {
              if (uBeadGradientUse > 0.5) {
                diffuseColor.rgb =
                  texture2D(uBeadGradient, vec2(vBeadGradT, 0.5)).rgb;
+             }
+             // 사진 비즈: orthographic (x, y) projection of the photo
+             // onto the OUTWARD hemisphere of each bead. Cube +Z faces
+             // read cleanly; small sphere beads have their geometry
+             // flattened into a coin in the vertex shader (aFlatten)
+             // so the whole outward face becomes a flat photo tablet.
+             if (uBeadPhotoUse > 0.5 && vBeadPhotoQuadrant >= 0.0) {
+               vec2 localUV = vec2(
+                 vBeadLocal.x * 0.5 + 0.5,
+                 1.0 - (vBeadLocal.y * 0.5 + 0.5)
+               );
+               float rXY = length(vec2(vBeadLocal.x, vBeadLocal.y));
+               float radialMask = 1.0 - smoothstep(0.94, 1.0, rXY);
+               float zMask = smoothstep(0.0, 0.35, vBeadLocal.z);
+               float photoAlpha = radialMask * zMask;
+               if (photoAlpha > 0.001) {
+                 // 2×2 atlas: quadrant 0 = canvas top-left, 1 = top-
+                 // right, 2 = bottom-left, 3 = bottom-right. three.js
+                 // uploads with flipY = true so canvas Y-down inverts
+                 // to GPU V-up — canvas top-half quadrants (qy=0) end
+                 // up in GPU V range 0.5..1.0, bottom-half (qy=1) in
+                 // V range 0..0.5.
+                 float qx = mod(vBeadPhotoQuadrant, 2.0);
+                 float qy = floor(vBeadPhotoQuadrant / 2.0);
+                 vec2 atlasUV = vec2(
+                   qx * 0.5 + localUV.x * 0.5,
+                   1.0 - qy * 0.5 - localUV.y * 0.5
+                 );
+                 vec3 photoRGB =
+                   texture2D(uBeadPhotoAtlas, atlasUV).rgb;
+                 diffuseColor.rgb =
+                   mix(diffuseColor.rgb, photoRGB, photoAlpha);
+               }
              }`
           )
           .replace(
@@ -1246,6 +1333,121 @@ export class BeadsLayer {
     }
   }
 
+  /** Register up to 4 photos to be printed on the existing beads. The
+   *  bead pool is split evenly across the ACTIVE photo slots so 1 photo
+   *  covers every bead, 2 photos each cover half, 3 cover thirds, etc.
+   *  Non-null entries in `photos` count as active — null slots are
+   *  ignored so users can remove a middle slot without collapsing the
+   *  quadrant indices assigned to the others (quadrant = slot index
+   *  in `photos`, not "nth active"). */
+  setPhotos(photos: readonly (THREE.Texture | null)[]) {
+    // Cap to 4 slots (2×2 atlas). Extra entries are ignored.
+    const next: (THREE.Texture | null)[] = [null, null, null, null]
+    for (let i = 0; i < Math.min(photos.length, 4); i++) {
+      next[i] = photos[i]
+    }
+    this.currentPhotos = next
+    this.rebuildPhotoAtlas()
+    this.assignPhotoQuadrants()
+  }
+
+  /** Rebuild the 2×2 photo atlas from currentPhotos. Empty quadrants
+   *  stay transparent (never sampled since aPhotoQuadrant ≥ 0 gates
+   *  the branch). Called on every setPhotos change; the previous
+   *  atlas texture is disposed to keep GPU memory bounded. */
+  private rebuildPhotoAtlas() {
+    if (this.beadPhotoAtlas) {
+      this.beadPhotoAtlas.dispose()
+      this.beadPhotoAtlas = null
+      this.beadPhotoAtlasUniform.value = null
+    }
+    const anyPhoto = this.currentPhotos.some((t) => t !== null)
+    if (!anyPhoto) {
+      this.beadPhotoUseUniform.value = 0.0
+      return
+    }
+    // 1024×1024 canvas = 512² per quadrant. Matches loadPhotoTexture
+    // in SlimeApp — no upscaling needed and keeps GPU upload small.
+    const TILE = 512
+    const canvas = document.createElement('canvas')
+    canvas.width = TILE * 2
+    canvas.height = TILE * 2
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      this.beadPhotoUseUniform.value = 0.0
+      return
+    }
+    // Fill transparent — reveals through where no photo was placed.
+    ctx.clearRect(0, 0, TILE * 2, TILE * 2)
+    for (let i = 0; i < 4; i++) {
+      const tex = this.currentPhotos[i]
+      if (!tex) continue
+      const src = (tex as THREE.CanvasTexture).image as
+        | HTMLCanvasElement
+        | HTMLImageElement
+        | undefined
+      if (!src) continue
+      const qx = i % 2
+      const qy = Math.floor(i / 2)
+      ctx.drawImage(src, qx * TILE, qy * TILE, TILE, TILE)
+    }
+    const atlas = new THREE.CanvasTexture(canvas)
+    atlas.colorSpace = THREE.SRGBColorSpace
+    atlas.needsUpdate = true
+    this.beadPhotoAtlas = atlas
+    this.beadPhotoAtlasUniform.value = atlas
+    this.beadPhotoUseUniform.value = 1.0
+  }
+
+  /** Assign each active bead to one of the currently occupied photo
+   *  quadrants (round-robin split so N photos = 1/N of the beads
+   *  each). Beads outside the active pool keep aPhotoQuadrant = -1
+   *  so the shader's early-out skips them. */
+  private assignPhotoQuadrants() {
+    // Build the list of occupied quadrant indices (0..3) so 반띵 logic
+    // works even when the middle slots are empty (e.g. photos in
+    // slots 0 and 2 only → beads alternate between quadrants 0 and 2).
+    const occupied: number[] = []
+    for (let i = 0; i < 4; i++) {
+      if (this.currentPhotos[i] !== null) occupied.push(i)
+    }
+    const N = occupied.length
+    // Total active beads across all slots = sum of slot.count. Use
+    // the running global index (i) to distribute quadrants; beads in
+    // each slot compute their local index via i / slotCount.
+    let totalActive = 0
+    for (const slot of this.slots) totalActive += slot.count
+    // Wipe every slot's array back to -1 before assignment so beads
+    // beyond effectiveCount stay marked as "no photo" from prior
+    // configurations that had more beads.
+    for (const slot of this.slots) {
+      ;(slot.photoQuadrantAttr.array as Float32Array).fill(-1)
+      slot.photoQuadrantAttr.needsUpdate = true
+    }
+    if (N === 0 || totalActive === 0) return
+    // Match the same interleave rule setConfig uses: bead i lives in
+    // slot (i % slotCount) at position floor(i / slotCount). Walk
+    // the same schedule so each bead's global rank matches its
+    // physical position on the slime.
+    const slotCount = this.slots.length
+    if (slotCount === 0) return
+    const perSlotCursor = new Array(slotCount).fill(0)
+    for (let i = 0; i < totalActive; i++) {
+      const slotIdx = i % slotCount
+      const slot = this.slots[slotIdx]
+      const localIdx = perSlotCursor[slotIdx]++
+      if (localIdx >= slot.count) continue
+      // Even split — bead i is in bucket floor(i * N / totalActive).
+      const bucket = Math.min(
+        N - 1,
+        Math.floor((i * N) / totalActive)
+      )
+      const quadrant = occupied[bucket]
+      ;(slot.photoQuadrantAttr.array as Float32Array)[localIdx] = quadrant
+    }
+    for (const slot of this.slots) slot.photoQuadrantAttr.needsUpdate = true
+  }
+
   /** Accumulate press damage on each chunk bead based on distance from
    *  press tips this frame. Rising-edge of press also bumps
    *  crackLevel for wax / ice coatings, mirroring the slime's crack
@@ -1660,8 +1862,37 @@ export class BeadsLayer {
     //     position, so the whole compact layer reads as one big
     //     top-to-bottom gradient across the sphere. Per-bead shader
     //     gradient is a poor read on the tiny compact beads anyway.
+    this.lastUnitDirs = unitDirs
+    this.lastEffectiveCount = effectiveCount
+    this.applyInstanceColors()
+    // Re-run photo quadrant assignment now that per-slot counts are
+    // final. Changing bead size / count / combo would otherwise leave
+    // stale assignments (older bead indices > new count still marked
+    // with a quadrant, new beads past the old count still at -1).
+    this.assignPhotoQuadrants()
+  }
+
+  /** Push HSL deltas that shift each palette colour within its own
+   *  family. Cached with the last setConfig args so the colour loop
+   *  can rerun without touching bead positions / matrices. */
+  setColorAdjustments(adjustments: ColorAdjustments) {
+    this.currentColorAdjustments = adjustments
+    if (this.slots.length === 0 || this.lastEffectiveCount === 0) return
+    this.applyInstanceColors()
+  }
+
+  /** Extracted color-assignment loop. Reads from this.config +
+   *  cached lastUnitDirs / lastEffectiveCount + this.gridMode /
+   *  fillMode / vertexIndices, so it can be called both from
+   *  setConfig (initial + count change) and from setColorAdjustments
+   *  (delta-only update). */
+  private applyInstanceColors() {
+    const config = this.config
+    const effectiveCount = this.lastEffectiveCount
+    const unitDirs = this.lastUnitDirs
     const paletteHex = colorsToHex(
-      config.colors.length > 0 ? config.colors : ['pearl']
+      config.colors.length > 0 ? config.colors : ['pearl'],
+      this.currentColorAdjustments
     )
     const paletteColors = paletteHex.map((h) => new THREE.Color(h))
     const perBeadShader =
@@ -1682,21 +1913,31 @@ export class BeadsLayer {
       if (perBeadShader) {
         this._color.setRGB(1, 1, 1)
       } else if (sphereGradient) {
-        // Discrete N-band split (2 colours → half + half, 3 → thirds,
-        // etc.) — each bead picks the ONE palette colour whose Y-band
-        // it falls into. Not a smooth lerp — user wanted crisp region
-        // divisions instead of a gradient across the compact layer.
         const yDir = this.gridMode
           ? this.gridNormals[i * 3 + 1]
           : this.fillMode
             ? this.fillDirs[i * 3 + 1]
             : unitDirs[this.vertexIndices[i] * 3 + 1]
         const t = Math.max(0, Math.min(1, (yDir + 1) * 0.5))
-        const bandIdx = Math.min(
-          paletteColors.length - 1,
-          Math.floor(t * paletteColors.length)
-        )
-        this._color.copy(paletteColors[bandIdx])
+        if (config.gradient) {
+          // Smooth gradient — lerp between adjacent palette entries
+          // based on the bead's Y position. Continuous top-to-bottom
+          // fade across the whole layer.
+          const scaled = t * (paletteColors.length - 1)
+          const lo = Math.floor(scaled)
+          const hi = Math.min(lo + 1, paletteColors.length - 1)
+          const frac = scaled - lo
+          this._color.copy(paletteColors[lo]).lerp(paletteColors[hi], frac)
+        } else {
+          // Discrete N-band split (2 colours → half + half, 3 → thirds,
+          // etc.) — each bead picks the ONE palette colour whose Y-band
+          // it falls into. Crisp region divisions, no interpolation.
+          const bandIdx = Math.min(
+            paletteColors.length - 1,
+            Math.floor(t * paletteColors.length)
+          )
+          this._color.copy(paletteColors[bandIdx])
+        }
       } else {
         this._color.copy(paletteColors[0])
       }
@@ -2429,6 +2670,11 @@ export class BeadsLayer {
       this.gradientTexture.dispose()
       this.gradientTexture = null
     }
+    if (this.beadPhotoAtlas) {
+      this.beadPhotoAtlas.dispose()
+      this.beadPhotoAtlas = null
+      this.beadPhotoAtlasUniform.value = null
+    }
     this.vertexIndices = []
     this.depthOffsets = new Float32Array(0)
     this.restMagnitudes = new Float32Array(0)
@@ -2446,12 +2692,11 @@ export class BeadsLayer {
 
 /* ─── helpers ─────────────────────────────────────────── */
 
-function colorsToHex(colors: BeadColorId[]): number[] {
-  const out: number[] = []
-  for (const id of colors) {
-    const preset = BEAD_COLORS.find((c) => c.id === id)
-    if (preset) out.push(preset.hex)
-  }
+function colorsToHex(
+  colors: BeadColorId[],
+  adjustments: ColorAdjustments
+): number[] {
+  const out = colors.map((id) => resolveColorHex(id, adjustments))
   return out.length > 0 ? out : [0xfff8f4]
 }
 
@@ -2481,6 +2726,10 @@ function shapeCollisionRadius(shape: BeadShapeId): number {
     case 'heart':
       // Heart bezier envelope roughly ±1 in either direction.
       return 1.0
+    case 'disc':
+      // Flat cylinder — disc radius 1.0 (matches sphere) so the two
+      // pack the same density under compact-fill mode.
+      return 1.0
   }
 }
 
@@ -2498,32 +2747,49 @@ function shapeCollisionRadius(shape: BeadShapeId): number {
  *  drives N so bigger cubes get fewer beads per face without any manual
  *  count wrangling. */
 /** How far below the cube-face surface each grid bead centre sits, as a
- *  fraction of the bead's own half-side. 0.6 puts the centre 0.6 ×
- *  half-side INSIDE the surface → ~80% embedded and only the top ~20%
- *  cap pokes out, matching the "beads deeply pressed into the slime"
- *  look of the reference. Because each face has its OWN independent
- *  grid (no dedup), this sink is safe: it only moves each bead along
- *  its own face normal, never sideways off the grid. */
-const CUBE_GRID_EMBED_FRAC = 0.6
-/** Fraction of the slime radius the grid spans on each face. 0.88 keeps
- *  the grid centred within the face with a small margin from the cube
- *  edge, so per-face grids don't collide at the cube seams and the
- *  bead field reads as "clustered toward the middle of each face". */
-const CUBE_GRID_EXTENT = 0.88
+ *  fraction of the bead's own half-side. Higher values sink beads
+ *  deeper into the slime so less of their cap pokes out — at large
+ *  bead sizes the exposed cap otherwise showed a visibly uneven
+ *  "bumpy" surface because every millimetre of poke amplified the
+ *  slight per-bead physics jitter. 0.8 keeps only ~20% of the cap
+ *  above the face plane, smoothing the read of a packed cube of
+ *  cubes at every size. */
+const CUBE_GRID_EMBED_FRAC = 0.8
+/** Maximum fraction of the slime radius the grid spans on each face.
+ *  The actual per-frame extent is clipped smaller when the bead half-
+ *  side is large enough that placing centres out at 0.88 would push
+ *  their outer face past the cube edge (or into the neighbouring
+ *  face's grid), which caused a visible "corner bead is taller than
+ *  interior bead" bump at bead sizes ≥ 0.24. */
+const CUBE_GRID_EXTENT_MAX = 0.88
 
 function buildCubeGridLayout(
   beadSize: number,
   radius: number
 ): { positions: Float32Array; normals: Float32Array } {
   // Per-face independent grid — each of the 6 faces gets its OWN N × N
-  // grid, offset from cube edges by CUBE_GRID_EXTENT so beads cluster
-  // toward the face centre and per-face grids don't collide at cube
-  // seams. Each bead sinks perpendicular to ITS OWN face by
-  // CUBE_GRID_EMBED_FRAC, so shared/edge beads never shift sideways
-  // off their grid position (which was the cross-clumping bug the
-  // previous dedup path had). Grid density tracks bead size.
-  const N = Math.max(2, Math.floor(radius / (beadSize * 1.05)) + 1)
-  const extent = CUBE_GRID_EXTENT
+  // grid, offset from cube edges by an extent that shrinks with bead
+  // size so edge beads never protrude past the cube face into the
+  // neighbouring face's grid. That overlap was the "corner bead sits
+  // taller" bump the user saw at sizes ≥ 0.24. Each bead sinks
+  // perpendicular to ITS OWN face by CUBE_GRID_EMBED_FRAC so shared
+  // vertices never shift sideways off the grid.
+  //
+  // Grid density solved for tight packing: rounded-box beads render at
+  // 1.5 × beadSize wide (RoundedBoxGeometry outer dimension is 1.5),
+  // so the grid step should equal one bead-side to have edges kiss.
+  //   N ≈ (2 · extent) / (1.5 · beadSize) + 1
+  const beadSide = beadSize * 1.5
+  const beadHalfSide = beadSide * 0.5
+  // Cap extent so the outermost bead's outer face (centre + halfSide)
+  // sits inside the cube face rather than crossing the corner into
+  // the adjacent face's grid. The extra 0.05 buffer prevents beads
+  // from two orthogonal faces meeting exactly at the shared edge.
+  const extent = Math.min(
+    CUBE_GRID_EXTENT_MAX,
+    Math.max(0.2, 1 - beadHalfSide - 0.05)
+  ) * radius
+  const N = Math.max(2, Math.round((2 * extent) / beadSide) + 1)
   const step = N > 1 ? (2 * extent) / (N - 1) : 0
   const start = -extent
   const sinkAmount = 0.75 * beadSize * CUBE_GRID_EMBED_FRAC
@@ -2557,9 +2823,9 @@ function buildCubeGridLayout(
         // Grid positions purely along the two tangent axes — sink only
         // shifted the face centre, never the in-face coordinates, so
         // every bead on this face stays at its exact grid cell.
-        positions[w * 3] = cx + (u[0] * su + v[0] * sv) * radius
-        positions[w * 3 + 1] = cy + (u[1] * su + v[1] * sv) * radius
-        positions[w * 3 + 2] = cz + (u[2] * su + v[2] * sv) * radius
+        positions[w * 3] = cx + u[0] * su + v[0] * sv
+        positions[w * 3 + 1] = cy + u[1] * su + v[1] * sv
+        positions[w * 3 + 2] = cz + u[2] * su + v[2] * sv
         normals[w * 3] = n[0]
         normals[w * 3 + 1] = n[1]
         normals[w * 3 + 2] = n[2]
@@ -2679,6 +2945,19 @@ function buildBeadGeometry(shape: BeadShapeId): THREE.BufferGeometry {
         curveSegments: 6
       })
       geo.translate(0, 0.1, -0.3)
+      geo.computeVertexNormals()
+      return geo
+    }
+    case 'disc': {
+      // 납작 원기둥. CylinderGeometry has its height axis along Y by
+      // default; rotate to align the flat cap with local +Z so the
+      // outward-facing face is a photo-ready disc after the instance
+      // rotation (which maps local +Z → radial outward). Radius 1
+      // matches sphere/torus footprint; height 0.8 keeps the coin
+      // shape thin (2.5:1 wide-to-tall) while still poking the top
+      // cap into z ≈ 0.4 so the photo's zMask fully lights it.
+      const geo = new THREE.CylinderGeometry(1.0, 1.0, 0.8, 24, 1)
+      geo.rotateX(Math.PI / 2)
       geo.computeVertexNormals()
       return geo
     }

@@ -18,6 +18,13 @@ export type ColorId =
   | 'coral'
   | 'aqua'
 
+/** Per-color HSL delta the user has dialled in via the adjustment
+ *  sliders. Keyed on ColorId — each entry [dh, dl] where dh shifts
+ *  hue in degrees (-30..30) and dl shifts lightness (-25..25). Colors
+ *  without an entry render at their preset hex. Shared between slime
+ *  and beads so an adjusted 아쿠아 reads the same across both surfaces. */
+export type ColorAdjustments = Partial<Record<ColorId, readonly [number, number]>>
+
 export const COLORS: readonly {
   id: ColorId
   label: string
@@ -36,6 +43,75 @@ export const COLORS: readonly {
   { id: 'coral', label: '코랄', hex: 0xff7d7d },
   { id: 'aqua', label: '아쿠아', hex: 0x5ee3d8 }
 ]
+
+/** Resolve a ColorId to its numeric hex, optionally applying any
+ *  hue / lightness delta the user has dialled in via the adjustment
+ *  sliders. HSL space keeps the tweak "within family" (아쿠아 stays
+ *  aqua-adjacent) instead of skewing into arbitrary hues. */
+export function resolveColorHex(
+  id: ColorId,
+  adjustments?: ColorAdjustments
+): number {
+  const preset = COLORS.find((c) => c.id === id)
+  const baseHex = preset?.hex ?? 0xffffff
+  const delta = adjustments?.[id]
+  if (!delta || (delta[0] === 0 && delta[1] === 0)) return baseHex
+  return applyHslDelta(baseHex, delta[0], delta[1])
+}
+
+export function resolveColorLabel(id: ColorId): string {
+  return COLORS.find((c) => c.id === id)?.label ?? String(id)
+}
+
+/** Shift `hex` by `dh` degrees in hue and `dl` in lightness (both
+ *  in HSL, saturation preserved). Used by the per-color adjustment
+ *  sliders to nudge a preset colour within its own family. */
+export function applyHslDelta(hex: number, dh: number, dl: number): number {
+  const r = ((hex >> 16) & 0xff) / 255
+  const g = ((hex >> 8) & 0xff) / 255
+  const b = (hex & 0xff) / 255
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  let h = 0
+  let s = 0
+  const l = (max + min) / 2
+  if (max !== min) {
+    const d = max - min
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break
+      case g: h = (b - r) / d + 2; break
+      case b: h = (r - g) / d + 4; break
+    }
+    h /= 6
+  }
+  // Apply deltas (dh in degrees, dl as percentage points).
+  const h2 = (h + dh / 360 + 1) % 1
+  const l2 = Math.max(0, Math.min(1, l + dl / 100))
+  // Back to RGB.
+  const hue2rgb = (p: number, q: number, t: number) => {
+    if (t < 0) t += 1
+    if (t > 1) t -= 1
+    if (t < 1 / 6) return p + (q - p) * 6 * t
+    if (t < 1 / 2) return q
+    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6
+    return p
+  }
+  let r2 = l2
+  let g2 = l2
+  let b2 = l2
+  if (s !== 0) {
+    const q = l2 < 0.5 ? l2 * (1 + s) : l2 + s - l2 * s
+    const p = 2 * l2 - q
+    r2 = hue2rgb(p, q, h2 + 1 / 3)
+    g2 = hue2rgb(p, q, h2)
+    b2 = hue2rgb(p, q, h2 - 1 / 3)
+  }
+  const R = Math.round(r2 * 255) & 0xff
+  const G = Math.round(g2 * 255) & 0xff
+  const B = Math.round(b2 * 255) & 0xff
+  return (R << 16) | (G << 8) | B
+}
 
 /* ─── Coating colours ────────────────────────────────── */
 
@@ -302,20 +378,20 @@ export const COATINGS: readonly {
 
 /* ─── Shapes ─────────────────────────────────────────── */
 
-export type ShapeId = 'sphere' | 'cube'
+export type ShapeId = 'sphere' | 'cube' | 'twist'
 
 export const SHAPES: readonly { id: ShapeId; label: string }[] = [
   { id: 'sphere', label: '구' },
-  { id: 'cube', label: '네모' }
+  { id: 'cube', label: '네모' },
+  { id: 'twist', label: '트위스트' }
 ]
 
-/** Given a unit direction from origin, return per-axis scale for the shape.
- *  The vertex is placed at `dir * scale * radius`. For sphere every axis
- *  is scaled 1 (unchanged). For cube each axis is scaled by 1/max(|dir|)
- *  so the largest direction component reaches ±1 (the cube face) and the
- *  other components stay proportional — every rest vertex ends up on
- *  the cube surface. */
-export function shapeScale(
+/** Given a unit direction from origin on the base sphere, return the
+ *  rest position (still normalised so the caller can scale by radius).
+ *  Sphere passes through, cube pushes outward until the max component
+ *  hits ±1, twist reshapes into a fluted soft-serve column with a
+ *  helical rotation from bottom to top. */
+export function shapeTransform(
   shape: ShapeId,
   nx: number,
   ny: number,
@@ -323,16 +399,42 @@ export function shapeScale(
 ): [number, number, number] {
   switch (shape) {
     case 'sphere':
-      return [1, 1, 1]
+      return [nx, ny, nz]
     case 'cube': {
       const absMax = Math.max(
         Math.abs(nx),
         Math.abs(ny),
         Math.abs(nz)
       )
-      if (absMax < 1e-6) return [1, 1, 1]
+      if (absMax < 1e-6) return [nx, ny, nz]
       const s = 1 / absMax
-      return [s, s, s]
+      return [nx * s, ny * s, nz * s]
+    }
+    case 'twist': {
+      // Piped whipped-cream dome — a nearly spherical body with a
+      // tight ring of ridges that spiral from the base to a soft
+      // peak on top, matching the "piping-tip cream rosette" look:
+      // dense grooves running around the circumference and
+      // spiralling upward once so the ridges tilt slightly as they
+      // stack.
+      const yStretch = 1.05
+      const y = ny * yStretch
+      const rxz = Math.sqrt(nx * nx + nz * nz)
+      const yNorm = (y + yStretch) / (2 * yStretch)
+      // Nearly full radius at the equator; the top narrows more
+      // than the bottom so the silhouette reads as a piped mound
+      // rather than a symmetric sphere.
+      const equatorDist = Math.abs(yNorm - 0.45)
+      const taper = 1 - Math.pow(equatorDist, 1.6) * 0.6
+      const theta0 = Math.atan2(nz, nx)
+      // ~1.4 turns end-to-end — gives the helix its visible spiral
+      // without spinning the ridges too fast (which would blur them).
+      const twistTurns = 1.4
+      const theta = theta0 + yNorm * twistTurns * Math.PI * 2
+      // 8 tight vertical ridges, higher amplitude → strong flutes.
+      const flute = 1 + 0.11 * Math.cos(8 * theta)
+      const rFinal = rxz * taper * flute
+      return [rFinal * Math.cos(theta), y, rFinal * Math.sin(theta)]
     }
   }
 }
@@ -347,14 +449,18 @@ export type BeadColorId = ColorId
 export const BEAD_COLORS = COLORS
 
 /** 3D volumetric bead shape. Every bead in a layer shares the same shape. */
-export type BeadShapeId = 'sphere' | 'cube' | 'torus' | 'star' | 'heart'
+export type BeadShapeId = 'sphere' | 'cube' | 'torus' | 'star' | 'heart' | 'disc'
 
 export const BEAD_SHAPES: readonly { id: BeadShapeId; label: string }[] = [
   { id: 'sphere', label: '구' },
   { id: 'cube', label: '큐브' },
   { id: 'torus', label: '도넛' },
   { id: 'star', label: '별' },
-  { id: 'heart', label: '하트' }
+  { id: 'heart', label: '하트' },
+  // 'disc' = 납작원기둥. Flat cylinder — its outward face is a full disc
+  // so orthographic photo projection reads cleanly even at compact bead
+  // sizes where a sphere's curved cap would collapse into a single pixel.
+  { id: 'disc', label: '원반' }
 ]
 
 /** Material style applied uniformly to every bead in the layer. */
@@ -451,6 +557,12 @@ export interface BeadsConfig {
    *  the whole surface — beads touch each other and hide most of the slime.
    *  Compact combo pins this to true; chunk combo pins it to false. */
   fill: boolean
+  /** Compact-combo colour blend mode. `false` (default) = discrete
+   *  N-band split (반반 나눠진 컬러 구성) — each bead picks the ONE palette
+   *  colour whose Y-band it falls into. `true` = smooth gradient — each
+   *  bead lerps between adjacent palette colours based on its Y position,
+   *  producing a continuous top-to-bottom fade instead of hard bands. */
+  gradient?: boolean
 }
 
 /** Combo defaults + slider limits. Compact allows small beads packed
@@ -477,6 +589,10 @@ export const BEAD_COMBOS: readonly {
   {
     id: 'compact',
     label: '미니 꽉 채우기',
+    // Default `fill: true` — 비즈 category always fills the whole
+    // slime surface immediately on activation. The 양 sub-cat is
+    // gone (no per-count control), so the surface is either fully
+    // packed or off entirely.
     defaults: { size: 0.13, count: 0, fill: true },
     // 0.04 matches the sphere-shape floor so a sphere-only compact
     // layer can shrink all the way to 0.04 (was locked to 0.06 by
@@ -488,7 +604,7 @@ export const BEAD_COMBOS: readonly {
   {
     id: 'chunk',
     label: '속비즈',
-    defaults: { size: 0.46, count: 1, fill: false },
+    defaults: { size: 0.46, count: 2, fill: false },
     sizeMin: 0.3,
     sizeMax: 0.46
   }
@@ -513,7 +629,11 @@ const BEAD_SHAPE_MIN_SIZE: Record<BeadShapeId, number> = {
   cube: 0.12,
   torus: 0.04,
   star: 0.04,
-  heart: 0.04
+  heart: 0.04,
+  // Disc's flat top is meant to hold a photo — floors match sphere so
+  // compact mini-discs can still shrink under the size slider without
+  // the shape's rounded edge becoming disproportionate.
+  disc: 0.04
 }
 
 /** Given the currently selected bead shapes (multi-select), return the
@@ -526,6 +646,33 @@ export function beadShapesMinSize(shapes: readonly BeadShapeId[]): number {
   for (const s of shapes) {
     const v = BEAD_SHAPE_MIN_SIZE[s] ?? 0.04
     if (v > m) m = v
+  }
+  return m
+}
+
+/** Per-shape MAX size ceiling. Cube beads read cleanly at larger
+ *  sizes than round shapes (their flat faces tile a cube slime face
+ *  without leaving big pockets between beads), so their ceiling
+ *  extends past the global 0.3. Other shapes stay capped at 0.3
+ *  where they still fit visually. */
+const BEAD_SHAPE_MAX_SIZE: Record<BeadShapeId, number> = {
+  sphere: 0.3,
+  cube: 0.4,
+  torus: 0.3,
+  star: 0.3,
+  heart: 0.3,
+  disc: 0.3
+}
+
+/** Given the currently selected bead shapes, return the LOWEST max
+ *  size across them — mixing cube (0.4) + sphere (0.3) drops the
+ *  effective ceiling back to 0.3 so no shape is oversized. */
+export function beadShapesMaxSize(shapes: readonly BeadShapeId[]): number {
+  if (shapes.length === 0) return 0.3
+  let m = Infinity
+  for (const s of shapes) {
+    const v = BEAD_SHAPE_MAX_SIZE[s] ?? 0.3
+    if (v < m) m = v
   }
   return m
 }
@@ -636,7 +783,7 @@ export const SPRINKLE_TYPES: readonly {
   id: SprinkleTypeId
   label: string
 }[] = [
-  { id: 'paper', label: '종이' },
+  { id: 'paper', label: '납작종이' },
   { id: 'powder', label: '가루' },
   { id: 'ink', label: '잉크' }
 ]
@@ -911,6 +1058,40 @@ export const EMOJI_BEADS_DEFAULT: EmojiBeadsConfig = {
 export const EMOJI_BEADS_LIMITS = {
   sizeMin: 0.25,
   sizeMax: 0.5,
+  countMin: 0,
+  countMax: 20
+}
+
+/** 커스텀비즈: 이모지처럼 몇 개만 슬라임에 얹혀 강조 역할을 하는
+ *  컬러 3D 비즈. 미니비즈와 달리 전체 면을 덮지 않고, 사용자가 지정한
+ *  color / count / size / shape 조합으로 낱개가 붙는다. 배치·이동은
+ *  이모지 시스템의 물리를 재사용. `flatness` 0..1 슬라이더로 각 비즈의
+ *  outward 축을 압축해 코인/디스크 느낌으로 만들 수 있다. */
+export interface CustomBeadsConfig {
+  colors: BeadColorId[]
+  shapes: BeadShapeId[]
+  size: number
+  count: number
+  /** 0 = 원래 비율 그대로, 1 = 완전히 납작한 원반. 로컬 +Z (outward
+   *  방향)에 대한 스케일 배수 = mix(1.0, 0.15, flatness). */
+  flatness: number
+}
+
+export const CUSTOM_BEADS_DEFAULT: CustomBeadsConfig = {
+  colors: [],
+  // Custom beads never render as a plain sphere — sphere shape was
+  // removed from the panel because it collapses the photo decal into
+  // a tiny cap. Default to disc so accent beads read as flat coins
+  // out of the box.
+  shapes: ['disc'],
+  size: 0.28,
+  count: 0,
+  flatness: 0
+}
+
+export const CUSTOM_BEADS_LIMITS = {
+  sizeMin: 0.15,
+  sizeMax: 0.45,
   countMin: 0,
   countMax: 20
 }
