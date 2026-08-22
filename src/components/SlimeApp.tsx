@@ -17,7 +17,9 @@ import {
   MATERIALS,
   SHAPES,
   resolveColorHex,
-  resolveColorLabel,
+  resolveInnerCoatingHex,
+  resolveFoilCoatingHex,
+  resolveWaxCoatingHex,
   type ColorAdjustments,
   SPRINKLE_COLORS,
   SPRINKLES_DEFAULT,
@@ -60,17 +62,26 @@ const CAMERA_FOV = 45
  *  large base scale keeps the sphere feeling substantial even with the
  *  panel open. Falls back to a safe 1.15 when window isn't available
  *  (SSR / edge cases). */
+/** Convert a numeric colour (0xRRGGBB) to an `#rrggbb` CSS string.
+ *  Small helper used by the unified tag row's colour swatch chips. */
+function hexToCssColor(hex: number): string {
+  return `#${hex.toString(16).padStart(6, '0')}`
+}
+
 function computeInitialScale(): number {
   if (typeof window === 'undefined') return 1.15
   const aspect = window.innerWidth / (window.innerHeight || 1)
   const worldHeight = 2 * CAMERA_Z * Math.tan((CAMERA_FOV * Math.PI) / 360)
   const worldWidth = worldHeight * aspect
   const narrower = Math.min(worldWidth, worldHeight)
-  // Diameter = 2 × radius (=1) × scale. Target 1.15× the narrower dim so
-  // the sphere sits right at the viewport edges once the panel-open
-  // shrink factor applies. Cap at 1.4 so desktop also gets a healthy
-  // starting size instead of being clamped to 1.0.
-  const scale = (narrower * 1.15) / 2
+  // Match the horizontal margins of the bottom options card so the
+  // slime at rest occupies the same visible width as the panel below
+  // it. `.controlsInner` has 18 px inner padding on each side, so the
+  // slime's on-screen diameter should equal (viewportWidth − 36 px).
+  const insetPx = 36
+  const viewportPx = window.innerWidth || 1
+  const widthFraction = Math.max(0.4, 1 - insetPx / viewportPx)
+  const scale = (narrower * widthFraction) / 2
   return Math.min(1.4, Math.max(SCALE_MIN, scale))
 }
 
@@ -93,11 +104,21 @@ const SQUISH_SAMPLE_URLS = [
 // and the slime is being pressed hard enough.
 const NAMED_SAMPLE_URLS = {
   wax: '/sounds/Wak.mp3',
-  foil: '/sounds/Hoil.mp3',
+  // 박지 (foil) coating and 퍼티 (metal material) originally pointed at
+  // Hoil.mp3 and Popp.mp3 respectively; swapped so foil cracks now use
+  // the pop sample and the putty material kneading uses the wet foil
+  // sample — matches the user's chosen sound identity for each channel.
+  foil: '/sounds/Popp.mp3',
+  ice: '/sounds/Iced.mp3',
   beads: '/sounds/Biz.mp3',
   paper: '/sounds/Sprink.mp3',
+  // 스팽글 종류 = 플라스틱 swaps the paper channel's rustle for a
+  // harder brighter tick. Kept as a separate named sample so the two
+  // kinds can coexist in the mixer state (only one is unmuted at a
+  // time based on sprinkles.paper.kind).
+  plastic: '/sounds/Spang.mp3',
   matte: '/sounds/Sprinkle.mp3',
-  metal: '/sounds/Popp.mp3',
+  metal: '/sounds/Hoil.mp3',
   // Ambient loop that fires when the user presses a slime that has
   // emojis on it (Play.mp3). Same continuous-loop pattern as beads /
   // paper — gain tracks pressure, silent otherwise.
@@ -110,20 +131,63 @@ const NAMED_SAMPLE_URLS = {
 // segment. Set to `null` to allow the full recording. Adjust the wax
 // range to pick the exact section of Wak.mp3 you want as the crack sound.
 const NAMED_SAMPLE_RANGES: Record<
-  'wax' | 'foil' | 'beads' | 'paper' | 'matte' | 'metal' | 'emoji',
+  'wax' | 'foil' | 'ice' | 'beads' | 'paper' | 'plastic' | 'matte' | 'metal' | 'emoji',
   readonly [number, number] | null
 > = {
-  wax: [0.5, 1.5],
-  // Skip the first 3.4s of Hoil.mp3 and loop the rest. 999 is a
-  // sentinel — setLoopingSampleLevel clamps loopEnd to the buffer
-  // duration, so this always resolves to "3.4s → end of file".
-  foil: [3.4, 999],
+  // Wax loops a specific crack-burst segment of Wak.mp3. The whole
+  // 11s file has a middle stretch where the recording captures the
+  // hand kneading the slime between two crack bursts — looping the
+  // full file made that "만지작만지작" leak into the long-press sound
+  // between the "빠가각" pops. A tighter window keeps only the first
+  // continuous crack burst so a sustained press reads as uninterrupted
+  // crackling. Tune the end value if a shorter / longer crack tail
+  // sounds better to the ear.
+  wax: [0.3, 2.5],
+  // Popp.mp3 (now on the foil channel) needs no leading trim.
+  foil: null,
+  // Skip the tiny leading silence + attack ramp so the crackle
+  // starts audibly the frame the user presses instead of a beat
+  // later. 999 sentinel resolves to end-of-buffer.
+  ice: [0.05, 999],
   beads: null,
   paper: null,
+  plastic: null,
   matte: null,
-  metal: null,
+  // Hoil.mp3 (now on the metal channel) still needs its leading 3.4s
+  // trimmed — that's where the actual wet-foil kneading sound starts.
+  // 999 sentinel resolves to end-of-buffer inside the sound engine.
+  metal: [3.4, 999],
   emoji: null
 }
+
+/** Down-scale applied to a layer group when its owning config's `inside`
+ *  flag is on. Per-layer values because each layer's outward extent
+ *  differs — flat paper spangles sit deep at 0.72, but volumetric beads
+ *  and thick plastic spangles need a smaller factor so their outer edge
+ *  doesn't poke back up to the slime surface. Compact beads carry a
+ *  separate `compactWrap` so the wrap-shell hangs near the slime skin
+ *  while the bead cores drop deeper for a clearly-embedded look. */
+const INSIDE_SCALE = {
+  // Spangles + beads sit DEEP inside the slime so press-time
+  // bulging never pushes them through the slime surface — the
+  // slime silhouette itself is what the user should see, with
+  // the inclusion only hinted at through the (semi-)transparent
+  // body.
+  spangleFlat: 0.55,
+  spanglePlastic: 0.45,
+  compact: 0.55,
+  compactWrap: 0.58,
+  // Emoji + custom beads sit near the slime edge but DEFINITELY inside
+  // the surface — the previous 0.90 / 0.92 pair scaled the bead's centre
+  // to just below the surface but the bead's own outward extent (radius
+  // for custom beads, sprite half-height + baseLift for emojis) still
+  // poked back through, so they read as sitting ON the skin instead of
+  // BENEATH it. 0.82 keeps them close enough to the edge to be clearly
+  // visible through / at the silhouette while ensuring their outermost
+  // face lands under the surface at typical sizes.
+  customBeads: 0.82,
+  emoji: 0.82
+} as const
 
 export default function SlimeApp() {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -161,6 +225,11 @@ export default function SlimeApp() {
       // Private-mode storage error — toggle still works for the session.
     }
   }, [skeletonOn])
+  // Pending flag for the hand-detect confirmation dialog. Set when the
+  // user requests to turn hand-detect ON from OFF; a confirmation
+  // modal then explains the battery / heat cost and lets them commit
+  // or cancel.
+  const [handDetectPending, setHandDetectPending] = useState(false)
 
   // Scale state lives entirely in a ref — no UI reads it, and pinch / wheel
   // handlers write directly without triggering React re-renders. The
@@ -212,11 +281,17 @@ export default function SlimeApp() {
   }, [colorAdjustments])
   const [material, setMaterial] = useState<MaterialId>('crystal')
   const [coating, setCoating] = useState<CoatingId>('none')
-  // Wax / ice coating tint — multi-select array so 2+ colours paint a
-  // top-to-bottom gradient across the coating (single-pick keeps the flat
-  // tint). Draws from the general COLORS palette because those coatings
-  // are ordinary pigmented surfaces (waxes, frozen shells).
-  const [coatingColors, setCoatingColors] = useState<ColorId[]>(['gold'])
+  // 크런치 — small hidden "grain" bumps that pop out on the slime surface
+  // where the user is pressing. Pure shader vertex displacement; no
+  // physics or bead layer, just a Fibonacci-hashed outward bump amplified
+  // by local compression amount.
+  const [crunchOn, setCrunchOn] = useState<boolean>(false)
+  // Wax coating tint — multi-select array so 2+ colours paint a top-to-
+  // bottom gradient across the coating (single-pick keeps the flat tint).
+  // Draws from the general COLORS palette because wax is an ordinary
+  // pigmented surface. Default is 'white' so the wax coating reads as a
+  // translucent white shell out of the box (special alpha for white only).
+  const [coatingColors, setCoatingColors] = useState<ColorId[]>(['white'])
   // Foil surface colour — same multi-select story but sourced from a
   // narrower COATING_COLORS palette of saturated metallic hues. Kept
   // separate from `coatingColors` so switching between wax and foil
@@ -291,6 +366,15 @@ export default function SlimeApp() {
   // Header (right-slot camera button). `stickerOn` toggles the button
   // between "add" and "clear" modes.
   const [stickerOn, setStickerOn] = useState(false)
+  // Currently open primary category in CustomizePanel — mirrored out
+  // via onActivePanelChange so the unified tag row can show a "슬라임 안"
+  // toggle for whichever of the embed-capable leaves (스팽글 / 꽉비즈 /
+  // 이모지 / 추가비즈) is being viewed. null when the root is showing.
+  const [activePanel, setActivePanel] = useState<string | null>(null)
+  // Imperative "jump to category" bridge — CustomizePanel registers
+  // its openCategory here so unified-tag-row clicks can navigate
+  // straight into the panel that owns the tag.
+  const openCategoryRef = useRef<((id: string | null) => void) | null>(null)
   // Up to 4 photo beads — big chunk-style beads on the slime's front
   // hemisphere with a photo decal on each. Managed as a fixed-length
   // slots array so users can add / remove specific slots without
@@ -324,10 +408,25 @@ export default function SlimeApp() {
   useEffect(() => {
     browseIdxRef.current = browseIdx
   }, [browseIdx])
+  // 만져보기 (touch/play) — non-editable preview of a picked collection
+  // entry. Hides every editing surface (options card, top button row)
+  // and shows a single "컬렉션으로 돌아가기" pill; slime interaction
+  // still works so the user can knead / press without changing state.
+  const [collectionPreview, setCollectionPreview] = useState(false)
+  // 수정하기 confirmation — populated when the user clicks "수정하기"
+  // on a saved entry while there are unsaved changes to the current
+  // slime. The modal asks whether to save current before switching.
+  const [pendingCollectionEdit, setPendingCollectionEdit] =
+    useState<{ state: unknown } | null>(null)
   // Snapshot of the user's WIP slime taken the instant they entered
   // browse mode. The "×" close button restores this so previewing a
   // saved slime doesn't destroy in-progress work.
   const preBrowseStateRef = useRef<unknown | null>(null)
+  // Snapshot of the WIP slime taken when the user hits "만져보기" on
+  // a saved collection entry. Restored when they hit "컬렉션으로
+  // 돌아가기" so the carousel isn't showing the previewed slime behind
+  // it — the user drops back into whatever they had been editing.
+  const preCollectionPreviewStateRef = useRef<unknown | null>(null)
   // Preview-mode toggle inside browse view — off by default; when
   // OFF, slime interactions are disabled and the whole overlay
   // absorbs pointer input for horizontal swipe navigation. When
@@ -467,8 +566,9 @@ export default function SlimeApp() {
   useEffect(() => {
     const hasEmojis =
       emojiBeads.emojis.length > 0 && emojiBeads.count > 0
-    if (!hasEmojis && emojiMoveOn) setEmojiMoveOn(false)
-  }, [emojiBeads, emojiMoveOn])
+    const hasCustomBeads = customBeads.count > 0
+    if (!hasEmojis && !hasCustomBeads && emojiMoveOn) setEmojiMoveOn(false)
+  }, [emojiBeads, customBeads, emojiMoveOn])
   const [toast, setToast] = useState<string | null>(null)
   // Light / dark theme — persisted across sessions in localStorage so a
   // returning user gets the same look they left with. Read once on mount
@@ -493,6 +593,7 @@ export default function SlimeApp() {
     applyRef.current?.setSceneBackground(
       theme === 'light' ? 0xe5deec : 0x000000
     )
+    applyRef.current?.setEdgeTheme(theme)
   }, [theme])
 
   // Imperative handles exposed by the scene effect.
@@ -500,6 +601,8 @@ export default function SlimeApp() {
     setColors: (v: readonly ColorId[]) => void
     setMaterial: (v: MaterialId) => void
     setCoating: (v: CoatingId) => void
+    setWaxThicknessAlpha: (a: number) => void
+    setCrunchOn: (on: boolean) => void
     setCoatingColors: (hexes: number[]) => void
     setShape: (v: ShapeId) => void
     setBeads: (v: BeadsConfig) => void
@@ -513,6 +616,9 @@ export default function SlimeApp() {
      *  light / dark theme so the scene stops reading as dark inside the
      *  light-mode UI. */
     setSceneBackground: (hex: number) => void
+    /** Push the current UI theme into the slime shader so the crystal
+     *  material's grazing-angle rim brightness tracks the background. */
+    setEdgeTheme: (theme: 'dark' | 'light') => void
     /** Push per-colour HSL deltas from the adjustment sliders. Both
      *  slime and beads re-resolve palette hex through these deltas
      *  so an 아쿠아 tweak reads the same across surfaces. */
@@ -559,24 +665,57 @@ export default function SlimeApp() {
   }, [material])
   useEffect(() => {
     applyRef.current?.setCoating(coating)
-  }, [coating])
-  // Single effect that resolves the "active coating colour" — foil reads
-  // from the metallic palette (COATING_COLORS) while wax / ice read from
-  // the general slime palette (COLORS). Triggers on coating change too
-  // so switching wax→foil (or vice versa) immediately swaps the hex
-  // pushed to the material.
+    // Wax-coating tint alpha:
+    //   씬왁스 → always translucent (alpha 0.30) regardless of colour,
+    //     since 씬왁스 by definition is a THIN coat that reads as a
+    //     translucent wash — the inner slime bleeds through every tint.
+    //   왁스 → colour-dependent: white picks the translucent 0.80 shell
+    //     (real white candle wax lets some interior light through),
+    //     any other colour paints a fully opaque solid shell (alpha 1.0).
+    //   Non-wax coatings ignore this uniform.
+    const isWhiteWax =
+      coatingColors.length > 0 && coatingColors[0] === 'white'
+    let waxAlpha = 1.0
+    if (coating === 'thinwax') {
+      waxAlpha = 0.30
+    } else if (coating === 'wax') {
+      waxAlpha = isWhiteWax ? 0.80 : 1.0
+    }
+    applyRef.current?.setWaxThicknessAlpha(waxAlpha)
+  }, [coating, coatingColors])
   useEffect(() => {
-    // Coating tint now MIRRORS the slime's own colour picks — no
-    // separate coating palette. Applying wax/foil/tube/ice keeps the
-    // colours the user chose for the slime body so the piece stays
-    // visually consistent (wax coating in the same tone as the
-    // slime, foil in the same tone, etc.). Single pick → flat tint,
-    // 2+ picks → gradient handled by slime.setCoatingColors.
-    const hexes = colors.map((id) => resolveColorHex(id, colorAdjustments))
-    applyRef.current?.setCoatingColors(
-      hexes.length > 0 ? hexes : [0xfbf7f2]
-    )
-  }, [coating, colors, colorAdjustments])
+    applyRef.current?.setCrunchOn(crunchOn)
+  }, [crunchOn])
+  // Coating tint is now INDEPENDENT of the slime's own colour picks —
+  // wax reads from the general slime palette (COLORS) via `coatingColors`,
+  // foil reads from the metallic COATING_COLORS palette via `foilColors`.
+  // The user picks the coating colour separately in the panel so a red
+  // slime can wear a gold wax coating (or blue slime under silver foil,
+  // etc). Empty selection falls back to a warm off-white so the coating
+  // has some visible tint even before the user picks one.
+  useEffect(() => {
+    let hexes: number[]
+    if (coating === 'foil') {
+      // Foil colours resolve through their own `fc:` adjustment namespace
+      // so tweaking a foil silver stays independent from tweaks to any
+      // other palette usage.
+      const palette = foilColors.map((id) =>
+        resolveFoilCoatingHex(id, colorAdjustments)
+      )
+      hexes = palette.length > 0 ? palette : [0xb5bbc4]
+    } else {
+      // Wax / thinwax / tube (젤) / ice (글레이즈) coatings all pull from
+      // the general COLORS palette via the shared `coatingColors` state,
+      // keyed under `wc:` so their tunes stay independent from slime.
+      const palette = coatingColors.map((id) =>
+        resolveWaxCoatingHex(id, colorAdjustments)
+      )
+      // No pick → pure white so the default coating reads as clean
+      // white rather than a warm off-white / cream.
+      hexes = palette.length > 0 ? palette : [0xffffff]
+    }
+    applyRef.current?.setCoatingColors(hexes)
+  }, [coating, coatingColors, foilColors, colorAdjustments])
   useEffect(() => {
     applyRef.current?.setShape(shape)
   }, [shape])
@@ -690,7 +829,8 @@ export default function SlimeApp() {
     innerSlime,
     customBeads,
     sprinkles,
-    emojiBeads
+    emojiBeads,
+    crunchOn
   ])
   // Warn the user before leaving with unsaved slime changes so they
   // don't accidentally lose an in-progress design. Modern browsers
@@ -709,7 +849,7 @@ export default function SlimeApp() {
     setColors([])
     setMaterial('crystal')
     setCoating('none')
-    setCoatingColors(['gold'])
+    setCoatingColors(['white'])
     setFoilColors(['silver'])
     setShape('sphere')
     setBeads(BEADS_DEFAULT)
@@ -717,7 +857,15 @@ export default function SlimeApp() {
     setCustomBeads(CUSTOM_BEADS_DEFAULT)
     setSprinkles(SPRINKLES_DEFAULT)
     setEmojiBeads(EMOJI_BEADS_DEFAULT)
+    setCrunchOn(false)
+    // Wipe every hue / lightness tune so the adjust sliders re-open
+    // at zero if the user tunes a colour again after resetting.
+    setColorAdjustments({})
     applyRef.current?.reset()
+    // Also collapse the CustomizePanel — nuking every option should
+    // clear the "opened category" state too so the panel isn't left
+    // showing controls for options that no longer differ from default.
+    openCategoryRef.current?.(null)
   }
 
   // Encode the full customisation into the URL so a shared link lands the
@@ -738,7 +886,8 @@ export default function SlimeApp() {
     sp: sprinkles,
     e: emojiBeads,
     is: innerSlime,
-    cb: customBeads
+    cb: customBeads,
+    cr: crunchOn
   })
 
   // Apply a decoded snapshot to the live customisation. Missing /
@@ -747,9 +896,28 @@ export default function SlimeApp() {
   const applyStateSnapshot = (raw: unknown) => {
     if (!raw || typeof raw !== 'object') return
     const s = raw as Record<string, unknown>
-    if (Array.isArray(s.c) && s.c.length > 0) setColors(s.c as ColorId[])
+    // Always apply Array fields even when empty — a saved default
+     // slime (no colours picked) needs to CLEAR the current colour
+     // list rather than inherit the previous slime's colours.
+    if (Array.isArray(s.c)) setColors(s.c as ColorId[])
     if (typeof s.m === 'string') setMaterial(s.m as MaterialId)
-    if (typeof s.co === 'string') setCoating(s.co as CoatingId)
+    if (typeof s.co === 'string') {
+      // Old wax snapshots carried a separate `wt` (waxThickness 1..4);
+      // the coating ladder is now encoded directly in the coating id
+      // (thinwax = translucent wax, wax = fully opaque), so we translate
+      // old wt into the new id:
+      //   wt ≤ 2 (thinner half) → thinwax
+      //   wt ≥ 3 (thicker half) → wax
+      // Snapshots without wt but with coating='wax' keep as 'wax'.
+      const rawCo = s.co as string
+      let coerced: CoatingId
+      if (rawCo === 'wax' && typeof s.wt === 'number') {
+        coerced = s.wt <= 2 ? 'thinwax' : 'wax'
+      } else {
+        coerced = rawCo as CoatingId
+      }
+      setCoating(coerced)
+    }
     if (Array.isArray(s.cc) && s.cc.length > 0)
       setCoatingColors(s.cc as ColorId[])
     else if (typeof s.cc === 'string')
@@ -758,16 +926,47 @@ export default function SlimeApp() {
       setFoilColors(s.fc as CoatingColorId[])
     else if (typeof s.fc === 'string')
       setFoilColors([s.fc as CoatingColorId])
-    if (typeof s.sh === 'string') setShape(s.sh as ShapeId)
-    if (s.b && typeof s.b === 'object') setBeads(s.b as BeadsConfig)
-    if (s.sp && typeof s.sp === 'object')
-      setSprinkles(s.sp as SprinklesConfig)
+    if (typeof s.sh === 'string') {
+      // 'twist' shape was removed from the picker — coerce old snapshots
+      // to 'sphere' so they still render with a valid shape id.
+      const rawSh = s.sh as string
+      setShape((rawSh === 'twist' ? 'sphere' : rawSh) as ShapeId)
+    }
+    // Coerce any 'ice' / 'tube' coatings baked into a bead or inner-slime
+    // config to 'none' since those coating ids no longer have a chip.
+    const coerceBeadCoating = (b: BeadsConfig): BeadsConfig =>
+      b.coating === 'ice' || b.coating === 'tube'
+        ? { ...b, coating: 'none' }
+        : b
+    // Slime-ball (innerSlime) now uses the slime MATERIALS palette.
+    // Legacy configs may still carry BeadMaterialId 'plastic' from before
+    // that switch — coerce to 'glossy' (current 슬라임볼 default) so the
+    // ball still renders with a sensible material and keeps the same
+    // radius as the multi-colour gradient path.
+    const coerceInnerMaterial = (b: BeadsConfig): BeadsConfig => {
+      const m = MATERIALS.find((x) => x.id === b.material)
+      return m ? b : { ...b, material: 'glossy' }
+    }
+    if (s.b && typeof s.b === 'object')
+      setBeads(coerceBeadCoating(s.b as BeadsConfig))
+    if (s.sp && typeof s.sp === 'object') {
+      // Legacy saves predate the 스팽글 종류 field — default missing
+      // paper.kind to 'paper' so the sound routing has a valid value.
+      const sp = s.sp as SprinklesConfig
+      setSprinkles({
+        ...sp,
+        paper: { ...sp.paper, kind: sp.paper?.kind ?? 'paper' }
+      })
+    }
     if (s.e && typeof s.e === 'object')
       setEmojiBeads(s.e as EmojiBeadsConfig)
     if (s.is && typeof s.is === 'object')
-      setInnerSlime(s.is as BeadsConfig)
+      setInnerSlime(
+        coerceInnerMaterial(coerceBeadCoating(s.is as BeadsConfig))
+      )
     if (s.cb && typeof s.cb === 'object')
       setCustomBeads(s.cb as CustomBeadsConfig)
+    if (typeof s.cr === 'boolean') setCrunchOn(s.cr)
   }
 
   /** Load an image file into a square, centre-cropped CanvasTexture
@@ -1047,15 +1246,19 @@ export default function SlimeApp() {
     void engine?.loadSquishSamples(SQUISH_SAMPLE_URLS)
     void engine?.loadNamedSample('wax', NAMED_SAMPLE_URLS.wax)
     void engine?.loadNamedSample('foil', NAMED_SAMPLE_URLS.foil)
+    void engine?.loadNamedSample('ice', NAMED_SAMPLE_URLS.ice)
     void engine?.loadNamedSample('beads', NAMED_SAMPLE_URLS.beads)
     void engine?.loadNamedSample('paper', NAMED_SAMPLE_URLS.paper)
+    void engine?.loadNamedSample('plastic', NAMED_SAMPLE_URLS.plastic)
     void engine?.loadNamedSample('matte', NAMED_SAMPLE_URLS.matte)
     void engine?.loadNamedSample('metal', NAMED_SAMPLE_URLS.metal)
     void engine?.loadNamedSample('emoji', NAMED_SAMPLE_URLS.emoji)
     engine?.setNamedSampleRange('wax', NAMED_SAMPLE_RANGES.wax)
     engine?.setNamedSampleRange('foil', NAMED_SAMPLE_RANGES.foil)
+    engine?.setNamedSampleRange('ice', NAMED_SAMPLE_RANGES.ice)
     engine?.setNamedSampleRange('beads', NAMED_SAMPLE_RANGES.beads)
     engine?.setNamedSampleRange('paper', NAMED_SAMPLE_RANGES.paper)
+    engine?.setNamedSampleRange('plastic', NAMED_SAMPLE_RANGES.plastic)
     engine?.setNamedSampleRange('matte', NAMED_SAMPLE_RANGES.matte)
     engine?.setNamedSampleRange('metal', NAMED_SAMPLE_RANGES.metal)
     engine?.setNamedSampleRange('emoji', NAMED_SAMPLE_RANGES.emoji)
@@ -1094,6 +1297,19 @@ export default function SlimeApp() {
   useEffect(() => {
     innerSlimeCoatingRef.current = innerSlime.coating
   }, [innerSlime.coating])
+  // Inner slime's material — mirrors the outer slime's materialRef so the
+  // render loop can trigger the ball's material-specific ambient (matte
+  // foam / metal putty) independently from the outer slime's material.
+  // Ball inherits the outer slime MATERIALS palette so the union type
+  // matches; regular BeadMaterialId values ('plastic') are treated as
+  // 'crystal' for sound routing (a legacy default that predates the
+  // palette switch).
+  const innerSlimeMaterialRef = useRef<MaterialId | 'plastic'>('crystal')
+  useEffect(() => {
+    innerSlimeMaterialRef.current = innerSlime.material as
+      | MaterialId
+      | 'plastic'
+  }, [innerSlime.material])
   const beadsActiveRef = useRef<boolean>(false)
   useEffect(() => {
     // Compact "미니 꽉 채우기" packs densely via `fill: true` while count
@@ -1112,11 +1328,19 @@ export default function SlimeApp() {
       emojiBeads.emojis.length > 0 && emojiBeads.count > 0
   }, [emojiBeads])
   // Paper sprinkle activity — mirror React state to a ref so the render
-  // loop can drive its sound scheduler each frame.
+  // loop can drive its sound scheduler each frame. Only fires while
+  // paper is in FILL mode; scattered paper pieces are silent because
+  // sparse confetti hitting the slime shouldn't add an ambient hiss.
+  // Split into two refs so the render loop can route the ambient loop
+  // to the matching sample: 종이 → paper channel (Sprink.mp3), 플라스틱
+  // → plastic channel (Spang.mp3). Only one is unmuted at a time.
   const paperActiveRef = useRef<boolean>(false)
+  const plasticActiveRef = useRef<boolean>(false)
   useEffect(() => {
-    paperActiveRef.current =
-      sprinkles.paper.fill || sprinkles.paper.count > 0
+    const active = sprinkles.paper.fill
+    const kind = sprinkles.paper.kind ?? 'paper'
+    paperActiveRef.current = active && kind === 'paper'
+    plasticActiveRef.current = active && kind === 'plastic'
   }, [sprinkles])
 
   // Track the controls block's live height so the render loop can gently
@@ -1215,7 +1439,11 @@ export default function SlimeApp() {
     // Procedural studio environment map — dramatically improves reflections on
     // clearcoat / metallic surfaces (slime + beads) without shipping an HDR.
     const pmrem = new THREE.PMREMGenerator(renderer)
-    const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
+    // Blur factor 0.14 (was 0.04) softens the sharp bright rectangles
+    // baked into RoomEnvironment — otherwise on the highly-transmissive
+    // pearl slime they reflect as tiny "particle" specks that read as
+    // stray glitter to the eye.
+    const envTex = pmrem.fromScene(new RoomEnvironment(), 0.14).texture
     scene.environment = envTex
 
     const camera = new THREE.PerspectiveCamera(
@@ -1284,7 +1512,11 @@ export default function SlimeApp() {
     // up the same ink / gradient / matte foam. Its per-frame update
     // additionally runs a soft compress-on-press pass so the inner
     // chunk visibly squishes when the slime is pressed.
-    const innerBeadsLayer = new BeadsLayer()
+    // useSlimeMaterials → resolve config.material against the slime
+    // MATERIALS palette (crystal / glossy / matte / metal) instead of the
+    // bead-specific presets, so 슬라임볼 shares the outer slime's material
+    // picker. Regular bead layers stay on the plastic / crystal presets.
+    const innerBeadsLayer = new BeadsLayer({ useSlimeMaterials: true })
     slime.mesh.add(innerBeadsLayer.group)
     innerBeadsLayer.setInkUniforms(
       inkUniforms.colorUniform,
@@ -1314,6 +1546,7 @@ export default function SlimeApp() {
     // touching the main bead layer's InstancedMesh state.
     const customBeadsLayer = new CustomBeadsLayer()
     slime.mesh.add(customBeadsLayer.group)
+
     // Prime the ghost + bead-lift to match the initial React state — the
     // state-tracking useEffect above fires BEFORE this scene effect on
     // first mount (applyRef.current is still null), so without priming a
@@ -1331,7 +1564,13 @@ export default function SlimeApp() {
     // always matches (matte slime → matte wrap; crystal → transparent wrap;
     // wax → clearcoat + accent sheen). Called after any slime setter.
     const syncBeadWrap = () => {
-      beadsLayer.syncWrapToSlime(slime.getSurfaceParams())
+      const params = slime.getSurfaceParams()
+      beadsLayer.syncWrapToSlime(params)
+      // Inner-slime layer's wrap also needs the slime-surface params —
+      // otherwise its wrap material stays on the MeshPhysicalMaterial
+      // defaults (opaque white) and a crystal 슬라임볼's wrap reads
+      // as a solid white ball instead of a transparent slime jacket.
+      innerBeadsLayer.syncWrapToSlime(params)
     }
 
     // Expose imperative setters so React effects can push customization changes
@@ -1347,9 +1586,17 @@ export default function SlimeApp() {
       },
       // Coating internally toggles crack rendering for wax and wipes damage
       // when switching to `none`, so no external branching needed here.
+      // 왁스비즈: SlimeSphere handles the shell body + rim-darkening
+      // depth fake in the shader; no external layer wiring needed.
       setCoating: (v) => {
         slime.setCoating(v)
         syncBeadWrap()
+      },
+      setWaxThicknessAlpha: (a) => {
+        slime.setWaxThicknessAlpha(a)
+      },
+      setCrunchOn: (on) => {
+        slime.setCrunchOn(on)
       },
       setCoatingColors: (hexes) => {
         // Hexes are pre-resolved at the state layer from the correct
@@ -1400,6 +1647,15 @@ export default function SlimeApp() {
           slime.restPositionArray,
           slime.shape
         )
+        // Custom beads read their outward-offset boost from this flag
+        // so they only rise ABOVE a full-fill compact shell when one
+        // actually exists — naked-slime custom beads stay flush.
+        customBeadsLayer.setFillLayerActive(
+          v.combo === 'compact' &&
+            v.fill &&
+            v.colors.length > 0 &&
+            v.shapes.length > 0
+        )
         // Push per-vertex nearest-bead directions into the slime so its
         // vertex shader taffy-stretches around each bead — turns the
         // hard bead-through-flat-surface intersection into a wrapped
@@ -1441,6 +1697,18 @@ export default function SlimeApp() {
           slime.indexArray,
           currentBeadInfo()
         )
+        // 슬라임 안 — bead cores drop deep (compact scale) while their
+        // wrap-shells hang closer to the surface (compactWrap scale) so
+        // the slime keeps a soft bead-textured skin AND the actual bead
+        // cores sit clearly separated behind that skin. Chunk stays
+        // surface-anchored (its whole vibe is big beads sitting on the
+        // slime), so the guard keeps the toggle scoped to the compact
+        // primary chip that owns the button.
+        const insideOn = v.combo === 'compact' && v.inside
+        beadsLayer.setInsideScale(
+          insideOn ? INSIDE_SCALE.compact : 1,
+          insideOn ? INSIDE_SCALE.compactWrap : 1
+        )
       },
       setSprinkles: (v) => {
         // Paper + powder feed independent SprinklesLayers so both render
@@ -1456,7 +1724,8 @@ export default function SlimeApp() {
             size: v.paper.size,
             shape: v.paper.shape,
             material: v.paper.material,
-            fill: v.paper.fill
+            fill: v.paper.fill,
+            kind: v.paper.kind
           },
           slime.unitDirsArray,
           slime.restPositionArray,
@@ -1495,20 +1764,40 @@ export default function SlimeApp() {
         } else {
           slime.setInk(0xffffff, 0)
         }
+        // 슬라임 안 — same treatment as compact beads: shrink the spangle
+        // group toward the slime origin so the pieces read as embedded.
+        // Plastic spangles are much thicker than paper, so they need a
+        // smaller factor to stay tucked behind the slime surface. Powder
+        // stays surface-anchored (it's a dust coating, not an inclusion)
+        // so we only touch the paperLayer group here.
+        const spangleInsideScale =
+          v.paper.kind === 'plastic'
+            ? INSIDE_SCALE.spanglePlastic
+            : INSIDE_SCALE.spangleFlat
+        paperLayer.group.scale.setScalar(
+          v.paper.inside ? spangleInsideScale : 1
+        )
       },
-      setEmojiBeads: (v) =>
+      setEmojiBeads: (v) => {
         emojiBeadsLayer.setConfig(
           { emojis: v.emojis, size: v.size, count: v.count },
           slime.unitDirsArray
-        ),
+        )
+        emojiBeadsLayer.group.scale.setScalar(
+          v.inside ? INSIDE_SCALE.emoji : 1
+        )
+      },
       setEmojiGhost: (v) => emojiBeadsLayer.setGhostVisible(v),
       setEmojiBeadLift: (h) => emojiBeadsLayer.setBeadLift(h),
       setSceneBackground: (hex) => bgMaterial.color.setHex(hex),
+      setEdgeTheme: (t) => slime.setEdgeTheme(t),
       setColorAdjustments: (adj) => {
         slime.setColorAdjustments(adj)
         beadsLayer.setColorAdjustments(adj)
         innerBeadsLayer.setColorAdjustments(adj)
         customBeadsLayer.setColorAdjustments(adj)
+        paperLayer.setColorAdjustments(adj)
+        powderLayer.setColorAdjustments(adj)
       },
       setPhotoDecal: (texture) => slime.setPhotoDecal(texture),
       setPhotoBeads: (textures) => beadsLayer.setPhotos(textures),
@@ -1519,13 +1808,41 @@ export default function SlimeApp() {
           slime.restPositionArray,
           slime.shape
         )
+        // Taffy wrap only for count >= 2 inner slime — mirrors main
+        // chunk 비즈볼 behaviour where each surface bead gets its own
+        // local bulge and the overall slime stays the same size. The
+        // single-ball preset places its ball at the slime ORIGIN and
+        // is visible through the translucent slime body, so no wrap
+        // is needed (a uniform radial wrap would inflate the whole
+        // slime with the ball's size, which the user didn't want).
+        const outerActive =
+          beadsLayer.currentConfig.combo === 'chunk' &&
+          beadsLayer.currentConfig.count > 0
+        if (!outerActive) {
+          const enableWrap =
+            v.combo === 'chunk' && v.count >= 2
+          const inf = enableWrap
+            ? innerBeadsLayer.computeBeadInfluence(slime.unitDirsArray)
+            : null
+          slime.setBeadInfluence(inf, v.size, inf !== null)
+        }
       },
       setCustomBeads: (v) => {
         customBeadsLayer.setConfig(v, slime.unitDirsArray)
+        customBeadsLayer.group.scale.setScalar(
+          v.inside ? INSIDE_SCALE.customBeads : 1
+        )
       },
       setCustomBeadsPhoto: (texture) => customBeadsLayer.setPhoto(texture),
       reset: () => {
         slime.reset()
+        // Snap the slime back to its default orientation on any reset
+        // (press-reset button or unified-tag reset) so the slime
+        // returns to the same pose as a fresh mount, not whatever
+        // rotation the user had spun it into. Kill any active
+        // auto-spin timer too so the reset feels clean.
+        slime.mesh.quaternion.identity()
+        autoSpinUntilRef.current = 0
         // Wipe any accumulated per-bead crack damage — otherwise a
         // reset restores the slime shape but leaves coated chunk
         // beads visibly cracked from the previous press pass, which
@@ -1557,6 +1874,10 @@ export default function SlimeApp() {
         )
         emojiBeadsLayer.reseat(slime.unitDirsArray)
         customBeadsLayer.reseat(slime.unitDirsArray)
+        // Restore the buried 슬라임볼 back to a round shape — dents are
+        // monotonic during normal use (clay model), so the reset path
+        // is the only place stored dents are wiped.
+        clearBallDents()
       },
       captureCanonicalThumbnail: () => {
         // Snapshot mesh transform + all mutable physics/damage state
@@ -1574,28 +1895,49 @@ export default function SlimeApp() {
         // painted rectangle behind the slime.
         const savedBgVisible = bg.visible
         bg.visible = false
-        // Slimes that DON'T have a full-fill bead shell read visually
-        // smaller in the thumbnail than slimes that do — the outer
-        // radius of a bead-shelled slime = slime radius + bead radius
-        // (× visual bulk from beads' specular sparkle). Scale up
-        // naked slimes proportionally so every thumbnail reads at a
-        // consistent apparent size.
+        // Capture scale is chosen so every configuration fits inside
+        // the thumbnail viewport regardless of whether the slime is
+        // naked, packed with compact beads, or sprouting large chunk
+        // 비즈볼 / 슬라임볼 chunks that extend past the slime surface.
+        // Effective outer radius (in slime-local units):
+        //   naked           → 1.15 (specular bloom bias)
+        //   full compact    → 1 + compact bead size
+        //   chunk beads     → 1 + 2 · chunk size (bead sits ON surface)
+        //   inner slime     → 1 + 2 · inner size
         const beadsCfg = beadsLayer.currentConfig
+        const innerCfg = innerBeadsLayer.currentConfig
         const hasFullBeadShell =
           beadsCfg.fill &&
           beadsCfg.shapes.length > 0 &&
           beadsCfg.colors.length > 0
-        // Baseline scale with a full bead shell. When beads aren't
-        // filling the surface, add the bead layer's radius contribution
-        // (× a bulk factor to account for specular halo bloom that
-        // makes bead-covered slimes read even larger than pure
-        // geometry). Using compact bead default size 0.13 → factor of
-        // roughly 1.30, i.e. naked scale ~0.65.
-        const beadRadius = 0.13
-        const bulk = 2.3
-        const captureScale = hasFullBeadShell
-          ? 0.5
-          : 0.5 * (1 + beadRadius * bulk)
+        // Visible outer radius per configuration:
+        //   full-fill compact → 1 + 1.4 · bead size (bead radius +
+        //       specular halo). Slight over-estimate so 꽉비즈 saves
+        //       a touch smaller and the border shows margin.
+        //   chunk beads on surface (count ≥ 2) → 1 + bead radius.
+        //   inner slime count = 1 (centred inside) → contributes
+        //       nothing to the silhouette; the slime itself is the
+        //       outer bound, so we let effectiveOuter stay at 1.15.
+        //   inner slime count ≥ 2 (surface layout) → 1 + bead radius.
+        const compactOuter = hasFullBeadShell ? 1 + 1.4 * beadsCfg.size : 0
+        const chunkOuter =
+          beadsCfg.combo === 'chunk' && beadsCfg.count >= 2
+            ? 1 + beadsCfg.size
+            : 0
+        const innerOuter =
+          innerCfg.combo === 'chunk' && innerCfg.count >= 2
+            ? 1 + innerCfg.size
+            : 0
+        const effectiveOuter = Math.max(
+          1.15,
+          compactOuter,
+          chunkOuter,
+          innerOuter
+        )
+        // Target visible radius in the 200-px thumbnail. 0.75 keeps
+        // moderate margins for any configuration.
+        const TARGET_VISIBLE = 0.75
+        const captureScale = Math.min(0.7, TARGET_VISIBLE / effectiveOuter)
         slime.mesh.scale.setScalar(captureScale)
         slime.mesh.quaternion.identity()
         slime.mesh.position.set(0, 0, 0)
@@ -1688,6 +2030,73 @@ export default function SlimeApp() {
     let raf = 0
     let lastTime = performance.now()
     let lastDetectMs = 0
+    // Single-centered 슬라임볼 press-dent state. The buried ball can't
+    // inherit the outer slime's per-vertex dent (it lives at slime
+    // origin, which the physics never moves), so we mirror the slime's
+    // local indentation via up to N shader dents — each dent is a
+    // (direction, strength) pair that pushes the ball's vertex-shader
+    // radius inward inside a soft cone. Persistent (clay model), reset
+    // only by the reset button (see reset() closure).
+    const ballDentCap = innerBeadsLayer.ballDentCapacity
+    const ballDentDirs: THREE.Vector3[] = []
+    for (let i = 0; i < ballDentCap; i++) {
+      ballDentDirs.push(new THREE.Vector3(1, 0, 0))
+    }
+    const ballDentStrengths = new Float32Array(ballDentCap)
+    // Coated 슬라임볼 gate — a coating turns the ball into a "hard
+    // shell" that ignores idle finger contact. The user has to either
+    // long-press the ball for ~0.5 s of continuous contact OR tap the
+    // ball three separate times before the coating starts cracking and
+    // the ball starts bulging. Uncoated balls skip the gate entirely
+    // (any ball-touching tip immediately dents them, matching prior
+    // behaviour). Every state below persists across frames within the
+    // effect's closure and is wiped by clearBallDents() on reset.
+    // Ball visual bulge accumulator — grows whenever ANY press is on
+    // the slime (independent of the touch-through filter used for
+    // dent + coating gating). Ensures the buried ball puffs immediately
+    // when the outer slime starts deforming so it never appears to
+    // shrink relative to the growing slime silhouette. Monotonic (clay
+    // model) — only cleared by the reset button.
+    let ballBulgeTime = 0
+    const pushBallDentsToShader = () => {
+      for (let i = 0; i < ballDentCap; i++) {
+        innerBeadsLayer.setBallDent(
+          i,
+          ballDentDirs[i].x,
+          ballDentDirs[i].y,
+          ballDentDirs[i].z,
+          ballDentStrengths[i]
+        )
+      }
+    }
+    const clearBallDents = () => {
+      for (let i = 0; i < ballDentCap; i++) {
+        ballDentStrengths[i] = 0
+        ballDentDirs[i].set(1, 0, 0)
+      }
+      pushBallDentsToShader()
+      innerBeadsLayer.setBallDentEnabled(false)
+      ballBulgeTime = 0
+      innerBeadsLayer.setBallBulgeAmount(0)
+      ballCoatSoundHoldMs = 0
+    }
+    // Scratch buffer for tips that actually engage the ball this frame.
+    // Reused across frames — the coating-damage call and the dent-
+    // accumulation loop both consume it after gating.
+    const innerTouchTips: WeightedTip[] = []
+    // Frame-scoped flag: is the buried ball currently reacting to press?
+    // Set inside the isBuriedBall block based on ANY tip on the slime
+    // (or a recent ball touch — see ballCoatSoundHoldMs). Sound routing
+    // reads this so the coating hiss doesn't stutter when the strict
+    // touch-through filter drops tips mid-press, and stays audible
+    // for the natural fall-off after a brief tap.
+    let ballSoundActiveThisFrame = false
+    // Hold timer for the ball's coating sound — sustains the crack
+    // channel for a short tail after the last touching tip disappears
+    // so brief taps produce audible sound instead of a millisecond
+    // blip that gets swallowed by the sample's fade-in / fade-out.
+    let ballCoatSoundHoldMs = 0
+    const BALL_COAT_SOUND_HOLD = 700
     const localTips: WeightedTip[] = []
     const inv = new THREE.Matrix4()
     const raycaster = new THREE.Raycaster()
@@ -1717,6 +2126,9 @@ export default function SlimeApp() {
     // the sprite; releasing the pointer just ends the current drag but
     // keeps the selection lit.
     let selectedEmojiIndex = -1
+    // Custom-bead drag — reuses emojiMoveOn as its enter/exit mode.
+    // -1 means no bead is currently being dragged this pointer session.
+    let selectedCustomBeadIndex = -1
     let dragPointerId = -1
     const ndc = new THREE.Vector2()
     const localHit = new THREE.Vector3()
@@ -1841,6 +2253,18 @@ export default function SlimeApp() {
           }
           return
         }
+        // No emoji hit — try picking a custom bead. Same "move mode"
+        // enables dragging both accessory types with one toggle so
+        // the UI doesn't need a separate custom-bead move switch.
+        if (pointerToNDC(e)) {
+          raycaster.setFromCamera(ndc, camera)
+          const beadIdx = customBeadsLayer.pickBead(raycaster)
+          if (beadIdx >= 0) {
+            selectedCustomBeadIndex = beadIdx
+            dragPointerId = e.pointerId
+            return
+          }
+        }
       }
       activePointers.set(e.pointerId, {
         x: e.clientX,
@@ -1902,6 +2326,30 @@ export default function SlimeApp() {
         }
         return
       }
+      // Custom-bead drag — same shape as emoji drag but re-seats the
+      // bead's anchor direction on the slime surface via CustomBeads
+      // Layer.setBeadDir instead of moving a sprite.
+      if (
+        selectedCustomBeadIndex >= 0 &&
+        e.pointerId === dragPointerId
+      ) {
+        if (pointerToNDC(e)) {
+          raycaster.setFromCamera(ndc, camera)
+          const hits = raycaster.intersectObject(slime.mesh, false)
+          if (hits.length > 0) {
+            localHit.copy(hits[0].point)
+            slime.mesh.worldToLocal(localHit)
+            const len = localHit.length() || 1
+            localHit.multiplyScalar(1 / len)
+            customBeadsLayer.setBeadDir(
+              selectedCustomBeadIndex,
+              localHit,
+              slime.unitDirsArray
+            )
+          }
+        }
+        return
+      }
 
       const p = activePointers.get(e.pointerId)
       if (!p) return
@@ -1947,6 +2395,10 @@ export default function SlimeApp() {
       // way a released drag can be reviewed visually before deselecting.
       if (e.pointerId === dragPointerId) {
         dragPointerId = -1
+        // Custom-bead drag doesn't have a persistent selection state
+        // (no visual glow), so releasing the pointer fully drops the
+        // handle. Emoji sprite selection is managed separately above.
+        selectedCustomBeadIndex = -1
         return
       }
       activePointers.delete(e.pointerId)
@@ -2088,7 +2540,9 @@ export default function SlimeApp() {
       s.setLoopingSampleLevel('metal', 0)
       s.setLoopingSampleLevel('wax', 0)
       s.setLoopingSampleLevel('foil', 0)
+      s.setLoopingSampleLevel('ice', 0)
       s.setLoopingSampleLevel('paper', 0)
+      s.setLoopingSampleLevel('plastic', 0)
       s.setLoopingSampleLevel('beads', 0)
       s.setLoopingSampleLevel('emoji', 0)
     }
@@ -2372,6 +2826,91 @@ export default function SlimeApp() {
       }
       const symmetricSlime = slimeTips.length > localTips.length
       slime.update(slimeTips, dt)
+      // 슬라임볼 rigid-core collision — when the ball is a single centred
+      // preset (count === 1), any slime vertex that pressed INSIDE the
+      // ball's radius gets DISPLACED. Two behaviours:
+      //  1) Vertex is on the SAME side as the press (front-hemisphere
+      //     relative to the average press direction) → move it around
+      //     the ball to the OPPOSITE hemisphere. Effect: the slime that
+      //     was covering the ball's front slides away, exposing the ball.
+      //  2) Vertex is on the far side → just clamp to the ball's surface
+      //     (rigid-core behaviour: slime can't sink further in).
+      // Ball never moves; only slime deforms. Fake-physics: the outer
+      // slime doesn't preserve volume here so a hard press "unwraps" the
+      // ball as if the slime were sliding OFF the finger's press point.
+      {
+        const innerCfg = innerBeadsLayer.currentConfig
+        if (innerCfg.combo === 'chunk' && innerCfg.count === 1) {
+          const ballR = innerCfg.size
+          const positions = slime.positionArray
+          // Average press direction (weighted by tip weight) — points
+          // FROM the origin TOWARD where the user is pressing.
+          let pdx = 0
+          let pdy = 0
+          let pdz = 0
+          let tipWeightSum = 0
+          for (const t of slimeTips) {
+            const tl = Math.hypot(t.pos.x, t.pos.y, t.pos.z) || 1
+            const w = t.weight
+            pdx += (t.pos.x / tl) * w
+            pdy += (t.pos.y / tl) * w
+            pdz += (t.pos.z / tl) * w
+            tipWeightSum += w
+          }
+          const pdLen = Math.hypot(pdx, pdy, pdz)
+          const pressActive = tipWeightSum > 0.05 && pdLen > 0.05
+          if (pressActive) {
+            pdx /= pdLen
+            pdy /= pdLen
+            pdz /= pdLen
+          }
+          let clamped = false
+          for (let i = 0; i < positions.length; i += 3) {
+            const x = positions[i]
+            const y = positions[i + 1]
+            const z = positions[i + 2]
+            const len = Math.hypot(x, y, z)
+            if (len < ballR && len > 1e-4) {
+              // Vertex is inside the ball's radius. Default: clamp to
+              // the ball surface at the same direction (rigid-core stop).
+              let ox = x
+              let oy = y
+              let oz = z
+              const s = ballR / len
+              ox = x * s
+              oy = y * s
+              oz = z * s
+              if (pressActive) {
+                // Where is this vertex relative to the press direction?
+                // cos > 0 → on the pressed side (front). Slide it around
+                // the ball to sit on the OPPOSITE hemisphere so the
+                // ball's front becomes exposed to the viewer.
+                const cosA = (ox * pdx + oy * pdy + oz * pdz) / ballR
+                if (cosA > 0.0) {
+                  // Reflect the direction through the plane orthogonal
+                  // to press: newDir = dir - 2 * (dir·press) * press
+                  // (mirror through the "waist" plane of the ball),
+                  // keeping the same ball-surface distance.
+                  const nx = ox / ballR - 2 * cosA * pdx
+                  const ny = oy / ballR - 2 * cosA * pdy
+                  const nz = oz / ballR - 2 * cosA * pdz
+                  const nLen = Math.hypot(nx, ny, nz) || 1
+                  ox = (nx / nLen) * ballR
+                  oy = (ny / nLen) * ballR
+                  oz = (nz / nLen) * ballR
+                }
+              }
+              positions[i] = ox
+              positions[i + 1] = oy
+              positions[i + 2] = oz
+              clamped = true
+            }
+          }
+          if (clamped) {
+            slime.mesh.geometry.attributes.position.needsUpdate = true
+          }
+        }
+      }
       // Camera position transformed into slime-local frame — BeadsLayer
       // uses this to orient squished coated beads so their flat face
       // points at the viewer. Only computed when coated chunk beads
@@ -2402,7 +2941,184 @@ export default function SlimeApp() {
         slime.pressureThisFrame,
         slimeLocalCameraPos
       )
-      innerBeadsLayer.applyPressDamage(localTips, dt)
+      // 슬라임볼 (single-centered inner ball) press-dent — vertex shader
+      // pushes the ball's surface inward at every stored dent slot,
+      // giving a real concave depression where the finger landed instead
+      // of a uniform oblate spheroid. Persists after release (clay model)
+      // and only clears on the reset button.
+      //
+      // Multi-count 슬라임볼 sits on the surface and already deforms via
+      // the taffy-wrap mechanism, so dent gating is off for anything but
+      // the buried single ball.
+      const innerCfgForBall = innerBeadsLayer.currentConfig
+      const isBuriedBall =
+        innerCfgForBall.combo === 'chunk' && innerCfgForBall.count === 1
+      innerTouchTips.length = 0
+      if (isBuriedBall) {
+        innerBeadsLayer.setBallDentEnabled(true)
+        // Grow the DECOUPLED bulge whenever any press is on the slime
+        // — regardless of whether the touch-through filter below admits
+        // the tip for dent accumulation. Sum of tip weights × dt gives
+        // a natural "press intensity × time" accumulator that the
+        // shader curves through its exponential asymptote. Bulge starts
+        // the frame a finger touches slime, so the ball never lags the
+        // outer slime's own bulge → no perceived shrink.
+        if (localTips.length > 0) {
+          let anyPress = 0
+          for (const t of localTips) anyPress += t.weight
+          ballBulgeTime += anyPress * dt
+        }
+        innerBeadsLayer.setBallBulgeAmount(ballBulgeTime)
+        const MAX_DENT_STRENGTH = 3.0
+        const DENT_GROWTH_RATE = 1.5
+        const SAME_SLOT_COS = 0.9
+        // Ball is "touched" when the slime surface at the tip's radial
+        // direction has been physically pushed close to the ball's outer
+        // skin. A press on empty slime that only dimples the surface
+        // without reaching the ball's location leaves the ball
+        // untouched no matter how firm the press is. Small margin
+        // (0.12) makes the check pass consistently frame-to-frame once
+        // the finger has actually engaged the ball — with a strict
+        // zero-margin check, slime physics jitter would drop the tip
+        // in and out of the touch zone across frames and the coating
+        // hiss would stutter / cut out during real crack events.
+        const ballRadius = innerCfgForBall.size
+        const touchThreshold = ballRadius + 0.12
+        const slimeUnitDirs = slime.unitDirsArray
+        const slimePositions = slime.positionArray
+        const slimeVertCount = slimeUnitDirs.length / 3
+        // Camera axis in slime-local space — used to reject "가장자리"
+        // (peripheral / silhouette-edge) presses. A ball sitting at
+        // slime origin has a fixed screen-space silhouette: any tip
+        // whose perpendicular distance from the camera-to-origin axis
+        // exceeds the ball's radius is grazing the slime edge, NOT
+        // touching the ball, and should never register regardless of
+        // how deep the slime surface deforms there. Slime physics can
+        // still push a lateral vertex inward past the touch threshold,
+        // so the radial-depth check alone doesn't isolate edge presses.
+        _center.copy(_worldPos).set(0, 0, 0)
+        const _camLocal = _closest
+          .copy(camera.position)
+          .applyMatrix4(inv)
+        const camAxisLen = _camLocal.length() || 1
+        const cax = _camLocal.x / camAxisLen
+        const cay = _camLocal.y / camAxisLen
+        const caz = _camLocal.z / camAxisLen
+        for (const t of localTips) {
+          // (a) Silhouette test — tip must lie within the ball's
+          // projected circle from the camera view. Front-hemisphere
+          // gate + perpendicular-distance check together isolate the
+          // "on the visible ball" region.
+          const alongCam =
+            t.pos.x * cax + t.pos.y * cay + t.pos.z * caz
+          if (alongCam <= 0) continue
+          const perpX = t.pos.x - alongCam * cax
+          const perpY = t.pos.y - alongCam * cay
+          const perpZ = t.pos.z - alongCam * caz
+          const perpDist = Math.hypot(perpX, perpY, perpZ)
+          if (perpDist > ballRadius) continue
+          // (b) Depth test — the deformed slime surface along the
+          // tip's radial direction must have reached the ball's rest
+          // skin. Filters out light touches that dimple the front but
+          // don't push far enough to contact the ball.
+          const tipLen =
+            Math.hypot(t.pos.x, t.pos.y, t.pos.z) || 1
+          const tdx = t.pos.x / tipLen
+          const tdy = t.pos.y / tipLen
+          const tdz = t.pos.z / tipLen
+          let closestVi = 0
+          let closestDot = -Infinity
+          for (let j = 0; j < slimeVertCount; j++) {
+            const j3 = j * 3
+            const cd =
+              tdx * slimeUnitDirs[j3] +
+              tdy * slimeUnitDirs[j3 + 1] +
+              tdz * slimeUnitDirs[j3 + 2]
+            if (cd > closestDot) {
+              closestDot = cd
+              closestVi = j
+            }
+          }
+          const cv3 = closestVi * 3
+          const cvx = slimePositions[cv3]
+          const cvy = slimePositions[cv3 + 1]
+          const cvz = slimePositions[cv3 + 2]
+          const cvLen = Math.hypot(cvx, cvy, cvz)
+          if (cvLen > touchThreshold) continue
+          innerTouchTips.push(t)
+        }
+        // Any tip that passed the touch-through filter cracks the
+        // coating + dents the ball immediately, matching the slime
+        // option's coating (both taps and long-press progressively
+        // add damage — no unlock gate). The touch filter still
+        // keeps peripheral / shallow slime-only presses from
+        // reaching the ball.
+        //
+        // Sound gate carries a short hold tail so a brief tap that
+        // touches the ball still produces audible crack sound instead
+        // of a blip cut off by the sample's own fade-in / fade-out.
+        if (innerTouchTips.length > 0) {
+          ballCoatSoundHoldMs = BALL_COAT_SOUND_HOLD
+        } else if (ballCoatSoundHoldMs > 0) {
+          ballCoatSoundHoldMs = Math.max(0, ballCoatSoundHoldMs - dt * 1000)
+        }
+        ballSoundActiveThisFrame = ballCoatSoundHoldMs > 0
+        innerBeadsLayer.applyPressDamage(innerTouchTips, dt)
+        for (const t of innerTouchTips) {
+          const tipLen =
+            Math.hypot(t.pos.x, t.pos.y, t.pos.z) || 1
+          const tdx = t.pos.x / tipLen
+          const tdy = t.pos.y / tipLen
+          const tdz = t.pos.z / tipLen
+          let bestSlot = -1
+          let bestDot = SAME_SLOT_COS
+          let weakestSlot = 0
+          let minStrength = Infinity
+          for (let s = 0; s < ballDentCap; s++) {
+            if (ballDentStrengths[s] > 0.001) {
+              const d =
+                tdx * ballDentDirs[s].x +
+                tdy * ballDentDirs[s].y +
+                tdz * ballDentDirs[s].z
+              if (d > bestDot) {
+                bestDot = d
+                bestSlot = s
+              }
+            }
+            if (ballDentStrengths[s] < minStrength) {
+              minStrength = ballDentStrengths[s]
+              weakestSlot = s
+            }
+          }
+          const growth = t.weight * dt * DENT_GROWTH_RATE
+          if (bestSlot >= 0) {
+            const dir = ballDentDirs[bestSlot]
+            dir.x = dir.x * 0.94 + tdx * 0.06
+            dir.y = dir.y * 0.94 + tdy * 0.06
+            dir.z = dir.z * 0.94 + tdz * 0.06
+            dir.normalize()
+            const cur = ballDentStrengths[bestSlot]
+            const remaining = Math.max(0, MAX_DENT_STRENGTH - cur)
+            ballDentStrengths[bestSlot] =
+              cur + growth * (remaining / MAX_DENT_STRENGTH)
+          } else {
+            ballDentDirs[weakestSlot].set(tdx, tdy, tdz)
+            ballDentStrengths[weakestSlot] = growth
+          }
+        }
+        pushBallDentsToShader()
+      } else {
+        // Non-buried inner-slime layouts (multi-count on surface) —
+        // disable the dent pass so the surface beads render round.
+        // Still pass tips to applyPressDamage so surface beads with a
+        // coating crack under press normally. Sound gate falls back to
+        // the layer's own press force since there's no touch-through
+        // gate to fight against for surface-anchored beads.
+        innerBeadsLayer.setBallDentEnabled(false)
+        innerBeadsLayer.applyPressDamage(localTips, dt)
+        ballSoundActiveThisFrame =
+          innerBeadsLayer.pressForceThisFrame > 0.001
+      }
       paperLayer.update(slime.positionArray, slime.normalArray)
       powderLayer.update(slime.positionArray, slime.normalArray)
       emojiBeadsLayer.update(slime.positionArray, slime.restPositionArray)
@@ -2458,17 +3174,60 @@ export default function SlimeApp() {
         // samples with their own looped sample (Sprinkle.mp3 for matte,
         // Popp.mp3 for metal). Both mute setSquishLevel so the default
         // squish stays silent while the material-specific ambient plays.
+        //
+        // Ice coating (아이스) plays a continuous Iced.mp3 loop that
+        // reads as the squish signature on its own — the procedural
+        // squish sound would double up over it, so we mute it too
+        // when ANY of slime / bead / inner-slime is coated with ice.
         const currentMaterial = materialRef.current
+        const ballMaterial = innerSlimeMaterialRef.current
         const isMatte = currentMaterial === 'matte'
         const isMetal = currentMaterial === 'metal'
-        sound.setSquishLevel(isMatte || isMetal ? 0 : soundLevel)
+        // Ball's own material sounds — only fire when the finger actually
+        // lands on the ball (innerPressActive gate below reused from the
+        // coating-sound path). Ball inherits the same MATERIALS palette
+        // as the outer slime so we route matte / metal identically.
+        const innerBallPressActive =
+          innerBeadsLayer.pressForceThisFrame > 0.001 ? 1 : 0
+        const ballIsMatte = ballMaterial === 'matte'
+        const ballIsMetal = ballMaterial === 'metal'
+        const iceCoatingActive =
+          coatingRef.current === 'ice' ||
+          beadCoatingRef.current === 'ice' ||
+          innerSlimeCoatingRef.current === 'ice'
+        // When the outer slime is coated, the slime's own material sound
+        // (matte foam Sprinkle.mp3 / metal Popp.mp3) reads as if muffled
+        // through the coating. Dim it to 30% so the coating's ambient
+        // takes the acoustic foreground while the material still faintly
+        // hums underneath.
+        const slimeCoatingActive = coatingRef.current !== 'none'
+        const materialAtten = slimeCoatingActive ? 0.3 : 1.0
+        const innerCoatingActive = innerSlimeCoatingRef.current !== 'none'
+        const ballMaterialAtten = innerCoatingActive ? 0.3 : 1.0
+        sound.setSquishLevel(
+          isMatte || isMetal || iceCoatingActive
+            ? 0
+            : soundLevel * materialAtten
+        )
+        // Union outer-slime + ball material sounds so a matte ball inside
+        // a crystal slime plays its foam sound when pressed, and a putty
+        // ball plays its Hoil sample. Whichever surface is being pressed
+        // drives the level — max() picks the loudest source per channel.
+        const slimeMatteLevel = isMatte ? soundLevel * materialAtten : 0
+        const ballMatteLevel = ballIsMatte
+          ? soundLevel * innerBallPressActive * ballMaterialAtten
+          : 0
+        const slimeMetalLevel = isMetal ? soundLevel * materialAtten : 0
+        const ballMetalLevel = ballIsMetal
+          ? soundLevel * innerBallPressActive * ballMaterialAtten
+          : 0
         sound.setLoopingSampleLevel(
           'matte',
-          isMatte ? soundLevel : 0
+          Math.max(slimeMatteLevel, ballMatteLevel)
         )
         sound.setLoopingSampleLevel(
           'metal',
-          isMetal ? soundLevel : 0
+          Math.max(slimeMetalLevel, ballMetalLevel)
         )
 
         // Wax and foil (+ tube reusing foil) are CONTINUOUS ambient
@@ -2489,27 +3248,55 @@ export default function SlimeApp() {
         const beadCoatingId = beadCoatingRef.current
         const innerCoatingId = innerSlimeCoatingRef.current
         const slimeCracks = slime.damageRenderingEnabled
+        // Coating audio routing by coating id (no more per-thickness
+        // sub-branch — the coating id itself carries the thickness):
+        //   thinwax → Iced.mp3 via 'ice' channel (thin crackle)
+        //   wax     → Wak.mp3  via 'wax' channel (full candle wax)
+        //   foil    → Popp.mp3 via 'foil' channel
+        const slimeIsThinWax = slimeCracks && coatingId === 'thinwax'
         const slimeWaxLevel =
           slimeCracks && coatingId === 'wax' ? soundLevel : 0
         const slimeFoilLevel =
           slimeCracks && (coatingId === 'foil' || coatingId === 'tube')
             ? soundLevel
             : 0
-        const slimeIsIce = slimeCracks && coatingId === 'ice'
+        const slimeIsIce =
+          (slimeCracks && coatingId === 'ice') || slimeIsThinWax
+        // Only play the bead/inner coating sound when the user's press
+        // actually landed on THIS bead layer — pressing the outer slime
+        // silhouette away from an inner ball, for example, shouldn't
+        // trigger the ball's coating hiss.
+        const beadPressActive =
+          beadsLayer.pressForceThisFrame > 0.001 ? 1 : 0
+        // Audible floor for the ball's coating channel. Without this,
+        // a low / gentle press produced innerWaxLevel = soundLevel ×
+        // 1 = ~0.1 which is nearly inaudible until the user pressed
+        // harder — cracks would visibly progress silently for the
+        // first several frames until pressure rose enough. Floor of
+        // 0.45 whenever the sound gate is on means every crack tick
+        // during a coated-ball press has audible sound from frame 1.
+        const innerCoatSoundLevel = ballSoundActiveThisFrame
+          ? Math.max(0.45, soundLevel)
+          : 0
         const beadWaxLevel =
-          beadCoatingId === 'wax' ? soundLevel : 0
+          beadCoatingId === 'wax' ? soundLevel * beadPressActive : 0
         const beadFoilLevel =
           beadCoatingId === 'foil' || beadCoatingId === 'tube'
-            ? soundLevel
+            ? soundLevel * beadPressActive
             : 0
-        const beadIsIce = beadCoatingId === 'ice'
+        // Bead / inner-slime 'thinwax' coats route through the same
+        // ice channel as the outer slime's thinwax so both surfaces
+        // share the crisp thin-wax sound identity.
+        const beadIsIce =
+          beadCoatingId === 'ice' || beadCoatingId === 'thinwax'
         const innerWaxLevel =
-          innerCoatingId === 'wax' ? soundLevel : 0
+          innerCoatingId === 'wax' ? innerCoatSoundLevel : 0
         const innerFoilLevel =
           innerCoatingId === 'foil' || innerCoatingId === 'tube'
-            ? soundLevel
+            ? innerCoatSoundLevel
             : 0
-        const innerIsIce = innerCoatingId === 'ice'
+        const innerIsIce =
+          innerCoatingId === 'ice' || innerCoatingId === 'thinwax'
 
         sound.setLoopingSampleLevel(
           'wax',
@@ -2519,18 +3306,18 @@ export default function SlimeApp() {
           'foil',
           Math.max(slimeFoilLevel, beadFoilLevel, innerFoilLevel)
         )
-        // Ice / caramel: procedural crack fires on the slime's per-frame
-        // press stress crossing 0.5. Slime-ice, bead-ice, and inner-ice
-        // trigger through the same press metric — none of them track a
-        // separate pressure signal.
-        if (
-          (slimeIsIce || beadIsIce || innerIsIce) &&
-          slime.pressureThisFrame > 0.5
-        ) {
-          sound.playCrack(
-            Math.min(1, 0.4 + slime.pressureThisFrame / 45)
-          )
-        }
+        // Ice (아이스): continuous ambient loop of Iced.mp3, same
+        // pressure-follows-gain pattern as wax / foil. Any of slime /
+        // bead / inner-slime having the ice coating drives the level.
+        const slimeIceLevel = slimeIsIce ? soundLevel : 0
+        const beadIceLevel = beadIsIce
+          ? soundLevel * beadPressActive
+          : 0
+        const innerIceLevel = innerIsIce ? innerCoatSoundLevel : 0
+        sound.setLoopingSampleLevel(
+          'ice',
+          Math.max(slimeIceLevel, beadIceLevel, innerIceLevel)
+        )
 
         // Paper / beads sounds are CONTINUOUS ambient recordings
         // ("치이이이익" style), so they use setLoopingSampleLevel — a
@@ -2541,6 +3328,10 @@ export default function SlimeApp() {
         sound.setLoopingSampleLevel(
           'paper',
           paperActiveRef.current ? soundLevel : 0
+        )
+        sound.setLoopingSampleLevel(
+          'plastic',
+          plasticActiveRef.current ? soundLevel : 0
         )
         sound.setLoopingSampleLevel(
           'beads',
@@ -2746,27 +3537,29 @@ export default function SlimeApp() {
       <canvas ref={overlayRef} className={styles.overlayCanvas} />
 
 
-      {/* Top-left cluster hosts the persistent action icons — collection
-          bookmark (save / view menu) and share. They live on the left so
-          the top-right stays reserved for the hamburger menu + any
-          contextual toggles (emoji move). */}
-      {/* Top-left cluster now hosts just the 공유 button — the
-          컬렉션 button moved into the bottom-row drop-up menu so
-          save + browse live near the primary action cluster. */}
+      {/* Top-LEFT cluster hosts the hamburger menu (moved from the
+          top-right); paired with the top-right 공유 button, this puts
+          the primary navigation on the left and the outbound share on
+          the right for a more familiar mobile layout. */}
       <div
         className={styles.topLeftBar}
         data-hud
-        style={browseIdx !== null ? { display: 'none' } : undefined}
+        style={
+          browseIdx !== null || collectionPreview
+            ? { display: 'none' }
+            : undefined
+        }
       >
         <button
           type="button"
           className={styles.iconButton}
-          onClick={handleShare}
-          aria-label="공유"
+          onClick={() => setMenuOpen(true)}
+          aria-label="메뉴"
+          aria-expanded={menuOpen}
         >
           <svg
-            width="20"
-            height="20"
+            width="26"
+            height="26"
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -2774,9 +3567,8 @@ export default function SlimeApp() {
             strokeLinecap="round"
             strokeLinejoin="round"
           >
-            <path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7" />
-            <polyline points="16 6 12 2 8 6" />
-            <line x1="12" y1="2" x2="12" y2="15" />
+            <line x1="4" y1="9" x2="20" y2="9" />
+            <line x1="4" y1="15" x2="20" y2="15" />
           </svg>
         </button>
       </div>
@@ -2784,15 +3576,20 @@ export default function SlimeApp() {
       <div
         className={styles.topBar}
         data-hud
-        style={browseIdx !== null ? { display: 'none' } : undefined}
+        style={
+          browseIdx !== null || collectionPreview
+            ? { display: 'none' }
+            : undefined
+        }
       >
-        {emojiBeads.emojis.length > 0 && emojiBeads.count > 0 && (
+        {((emojiBeads.emojis.length > 0 && emojiBeads.count > 0) ||
+          customBeads.count > 0) && (
           <button
             type="button"
             className={styles.iconButton}
             data-active={emojiMoveOn}
             onClick={() => setEmojiMoveOn((v) => !v)}
-            aria-label="이모지 위치 변경"
+            aria-label="이모지 / 비즈 위치 변경"
             aria-pressed={emojiMoveOn}
           >
             <svg
@@ -2817,9 +3614,8 @@ export default function SlimeApp() {
         <button
           type="button"
           className={styles.iconButton}
-          onClick={() => setMenuOpen(true)}
-          aria-label="메뉴"
-          aria-expanded={menuOpen}
+          onClick={handleShare}
+          aria-label="공유"
         >
           <svg
             width="20"
@@ -2831,8 +3627,9 @@ export default function SlimeApp() {
             strokeLinecap="round"
             strokeLinejoin="round"
           >
-            <line x1="4" y1="9" x2="20" y2="9" />
-            <line x1="4" y1="15" x2="20" y2="15" />
+            {/* Paper airplane silhouette — outbound send / share. */}
+            <path d="M22 2L11 13" />
+            <path d="M22 2l-7 20-4-9-9-4 20-7z" />
           </svg>
         </button>
       </div>
@@ -3322,14 +4119,151 @@ export default function SlimeApp() {
 
       {toast && <div className={styles.toast}>{toast}</div>}
 
+      {/* 만져보기 preview overlay — floating pill that returns to the
+          collection carousel and restores the WIP slime state that
+          was in place before the preview was entered. */}
+      {collectionPreview && (
+        <button
+          type="button"
+          className={styles.previewReturnBtn}
+          data-hud
+          onClick={() => {
+            const snap = preCollectionPreviewStateRef.current
+            preCollectionPreviewStateRef.current = null
+            if (snap) applyStateSnapshot(snap)
+            setCollectionPreview(false)
+            setBottomMode('collection')
+          }}
+        >
+          ← 컬렉션으로 돌아가기
+        </button>
+      )}
+
+      {/* 수정하기 save-confirm dialog. */}
+      {handDetectPending && (
+        <div
+          className={styles.modalBackdrop}
+          onClick={() => setHandDetectPending(false)}
+        >
+          <div
+            className={styles.modal}
+            data-hud
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className={styles.modalTitle}>손 감지를 켤까요?</div>
+            <p className={styles.modalList}>
+              카메라와 손 인식 모델이 계속 돌아가면서 배터리 소모와
+              발열이 늘어날 수 있어요.
+            </p>
+            <div className={styles.nameDialogActions}>
+              <button
+                type="button"
+                className={styles.modalClose}
+                onClick={() => setHandDetectPending(false)}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                className={styles.nameDialogSaveBtn}
+                onClick={() => {
+                  setHandDetectPending(false)
+                  setSkeletonOn(true)
+                }}
+              >
+                켜기
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {pendingCollectionEdit && (
+        <div
+          className={styles.modalBackdrop}
+          onClick={() => setPendingCollectionEdit(null)}
+        >
+          <div
+            className={styles.modal}
+            data-hud
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className={styles.modalTitle}>
+              제작 중인 슬라임을 저장할까요?
+            </div>
+            <p className={styles.modalList}>
+              저장하지 않으면 지금까지의 변경 사항이 사라져요.
+            </p>
+            <div className={styles.nameDialogActions}>
+              <button
+                type="button"
+                className={styles.modalClose}
+                onClick={() => setPendingCollectionEdit(null)}
+              >
+                취소
+              </button>
+              <button
+                type="button"
+                className={styles.modalClose}
+                onClick={() => {
+                  const target = pendingCollectionEdit
+                  setPendingCollectionEdit(null)
+                  applyStateSnapshot(target.state)
+                  setBottomMode('options')
+                }}
+              >
+                저장 안 함
+              </button>
+              <button
+                type="button"
+                className={styles.nameDialogSaveBtn}
+                onClick={() => {
+                  const target = pendingCollectionEdit
+                  const pendingThumb =
+                    applyRef.current?.captureCanonicalThumbnail()
+                  const pendingState = buildStateSnapshot()
+                  const name = `슬라임 ${collection.length + 1}`
+                  const id = `${Date.now().toString(36)}-${Math.random()
+                    .toString(36)
+                    .slice(2, 8)}`
+                  setCollection((prev) => [
+                    ...prev,
+                    {
+                      id,
+                      name,
+                      createdAt: Date.now(),
+                      state: pendingState,
+                      thumb: pendingThumb
+                    }
+                  ])
+                  hasUnsavedChangesRef.current = false
+                  setPendingCollectionEdit(null)
+                  applyStateSnapshot(target.state)
+                  setBottomMode('options')
+                  setToast(`${name} 저장됨`)
+                  window.setTimeout(() => setToast(null), 2000)
+                }}
+              >
+                저장하고 수정
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div
         ref={controlsRef}
         className={styles.controls}
         data-hud
         // Hide the customization panel + bottom toolbar entirely
-        // while browsing a saved collection — the user is picking a
+        // while browsing a saved collection OR in the touch-only
+        // collection preview — the user is picking / playing with a
         // slime, not editing.
-        style={browseIdx !== null ? { display: 'none' } : undefined}
+        style={
+          browseIdx !== null || collectionPreview
+            ? { display: 'none' }
+            : undefined
+        }
       >
         {/* Top-of-controls action row — sits directly above the
             options panel. Hand toggle pinned left, shape reset in
@@ -3340,7 +4274,17 @@ export default function SlimeApp() {
             type="button"
             className={styles.sideBtn}
             data-active={skeletonOn}
-            onClick={() => setSkeletonOn((v) => !v)}
+            onClick={() => {
+              if (skeletonOn) {
+                setSkeletonOn(false)
+              } else {
+                // Enabling hand detect kicks the front camera + a heavy
+                // MediaPipe inference loop on every frame. Warn the
+                // user so they can opt in with awareness rather than
+                // discovering the impact after the phone heats up.
+                setHandDetectPending(true)
+              }
+            }}
             aria-label={skeletonOn ? '손 감지 끄기' : '손 감지 켜기'}
             aria-pressed={skeletonOn}
           >
@@ -3437,6 +4381,10 @@ export default function SlimeApp() {
           colors={colors}
           material={material}
           coating={coating}
+          coatingColors={coatingColors}
+          foilColors={foilColors}
+          onCoatingColors={setCoatingColors}
+          onFoilColors={setFoilColors}
           shape={shape}
           beads={beads}
           sprinkles={sprinkles}
@@ -3445,6 +4393,8 @@ export default function SlimeApp() {
           onMaterial={setMaterial}
           onCoating={setCoating}
           onShape={setShape}
+          crunchOn={crunchOn}
+          onCrunchOn={setCrunchOn}
           onBeads={setBeads}
           onSprinkles={setSprinkles}
           onEmojiBeads={setEmojiBeads}
@@ -3474,6 +4424,10 @@ export default function SlimeApp() {
             setCustomBeadsPhoto(tex)
           }}
           onClearCustomBeadsPhoto={() => setCustomBeadsPhoto(null)}
+          onActivePanelChange={setActivePanel}
+          onRegisterOpenCategory={(fn) => {
+            openCategoryRef.current = fn
+          }}
         />
         {(() => {
           // Unified selected-option tag row — aggregates every
@@ -3485,8 +4439,12 @@ export default function SlimeApp() {
           colors.forEach((cid) => {
             allTags.push({
               key: `sc-${cid}`,
-              label: resolveColorLabel(cid),
-              onRemove: () => setColors(colors.filter((x) => x !== cid))
+              label: '슬라임',
+              swatchColor: hexToCssColor(
+                resolveColorHex(cid, colorAdjustments)
+              ),
+              onRemove: () => setColors(colors.filter((x) => x !== cid)),
+              targetCategory: 'slime'
             })
           })
           if (material !== 'crystal') {
@@ -3495,7 +4453,8 @@ export default function SlimeApp() {
               allTags.push({
                 key: `sm-${material}`,
                 label: m.label,
-                onRemove: () => setMaterial('crystal')
+                onRemove: () => setMaterial('crystal'),
+                targetCategory: 'slime'
               })
             }
           }
@@ -3505,7 +4464,42 @@ export default function SlimeApp() {
               allTags.push({
                 key: `sco-${coating}`,
                 label: c.label,
-                onRemove: () => setCoating('none')
+                onRemove: () => setCoating('none'),
+                targetCategory: 'slime'
+              })
+            }
+            // Coating colour tags — user asked for the same tag +
+            // remove-only-via-× UX that body colours have. Foil coating
+            // reads from foilColors (metallic palette); wax / thinwax /
+            // tube / ice all read from coatingColors (slime palette).
+            const usesFoilPalette = coating === 'foil'
+            if (usesFoilPalette) {
+              foilColors.forEach((cid) => {
+                allTags.push({
+                  key: `sfc-${cid}`,
+                  label: c?.label ?? '코팅',
+                  swatchColor: hexToCssColor(
+                    resolveFoilCoatingHex(cid, colorAdjustments)
+                  ),
+                  onRemove: () =>
+                    setFoilColors(foilColors.filter((x) => x !== cid)),
+                  targetCategory: 'slime'
+                })
+              })
+            } else {
+              coatingColors.forEach((cid) => {
+                allTags.push({
+                  key: `scc-${cid}`,
+                  label: c?.label ?? '코팅',
+                  swatchColor: hexToCssColor(
+                    resolveWaxCoatingHex(cid, colorAdjustments)
+                  ),
+                  onRemove: () =>
+                    setCoatingColors(
+                      coatingColors.filter((x) => x !== cid)
+                    ),
+                  targetCategory: 'slime'
+                })
               })
             }
           }
@@ -3515,7 +4509,8 @@ export default function SlimeApp() {
               allTags.push({
                 key: `ssh-${shape}`,
                 label: s.label,
-                onRemove: () => setShape('sphere')
+                onRemove: () => setShape('sphere'),
+                targetCategory: 'slime'
               })
             }
           }
@@ -3523,7 +4518,8 @@ export default function SlimeApp() {
             allTags.push({
               key: 'sticker',
               label: '사진 슬라임',
-              onRemove: clearSticker
+              onRemove: clearSticker,
+              targetCategory: 'slime'
             })
           }
           // 미니비즈 / 속비즈 (both bind to `beads`). Active-layer tag
@@ -3539,26 +4535,35 @@ export default function SlimeApp() {
               label: beads.fill
                 ? '비즈 꽉'
                 : `비즈 ${beads.count}개`,
-              onRemove: () => setBeads(BEADS_DEFAULT)
+              onRemove: () => setBeads(BEADS_DEFAULT),
+              targetCategory: 'compact'
             })
           }
           if (beads.combo === 'chunk' && beads.count > 0) {
             allTags.push({
               key: 'b-chunk',
               label: `비즈볼 ${beads.count}개`,
-              onRemove: () => setBeads(BEADS_DEFAULT)
+              onRemove: () => setBeads(BEADS_DEFAULT),
+              targetCategory: 'chunk'
             })
           }
           if (beads.combo !== 'none') {
+            const beadLabel = beads.combo === 'chunk' ? '비즈볼' : '비즈'
+            const beadCategory =
+              beads.combo === 'chunk' ? 'chunk' : 'compact'
             beads.colors.forEach((cid) => {
               allTags.push({
                 key: `bc-${cid}`,
-                label: `비즈 ${resolveColorLabel(cid)}`,
+                label: beadLabel,
+                swatchColor: hexToCssColor(
+                  resolveColorHex(cid, colorAdjustments)
+                ),
                 onRemove: () =>
                   setBeads({
                     ...beads,
                     colors: beads.colors.filter((x) => x !== cid)
-                  })
+                  }),
+                targetCategory: beadCategory
               })
             })
             beads.shapes.forEach((sid) => {
@@ -3572,7 +4577,8 @@ export default function SlimeApp() {
                   setBeads({
                     ...beads,
                     shapes: beads.shapes.filter((x) => x !== sid)
-                  })
+                  }),
+                targetCategory: beadCategory
               })
             })
             if (beads.material !== 'plastic') {
@@ -3581,7 +4587,8 @@ export default function SlimeApp() {
                 allTags.push({
                   key: `bm-${beads.material}`,
                   label: `비즈 ${bm.label}`,
-                  onRemove: () => setBeads({ ...beads, material: 'plastic' })
+                  onRemove: () => setBeads({ ...beads, material: 'plastic' }),
+                  targetCategory: beadCategory
                 })
               }
             }
@@ -3591,7 +4598,8 @@ export default function SlimeApp() {
             allTags.push({
               key: `pb-${i}`,
               label: `사진 비즈 ${i + 1}`,
-              onRemove: () => clearPhotoBeadAt(i)
+              onRemove: () => clearPhotoBeadAt(i),
+              targetCategory: 'chunk'
             })
           })
           // 속슬라임 — active-layer tag first, then any per-detail
@@ -3600,19 +4608,24 @@ export default function SlimeApp() {
             allTags.push({
               key: 'is-active',
               label: `슬라임볼 ${innerSlime.count}개`,
-              onRemove: () => setInnerSlime(BEADS_DEFAULT)
+              onRemove: () => setInnerSlime(BEADS_DEFAULT),
+              targetCategory: 'inner-slime'
             })
           }
           if (innerSlime.combo !== 'none') {
             innerSlime.colors.forEach((cid) => {
               allTags.push({
                 key: `isc-${cid}`,
-                label: `슬라임볼 ${resolveColorLabel(cid)}`,
+                label: '슬라임볼',
+                swatchColor: hexToCssColor(
+                  resolveColorHex(cid, colorAdjustments)
+                ),
                 onRemove: () =>
                   setInnerSlime({
                     ...innerSlime,
                     colors: innerSlime.colors.filter((x) => x !== cid)
-                  })
+                  }),
+                targetCategory: 'inner-slime'
               })
             })
             if (innerSlime.coating !== 'none') {
@@ -3622,81 +4635,109 @@ export default function SlimeApp() {
                   key: `isco-${innerSlime.coating}`,
                   label: `슬라임볼 ${bc.label}`,
                   onRemove: () =>
-                    setInnerSlime({ ...innerSlime, coating: 'none' })
+                    setInnerSlime({ ...innerSlime, coating: 'none' }),
+                  targetCategory: 'inner-slime'
                 })
               }
+              // Slime ball coating colour tags — same UX as slime body
+              // coating tags: swatch shows the applied hue, × removes.
+              const innerCoatingColors = innerSlime.coatingColors ?? []
+              innerCoatingColors.forEach((cid) => {
+                allTags.push({
+                  key: `iscc-${cid}`,
+                  label: `슬라임볼 ${bc?.label ?? '코팅'}`,
+                  swatchColor: hexToCssColor(
+                    resolveInnerCoatingHex(cid, colorAdjustments)
+                  ),
+                  onRemove: () =>
+                    setInnerSlime({
+                      ...innerSlime,
+                      coatingColors: innerCoatingColors.filter(
+                        (x) => x !== cid
+                      )
+                    }),
+                  targetCategory: 'inner-slime'
+                })
+              })
             }
           }
           // 커스텀비즈 — active-layer tag when count > 0, then colours.
           if (customBeads.count > 0) {
             allTags.push({
               key: 'cb-active',
-              label: `커스텀비즈 ${customBeads.count}개`,
-              onRemove: () => setCustomBeads(CUSTOM_BEADS_DEFAULT)
+              label: `추가비즈 ${customBeads.count}개`,
+              onRemove: () => setCustomBeads(CUSTOM_BEADS_DEFAULT),
+              targetCategory: 'custom-beads'
             })
           }
           customBeads.colors.forEach((cid) => {
             allTags.push({
               key: `cbc-${cid}`,
-              label: `커스텀 ${resolveColorLabel(cid)}`,
+              label: '추가비즈',
+              swatchColor: hexToCssColor(
+                resolveColorHex(cid, colorAdjustments)
+              ),
               onRemove: () =>
                 setCustomBeads({
                   ...customBeads,
                   colors: customBeads.colors.filter((x) => x !== cid)
-                })
+                }),
+              targetCategory: 'custom-beads'
             })
           })
           if (customBeadsPhoto) {
             allTags.push({
               key: 'cbp',
               label: '커스텀 사진',
-              onRemove: () => setCustomBeadsPhoto(null)
+              onRemove: () => setCustomBeadsPhoto(null),
+              targetCategory: 'custom-beads'
             })
           }
-          // 스프링클 (per type) — active-layer tag per type, then any
-          // per-colour tags. Removing the active tag zeroes the count
-          // (and fill for paper/powder) so the type turns off cleanly.
+          // 스프링클 (per type) — per-colour tags only. The active
+          // (count / fill) state is implicit from the colour chips
+          // present; removing every colour of a type zeros its count
+          // via onRemove below.
           ;(['paper', 'powder', 'ink'] as const).forEach((typeId) => {
             const cfg = sprinkles[typeId]
             const isFilled = 'fill' in cfg && cfg.fill
             if (cfg.count === 0 && !isFilled) return
             const typeLabel =
-              typeId === 'paper' ? '납작종이' : typeId === 'powder' ? '가루' : '잉크'
-            allTags.push({
-              key: `sp-${typeId}-active`,
-              label: isFilled
-                ? `${typeLabel} 꽉`
-                : `${typeLabel} ${cfg.count}개`,
-              onRemove: () => {
-                if (typeId === 'ink') {
-                  setSprinkles({
-                    ...sprinkles,
-                    ink: { ...sprinkles.ink, count: 0 }
-                  })
-                } else {
-                  setSprinkles({
-                    ...sprinkles,
-                    [typeId]: {
-                      ...sprinkles[typeId],
-                      count: 0,
-                      fill: false
-                    }
-                  })
-                }
-              }
-            })
+              typeId === 'paper' ? '스팽글' : typeId === 'powder' ? '가루' : '잉크'
             cfg.colors.forEach((cid) => {
               const c = SPRINKLE_COLORS.find((x) => x.id === cid)
               if (!c) return
               allTags.push({
                 key: `sp-${typeId}-${cid}`,
-                label: `${typeLabel} ${c.label}`,
+                label: typeLabel,
+                swatchColor: hexToCssColor(c.hex),
+                targetCategory: typeId,
                 onRemove: () => {
                   const next = cfg.colors.filter((x) => x !== cid)
-                  setSprinkles({
-                    ...sprinkles,
-                    [typeId]: { ...cfg, colors: next }
-                  })
+                  // Dropping the last colour also zeroes the count/fill
+                  // so the sprinkle layer turns off entirely.
+                  if (next.length === 0) {
+                    if (typeId === 'ink') {
+                      setSprinkles({
+                        ...sprinkles,
+                        ink: { ...sprinkles.ink, colors: next, count: 0 }
+                      })
+                    } else {
+                      setSprinkles({
+                        ...sprinkles,
+                        [typeId]: {
+                          ...sprinkles[typeId],
+                          colors: next,
+                          count: 0,
+                          fill: false
+                        }
+                      })
+                    }
+                  } else {
+                    setSprinkles({
+                      ...sprinkles,
+                      [typeId]: { ...cfg, colors: next }
+                    })
+                  }
                 }
               })
             })
@@ -3710,10 +4751,38 @@ export default function SlimeApp() {
                 setEmojiBeads({
                   ...emojiBeads,
                   emojis: emojiBeads.emojis.filter((x) => x !== e)
-                })
+                }),
+              targetCategory: 'theme'
             })
           })
-          if (allTags.length === 0) return null
+          // "슬라임 안" toggle — appears at the FAR RIGHT of the tag row
+          // whenever the user is viewing one of the four embed-capable
+          // leaves (스팽글 / 꽉비즈 / 이모지 / 추가비즈). Reading the
+          // active/toggle handlers per leaf here keeps the CustomizePanel
+          // free of any per-layer scale-in-slime logic.
+          let insideActive = false
+          let toggleInside: (() => void) | null = null
+          if (activePanel === 'paper') {
+            insideActive = !!sprinkles.paper.inside
+            toggleInside = () =>
+              setSprinkles({
+                ...sprinkles,
+                paper: { ...sprinkles.paper, inside: !insideActive }
+              })
+          } else if (activePanel === 'compact') {
+            insideActive = !!beads.inside
+            toggleInside = () =>
+              setBeads({ ...beads, inside: !insideActive })
+          } else if (activePanel === 'theme') {
+            insideActive = !!emojiBeads.inside
+            toggleInside = () =>
+              setEmojiBeads({ ...emojiBeads, inside: !insideActive })
+          } else if (activePanel === 'custom-beads') {
+            insideActive = !!customBeads.inside
+            toggleInside = () =>
+              setCustomBeads({ ...customBeads, inside: !insideActive })
+          }
+          if (allTags.length === 0 && !toggleInside) return null
           return (
             <div className={styles.unifiedTagRow}>
               <button
@@ -3733,19 +4802,66 @@ export default function SlimeApp() {
                   <path d="M64,256H34A222,222,0,0,1,430,118.15V85h30V190H355V160h67.27A192.21,192.21,0,0,0,256,64C150.13,64,64,150.13,64,256Zm384,0c0,105.87-86.13,192-192,192A192.21,192.21,0,0,1,89.73,352H157V322H52V427H82V393.85A222,222,0,0,0,478,256Z" />
                 </svg>
               </button>
-              {allTags.map((t) => (
-                <span key={t.key} className={styles.unifiedTag}>
-                  <span className={styles.unifiedTagLabel}>{t.label}</span>
-                  <button
-                    type="button"
-                    className={styles.unifiedTagRemove}
-                    onClick={t.onRemove}
-                    aria-label={`${t.label} 제거`}
+              {allTags.map((t) => {
+                const jump = t.targetCategory
+                  ? () => openCategoryRef.current?.(t.targetCategory!)
+                  : undefined
+                return (
+                  <span
+                    key={t.key}
+                    className={styles.unifiedTag}
+                    data-swatch={t.swatchColor ? 'true' : undefined}
+                    data-clickable={jump ? 'true' : undefined}
+                    role={jump ? 'button' : undefined}
+                    tabIndex={jump ? 0 : undefined}
+                    onClick={jump}
+                    onKeyDown={
+                      jump
+                        ? (e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              jump()
+                            }
+                          }
+                        : undefined
+                    }
                   >
-                    ×
-                  </button>
-                </span>
-              ))}
+                    {t.label && (
+                      <span className={styles.unifiedTagLabel}>{t.label}</span>
+                    )}
+                    {t.swatchColor && (
+                      <span
+                        className={styles.unifiedTagSwatch}
+                        style={{ background: t.swatchColor }}
+                        aria-hidden="true"
+                      />
+                    )}
+                    <button
+                      type="button"
+                      className={styles.unifiedTagRemove}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        t.onRemove()
+                      }}
+                      aria-label={`${t.label ?? '옵션'} 제거`}
+                    >
+                      ×
+                    </button>
+                  </span>
+                )
+              })}
+              {toggleInside && (
+                <button
+                  type="button"
+                  className={styles.unifiedTagInsideBtn}
+                  data-active={insideActive}
+                  onClick={toggleInside}
+                  aria-pressed={insideActive}
+                  title="슬라임 안"
+                >
+                  슬라임 안
+                </button>
+              )}
             </div>
           )
         })()}
@@ -3840,7 +4956,21 @@ export default function SlimeApp() {
                               : '삭제 선택'
                           }
                         >
-                          {selectedForDelete.has(entry.id) ? '✓' : ''}
+                          {selectedForDelete.has(entry.id) && (
+                            <svg
+                              width="12"
+                              height="12"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.4"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              aria-hidden="true"
+                            >
+                              <polyline points="4 12 10 18 20 6" />
+                            </svg>
+                          )}
                         </div>
                       )}
                     </div>
@@ -3876,59 +5006,104 @@ export default function SlimeApp() {
                   >
                     삭제 ({selectedForDelete.size})
                   </button>
+                  <button
+                    type="button"
+                    className={styles.collectionCarouselAction}
+                    onClick={() => {
+                      const allSelected =
+                        selectedForDelete.size === items.length
+                      setSelectedForDelete(
+                        allSelected
+                          ? new Set()
+                          : new Set(items.map((e) => e.id))
+                      )
+                    }}
+                  >
+                    {selectedForDelete.size === items.length
+                      ? '선택 해제'
+                      : '전체선택'}
+                  </button>
                 </div>
-              ) : clamped >= 0 && items[clamped] && (
-                <div className={styles.collectionCarouselActions}>
-                  <button
-                    type="button"
-                    className={styles.collectionCarouselAction}
-                    onClick={() => {
-                      applyStateSnapshot(items[clamped].state)
-                      setBottomMode('options')
-                    }}
-                  >
-                    만져보기
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.collectionCarouselAction}
-                    onClick={() => {
-                      applyStateSnapshot(items[clamped].state)
-                      setBottomMode('options')
-                    }}
-                  >
-                    수정하기
-                  </button>
-                  <button
-                    type="button"
-                    className={styles.collectionCarouselShare}
-                    onClick={() => {
-                      const url = encodeShareUrlFromState(items[clamped].state)
-                      if (navigator.share) {
-                        void navigator.share({ url }).catch(() => {})
-                      } else if (navigator.clipboard) {
-                        void navigator.clipboard.writeText(url).catch(() => {})
-                        setToast('링크 복사됨')
-                      }
-                    }}
-                    aria-label="공유"
-                  >
-                    <svg
-                      width="18"
-                      height="18"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
+              ) : (
+                <>
+                  {/* Bottom-LEFT trash button — one tap drops the
+                      carousel into the checkbox delete flow so the
+                      user can pick which slimes to remove. */}
+                  <div className={styles.collectionCarouselMoreWrap}>
+                    <button
+                      type="button"
+                      className={styles.collectionCarouselMoreBtn}
+                      onClick={() => {
+                        setDeleteMode(true)
+                        setSelectedForDelete(new Set())
+                      }}
+                      aria-label="삭제 모드"
                     >
-                      <path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7" />
-                      <polyline points="16 6 12 2 8 6" />
-                      <line x1="12" y1="2" x2="12" y2="15" />
-                    </svg>
-                  </button>
-                </div>
+                      <svg
+                        width="18"
+                        height="18"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M3 6h18" />
+                        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                        <path d="M10 11v6" />
+                        <path d="M14 11v6" />
+                      </svg>
+                    </button>
+                  </div>
+                  {(() => {
+                    // Buttons always show; target defaults to the FIRST
+                    // card when the user hasn't tapped one explicitly
+                    // yet, so 만져보기 / 수정하기 are always actionable
+                    // instead of hidden until selection.
+                    const activeIdx = clamped >= 0 ? clamped : 0
+                    const target = items[activeIdx]
+                    if (!target) return null
+                    return (
+                      <div className={styles.collectionCarouselActions}>
+                        <button
+                          type="button"
+                          className={styles.collectionCarouselAction}
+                          onClick={() => {
+                            // Snapshot the WIP slime so the "돌아가기"
+                            // exit can restore what the user was
+                            // building, not the previewed collection
+                            // slime.
+                            preCollectionPreviewStateRef.current =
+                              buildStateSnapshot()
+                            applyStateSnapshot(target.state)
+                            setCollectionPreview(true)
+                          }}
+                        >
+                          만져보기
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.collectionCarouselAction}
+                          onClick={() => {
+                            if (hasUnsavedChangesRef.current) {
+                              setPendingCollectionEdit({
+                                state: target.state
+                              })
+                            } else {
+                              applyStateSnapshot(target.state)
+                              setBottomMode('options')
+                            }
+                          }}
+                        >
+                          수정하기
+                        </button>
+                      </div>
+                    )
+                  })()}
+                </>
               )}
             </div>
           )

@@ -5,6 +5,7 @@
 // slime colour directly, and lets us drop the old special-case
 // coating palettes / forced-matte adjustments.
 export type ColorId =
+  | 'white'
   | 'pearl'
   | 'pink'
   | 'peach'
@@ -23,13 +24,16 @@ export type ColorId =
  *  hue in degrees (-30..30) and dl shifts lightness (-25..25). Colors
  *  without an entry render at their preset hex. Shared between slime
  *  and beads so an adjusted 아쿠아 reads the same across both surfaces. */
-export type ColorAdjustments = Partial<Record<ColorId, readonly [number, number]>>
+export type ColorAdjustments = Partial<
+  Record<string, readonly [number, number]>
+>
 
 export const COLORS: readonly {
   id: ColorId
   label: string
   hex: number
 }[] = [
+  { id: 'white', label: '화이트', hex: 0xffffff },
   { id: 'pearl', label: '진주', hex: 0xfff8f4 },
   { id: 'pink', label: '핑크', hex: 0xff9ac9 },
   { id: 'peach', label: '피치', hex: 0xffb591 },
@@ -61,6 +65,78 @@ export function resolveColorHex(
 
 export function resolveColorLabel(id: ColorId): string {
   return COLORS.find((c) => c.id === id)?.label ?? String(id)
+}
+
+/** Sprinkle-palette equivalent of resolveColorHex — reads the base hex
+ *  from SPRINKLE_COLORS and applies any user-tuned hue / lightness
+ *  delta stored under the `sp:<id>` key in the shared adjustments map,
+ *  so sprinkle chips can share the ColorAdjustSliders UI. */
+export function resolveSprinkleColorHex(
+  id: SprinkleColorId,
+  adjustments?: ColorAdjustments
+): number {
+  const preset = SPRINKLE_COLORS.find((c) => c.id === id)
+  const baseHex = preset?.hex ?? 0xffffff
+  const delta = adjustments?.[`sp:${id}`]
+  if (!delta || (delta[0] === 0 && delta[1] === 0)) return baseHex
+  return applyHslDelta(baseHex, delta[0], delta[1])
+}
+
+/** Wax-coating tint uses the general COLORS palette but keyed under a
+ *  `wc:` prefix so tweaking a wax coating pink stays independent from
+ *  tweaking the slime body pink (users can adjust the coat colour without
+ *  ricocheting the change onto their slime colour, and vice versa). */
+export function resolveWaxCoatingHex(
+  id: ColorId,
+  adjustments?: ColorAdjustments
+): number {
+  const preset = COLORS.find((c) => c.id === id)
+  const baseHex = preset?.hex ?? 0xffffff
+  const delta = adjustments?.[`wc:${id}`]
+  if (!delta || (delta[0] === 0 && delta[1] === 0)) return baseHex
+  return applyHslDelta(baseHex, delta[0], delta[1])
+}
+
+/** Foil-coating tint uses the metallic COATING_COLORS palette. Keyed
+ *  under `fc:` so foil tunes are independent from any other palette. */
+export function resolveFoilCoatingHex(
+  id: CoatingColorId,
+  adjustments?: ColorAdjustments
+): number {
+  const preset = COATING_COLORS.find((c) => c.id === id)
+  const baseHex = preset?.hex ?? 0xffffff
+  const delta = adjustments?.[`fc:${id}`]
+  if (!delta || (delta[0] === 0 && delta[1] === 0)) return baseHex
+  return applyHslDelta(baseHex, delta[0], delta[1])
+}
+
+/** Inner-slime coating tint uses the general COLORS palette, keyed
+ *  under `ic:` so 슬라임볼 coating tunes stay independent from both the
+ *  outer slime and the wax coating. */
+export function resolveInnerCoatingHex(
+  id: ColorId,
+  adjustments?: ColorAdjustments
+): number {
+  const preset = COLORS.find((c) => c.id === id)
+  const baseHex = preset?.hex ?? 0xffffff
+  const delta = adjustments?.[`ic:${id}`]
+  if (!delta || (delta[0] === 0 && delta[1] === 0)) return baseHex
+  return applyHslDelta(baseHex, delta[0], delta[1])
+}
+
+/** Custom-beads tint uses the same COLORS palette as everyone else but
+ *  keyed under `cb:` so tweaks on a 커스텀비즈 pink stay independent
+ *  from tweaks to a 꽉비즈 / slime pink of the same id. Without the
+ *  namespace, adjusting one visibly changed the other. */
+export function resolveCustomBeadHex(
+  id: ColorId,
+  adjustments?: ColorAdjustments
+): number {
+  const preset = COLORS.find((c) => c.id === id)
+  const baseHex = preset?.hex ?? 0xffffff
+  const delta = adjustments?.[`cb:${id}`]
+  if (!delta || (delta[0] === 0 && delta[1] === 0)) return baseHex
+  return applyHslDelta(baseHex, delta[0], delta[1])
 }
 
 /** Shift `hex` by `dh` degrees in hue and `dl` in lightness (both
@@ -147,7 +223,13 @@ export const COATING_COLORS: readonly {
 /** Base slime look — the "inner" property. Controls how the slime body
  *  refracts light and how shiny/rough its bulk is. Combined at render time
  *  with a coating (wax / none) which layers an outer decorative surface. */
-export type MaterialId = 'crystal' | 'glossy' | 'matte' | 'metal'
+export type MaterialId =
+  | 'crystal'
+  | 'glossy'
+  | 'matte'
+  | 'metal'
+  | 'soft'
+  | 'ice'
 
 export interface MaterialParams {
   roughness: number
@@ -225,20 +307,68 @@ export const MATERIALS: readonly {
       sheenColorHex: 0xffffff,
       iridescence: 0
     }
+  },
+  {
+    // 소프트 — smooth matte rubber / silicone. Opaque and low-shine but
+    // NOT as coarse as 폼(matte): a soft velvety surface with a hint of
+    // sheen so it reads as pliable rubber rather than dry foam.
+    // Also serves as the 슬라임볼 default because its opacity keeps the
+    // ball size visually stable (see BeadsLayer opaqueBallMaterial —
+    // wrap-shell is hidden for opaque ball materials, so a soft ball
+    // renders at the same radius whether single- or multi-colour).
+    id: 'soft',
+    label: '소프트',
+    params: {
+      roughness: 0.55,
+      metalness: 0,
+      transmission: 0,
+      thickness: 0,
+      ior: 1.4,
+      sheen: 0.15,
+      sheenRoughness: 0.5,
+      sheenColorHex: 0xffffff,
+      iridescence: 0
+    }
+  },
+  {
+    // 아이스 — polished OPAQUE crystal. Same mirror-smooth surface as
+    // 크리스탈 but transmission is fully off so the body reads as solid
+    // ice rather than clear glass. Slight cool iridescence sells the
+    // frosted look at grazing angles.
+    id: 'ice',
+    label: '아이스',
+    params: {
+      roughness: 0.08,
+      metalness: 0,
+      transmission: 0,
+      thickness: 0,
+      ior: 1.5,
+      sheen: 0.1,
+      sheenRoughness: 0.3,
+      sheenColorHex: 0xccddff,
+      iridescence: 0.2
+    }
   }
 ]
 
 /* ─── Coatings ───────────────────────────────────────── */
 
-/** Outer surface treatment layered on top of the material. Three real
- *  coatings — wax (soft candle-like sheen tint of the coating colour, no
- *  cracks), foil (metallic sheet that tears under stress), ice (rigid
- *  frozen shell that shatters into plates on press with cracks revealing
- *  the slime interior) — plus `none` for a plain material. Non-`none`
- *  coatings pick their surface tint from a separately-selected
- *  `coatingColor`, so users can independently pick e.g. red wax, blue
- *  foil, or clear ice. */
-export type CoatingId = 'none' | 'wax' | 'foil' | 'ice' | 'tube'
+/** Outer surface treatment layered on top of the material. Two real
+ *  coatings — wax (soft candle-like sheen tint of the coating colour with
+ *  crackable shell), foil (metallic sheet that tears under stress) —
+ *  plus `none` for a plain material. Non-`none` coatings pick their
+ *  surface tint from a separately-selected `coatingColor` so users can
+ *  independently pick e.g. red wax or blue foil regardless of the slime's
+ *  own body colour. The 'ice' and 'tube' ids are kept in the union for
+ *  backwards compatibility with old saved snapshots — they are no longer
+ *  offered in the panel and the snapshot loader coerces them to 'none'. */
+export type CoatingId =
+  | 'none'
+  | 'thinwax'
+  | 'wax'
+  | 'foil'
+  | 'ice'
+  | 'tube'
 
 export interface CoatingParams {
   clearcoat: number
@@ -294,96 +424,93 @@ export const COATINGS: readonly {
     }
   },
   {
-    id: 'wax',
-    label: '왁스',
+    id: 'thinwax',
+    label: '씬왁스',
     params: {
-      // Solid candle-wax coating — fully matte crust with the same
-      // colour feel as the 'matte' material option (forceMatteBase
-      // overrides any transparency/gloss the underlying base material
-      // contributes, so a crystal slime + wax coating still reads as
-      // opaque matte wax). Kneading tears the crust open along
-      // damage-accumulated seams (same shader path as foil), only
-      // slower and with slightly thicker fragments — cracks widen
-      // continuously with sustained pressure rather than snapping
-      // into discrete shatter stages.
+      // Thin wax — same shell physics + crack behaviour as regular wax,
+      // but the coating tint is applied at partial opacity (0.72) so the
+      // inner slime shows through. SlimeApp maps this coating id to a
+      // 0.72 waxThicknessAlpha driving the shader diffuse mix.
       clearcoat: 0,
       clearcoatRoughness: 0,
       usesUserColor: true,
-      hasCracks: true,
-      forceMatteBase: true
+      hasCracks: true
+    }
+  },
+  {
+    id: 'wax',
+    label: '왁스',
+    params: {
+      // Candle-wax coating — the SHELL always reads as matte wax
+      // regardless of the underlying slime material, and kneading tears
+      // the crust open along damage-accumulated seams. The user's chosen
+      // slime material (matte / metal / glossy / crystal) is preserved
+      // UNDER the coating so cracks reveal e.g. metal-through-torn-wax.
+      // Shell matte-ness is enforced in the shader (roughnessmap_fragment
+      // sets roughnessFactor to shellRoughness in the intact area only,
+      // and reverts to the material's own roughness in the crack area).
+      // Clearcoat kept at 0 so the wax shell reads as dry matte candle.
+      clearcoat: 0,
+      clearcoatRoughness: 0,
+      usesUserColor: true,
+      hasCracks: true
     }
   },
   {
     id: 'foil',
     label: '박지',
     params: {
-      // Glossy metal coating — high metalness tints reflections with
-      // the coating colour (F0 = colour for metals), low base roughness
-      // + mirror-smooth clearcoat lacquer keeps those reflections
-      // crisp so the sheet reads as polished / mirror-finish metal.
-      // No iridescence — the coating colour carries the whole look.
-      // Cracks reused as tears since foil deforms the same way under
-      // kneading.
-      // forceOpaqueBase (not Matte) so the transparency of a
-      // crystal-base slime under foil doesn't leak through crack
-      // reveals, while the extraMetalness below still makes the
-      // outside read as polished metal. Using forceMatteBase would
-      // have zeroed the metalness we just added, killing the metal
-      // look entirely.
+      // Foil coating — the SHELL always reads as polished metal (high
+      // metalness + low roughness + mirror clearcoat) regardless of the
+      // underlying material. Base material is preserved and crack reveals
+      // return roughness / metalness to the material's own values so a
+      // torn foil exposes e.g. matte foam or metal putty beneath. Shell
+      // metal look is enforced in the shader — the JS side only sets the
+      // clearcoat since that has no per-fragment mixin available.
       clearcoat: 1.0,
       clearcoatRoughness: 0.02,
-      extraMetalness: 0.85,
       usesUserColor: true,
-      hasCracks: true,
-      forceOpaqueBase: true
+      hasCracks: true
     }
   },
   {
     id: 'tube',
-    label: '튜브',
+    label: '젤',
     params: {
-      // Glossy paper tube — matte paper body via forceMatteBase (opaque
-      // pigment carries the coating colour) + mirror-smooth clearcoat
-      // lacquer on top for the wet "shiny paper" look. Tears exactly
-      // like foil does (reuses foil's damage shader path via
-      // damageIsFoilUniform in SlimeSphere.setCoating), so kneading
-      // opens the same wispy-edged rips as foil — just without the
-      // metallic reflection.
+      // Gel coating — glossy transparent-ish shell with the wispy foil
+      // tear pattern (piggybacks on foil's damage-shader path). No
+      // metalness so the gel reads as translucent rather than metallic;
+      // the mirror-smooth clearcoat gives it a wet-jelly sheen.
       clearcoat: 1.0,
       clearcoatRoughness: 0.02,
       usesUserColor: true,
-      hasCracks: true,
-      forceMatteBase: true
+      hasCracks: true
     }
   },
   {
     id: 'ice',
-    label: '카라멜',
+    label: '글레이즈',
     params: {
-      // Transparent ice crystal shell — forceCrystalBase turns the base
-      // into a glassy transmissive material (95% transmission, low
-      // roughness, ior 1.5) so the coating colour tints it like stained
-      // glass rather than painting it opaque. A high-clarity clearcoat
-      // on top adds the wet-ice specular. Kneading shatters the shell
-      // into a connected polygonal crack network revealing the slime
-      // interior between fixed-size pieces.
+      // Glaze coating — hard candy-glaze shell that shatters into a
+      // polygonal crack network when pressed (ice's connected-plate
+      // shader path). High clearcoat + moderate clearcoatRoughness
+      // sells the caramel / candy-glaze wet sheen.
       clearcoat: 1.0,
       clearcoatRoughness: 0.05,
       usesUserColor: true,
-      hasCracks: true,
-      forceCrystalBase: true
+      hasCracks: true
     }
   }
 ]
 
 /* ─── Shapes ─────────────────────────────────────────── */
 
-export type ShapeId = 'sphere' | 'cube' | 'twist'
+export type ShapeId = 'sphere' | 'cube' | 'rect' | 'twist'
 
 export const SHAPES: readonly { id: ShapeId; label: string }[] = [
   { id: 'sphere', label: '구' },
   { id: 'cube', label: '네모' },
-  { id: 'twist', label: '트위스트' }
+  { id: 'rect', label: '직사각형' }
 ]
 
 /** Given a unit direction from origin on the base sphere, return the
@@ -410,31 +537,51 @@ export function shapeTransform(
       const s = 1 / absMax
       return [nx * s, ny * s, nz * s]
     }
+    case 'rect': {
+      // 2:1:1 slab, uniformly SHRUNK so max half-extent is 1.0 (matches
+      // sphere / cube's visual footprint instead of overflowing at 2.0).
+      // Divide each axis by its target half-extent (1.0, 0.5, 0.5) so
+      // vertices land on a rounded box of exactly those dimensions.
+      const absMax = Math.max(
+        Math.abs(nx),
+        Math.abs(ny) * 2,
+        Math.abs(nz) * 2
+      )
+      if (absMax < 1e-6) return [nx, ny, nz]
+      const s = 1 / absMax
+      return [nx * s, ny * s, nz * s]
+    }
     case 'twist': {
-      // Piped whipped-cream dome — a nearly spherical body with a
-      // tight ring of ridges that spiral from the base to a soft
-      // peak on top, matching the "piping-tip cream rosette" look:
-      // dense grooves running around the circumference and
-      // spiralling upward once so the ridges tilt slightly as they
-      // stack.
-      const yStretch = 1.05
-      const y = ny * yStretch
-      const rxz = Math.sqrt(nx * nx + nz * nz)
-      const yNorm = (y + yStretch) / (2 * yStretch)
-      // Nearly full radius at the equator; the top narrows more
-      // than the bottom so the silhouette reads as a piped mound
-      // rather than a symmetric sphere.
-      const equatorDist = Math.abs(yNorm - 0.45)
-      const taper = 1 - Math.pow(equatorDist, 1.6) * 0.6
-      const theta0 = Math.atan2(nz, nx)
-      // ~1.4 turns end-to-end — gives the helix its visible spiral
-      // without spinning the ridges too fast (which would blur them).
-      const twistTurns = 1.4
-      const theta = theta0 + yNorm * twistTurns * Math.PI * 2
-      // 8 tight vertical ridges, higher amplitude → strong flutes.
-      const flute = 1 + 0.11 * Math.cos(8 * theta)
-      const rFinal = rxz * taper * flute
-      return [rFinal * Math.cos(theta), y, rFinal * Math.sin(theta)]
+      // Torus (donut) reading as a long slime rolled into a ring, with
+      // multiple visible coil ridges around the ring so the surface
+      // shows the "wound-up rope" grain the user asked for. Horizontal
+      // direction (nx, nz) picks the ring angle, vertical direction ny
+      // picks the tube-cross-section angle.
+      const R = 0.62
+      const r = 0.38
+      const theta = Math.atan2(nz, nx)
+      const nyClamped = Math.max(-1, Math.min(1, ny))
+      const phi = Math.asin(nyClamped)
+      // Coil ridges — a primary high-frequency ridge (14 ridges around
+      // the ring) plus a secondary low-frequency wobble whose phase
+      // shifts with the tube cross-section angle so the ridges spiral
+      // around the tube like a wound rope instead of running in
+      // parallel rings. An irregular jitter term breaks the perfect
+      // symmetry so the coiling reads as hand-rolled rather than lathed.
+      const primaryRidge = 0.035 * Math.cos(14 * theta + 2.1 * phi)
+      const wobble = 0.02 * Math.sin(5.3 * theta + 3.7 * phi)
+      const jitter =
+        0.012 *
+        Math.sin(9.1 * theta + 6.4 * phi + 1.3) *
+        Math.cos(4.2 * theta - 2.7 * phi)
+      const rMod = r + primaryRidge + wobble + jitter
+      const cosPhi = Math.cos(phi)
+      const outerR = R + rMod * cosPhi
+      return [
+        outerR * Math.cos(theta),
+        rMod * Math.sin(phi),
+        outerR * Math.sin(theta)
+      ]
     }
   }
 }
@@ -464,14 +611,52 @@ export const BEAD_SHAPES: readonly { id: BeadShapeId; label: string }[] = [
 ]
 
 /** Material style applied uniformly to every bead in the layer. */
-export type BeadMaterialId = 'plastic' | 'crystal'
+export type BeadMaterialId =
+  | 'plastic'
+  | 'crystal'
+  | 'pearl'
+  | 'glossy'
+  | 'soft'
 
+/** Merged list — every material id used across compact + chunk. Kept
+ *  for label lookups (e.g. tag rendering) that need to resolve any
+ *  id back to its display name. UI chip rows use the per-combo lists
+ *  below to keep each combo's picker focused. */
 export const BEAD_MATERIALS: readonly {
   id: BeadMaterialId
   label: string
 }[] = [
   { id: 'plastic', label: '플라스틱' },
-  { id: 'crystal', label: '크리스탈' }
+  { id: 'crystal', label: '크리스탈' },
+  { id: 'pearl', label: '진주' },
+  { id: 'glossy', label: '광택' },
+  { id: 'soft', label: '소프트' }
+]
+
+/** 꽉비즈 (compact fill) materials — plastic candy + soft matte
+ *  rubber + polished pearl + glossy candy. Crystal removed because
+ *  compact-packed transparent beads collapsed into a solid blob of
+ *  the slime beneath. */
+export const COMPACT_BEAD_MATERIALS: readonly {
+  id: BeadMaterialId
+  label: string
+}[] = [
+  { id: 'plastic', label: '플라스틱' },
+  { id: 'pearl', label: '진주' },
+  { id: 'glossy', label: '광택' },
+  { id: 'soft', label: '소프트' }
+]
+
+/** 비즈볼 (chunk) materials — the buried beads. Crystal was removed
+ *  because a transparent bead inside a transparent slime is invisible
+ *  in three.js (transmissive-through-transmissive is unsupported) and
+ *  every workaround (alpha blend / depth-off) trades correctness for
+ *  visibility. Users pick plastic for now. */
+export const CHUNK_BEAD_MATERIALS: readonly {
+  id: BeadMaterialId
+  label: string
+}[] = [
+  { id: 'plastic', label: '플라스틱' }
 ]
 
 /** MeshPhysicalMaterial parameter presets per bead material. */
@@ -519,6 +704,57 @@ export const BEAD_MATERIAL_PARAMS: Record<BeadMaterialId, BeadMaterialParams> = 
     iridescence: 0.0,
     iridescenceIOR: 1.3,
     envMapIntensity: 1.2
+  },
+  // 진주 — pearl bead. Full-strength glossy clearcoat over an OPAQUE
+  // pearlescent base — reads as a polished pearl necklace bead, not
+  // a matte / hazy one. Mild iridescence adds a subtle warm shimmer
+  // without breaking into rainbow territory.
+  pearl: {
+    roughness: 0.12,
+    metalness: 0.05,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.04,
+    transmission: 0.0,
+    thickness: 0.0,
+    ior: 1.5,
+    sheen: 0.4,
+    sheenRoughness: 0.4,
+    iridescence: 0.2,
+    iridescenceIOR: 1.35,
+    envMapIntensity: 1.25
+  },
+  // 광택 — polished candy: mirror-smooth clearcoat lacquer with a
+  // touch of underlying sheen so the surface reads as "hard candy"
+  // rather than plain plastic.
+  glossy: {
+    roughness: 0.15,
+    metalness: 0.0,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.05,
+    transmission: 0.0,
+    thickness: 0.0,
+    ior: 1.5,
+    sheen: 0.4,
+    sheenRoughness: 0.4,
+    iridescence: 0.0,
+    iridescenceIOR: 1.3,
+    envMapIntensity: 1.25
+  },
+  // 소프트 — matte rubber. Opaque with mild sheen for a pliable feel;
+  // no clearcoat so nothing glosses over the diffuse surface.
+  soft: {
+    roughness: 0.55,
+    metalness: 0.0,
+    clearcoat: 0.0,
+    clearcoatRoughness: 0.0,
+    transmission: 0.0,
+    thickness: 0.0,
+    ior: 1.4,
+    sheen: 0.15,
+    sheenRoughness: 0.5,
+    iridescence: 0.0,
+    iridescenceIOR: 1.3,
+    envMapIntensity: 0.9
   }
 }
 
@@ -545,14 +781,26 @@ export interface BeadsConfig {
    *  instead of clustered per hemisphere. Empty array = no beads rendered
    *  (an active bead layer needs at least one shape). */
   shapes: BeadShapeId[]
-  material: BeadMaterialId
+  /** Material style applied uniformly to every bead in the layer.
+   *  Widened to accept slime MaterialId (crystal / glossy / matte / metal)
+   *  so the 슬라임볼 (innerSlime) instance can share the slime's own
+   *  material palette. Regular bead layers stay on BeadMaterialId
+   *  (plastic / crystal) — BeadsLayer.applyMaterialParams routes each id
+   *  to the right params table based on the useSlimeMaterials flag. */
+  material: BeadMaterialId | MaterialId
   /** Outer surface treatment layered on top of the bead material —
-   *  identical option list to the slime's coating (none / wax / foil /
-   *  ice-labelled-카라멜 / tube). Only the chunk combo exposes this in
-   *  the panel; other combos leave it at 'none'. Applied to the shared
-   *  bead MeshPhysicalMaterial in BeadsLayer.setConfig on top of the
-   *  base material params. */
+   *  identical option list to the slime's coating (none / wax / foil).
+   *  Only the 속슬라임 (inner slime) tab exposes this in the panel; the
+   *  regular bead combos leave it at 'none'. Applied to the shared bead
+   *  MeshPhysicalMaterial in BeadsLayer.setConfig on top of the base
+   *  material params. */
   coating: CoatingId
+  /** Optional coating tint. Independent from `colors` (which owns the
+   *  ball's own body colour) so the coating can be e.g. gold on a green
+   *  ball. Empty / omitted → no tint overlay (ball surface stays whatever
+   *  its bead colour resolves to). Only the first entry is used — beads
+   *  don't have the multi-colour gradient path the slime does. */
+  coatingColors?: ColorId[]
   /** When true, ignore `count` and pack beads as densely as possible across
    *  the whole surface — beads touch each other and hide most of the slime.
    *  Compact combo pins this to true; chunk combo pins it to false. */
@@ -563,6 +811,18 @@ export interface BeadsConfig {
    *  bead lerps between adjacent palette colours based on its Y position,
    *  producing a continuous top-to-bottom fade instead of hard bands. */
   gradient?: boolean
+  /** 납작함 — compresses the bead along its OUTWARD axis so 꽉비즈 reads
+   *  as flatter coins pressed into the slime surface. Panel caps at 0.55
+   *  (matches 추가비즈 flatness ceiling). 0 = normal, 1 = fully flat
+   *  coin. Applied at bead-scale time via the same
+   *  `size * (1 - 0.85 * flatness)` formula 추가비즈 uses. */
+  flatness?: number
+  /** 슬라임 안 — when true, shrinks the whole bead layer inward so the
+   *  beads sit embedded inside the slime volume instead of on the surface.
+   *  The slime body stays fully visible; the beads read as inclusions.
+   *  Only meaningful for the compact combo (the primary chip owning this
+   *  toggle); chunk beads ignore it. */
+  inside?: boolean
 }
 
 /** Combo defaults + slider limits. Compact allows small beads packed
@@ -687,6 +947,7 @@ export const BEADS_DEFAULT: BeadsConfig = {
   shapes: ['sphere'],
   material: 'plastic',
   coating: 'none',
+  coatingColors: [],
   fill: false
 }
 
@@ -773,7 +1034,7 @@ export const SPRINKLE_MATERIALS: readonly {
 
 /** Sprinkle "kind" — the top-level choice under the sprinkle panel. Each
  *  type owns a different set of tunable sub-options:
- *    paper  → flat confetti (color / count / size / shape / material)
+ *    paper  → 스팽글 flat confetti (color / count / size / shape / material / kind)
  *    powder → small particles (color / count / material: 반짝이 or 분필)
  *    ink    → in-slime marble swirls (color / count)
  *  Ink is rendered inside the slime shader, not as surface sprinkles. */
@@ -783,9 +1044,23 @@ export const SPRINKLE_TYPES: readonly {
   id: SprinkleTypeId
   label: string
 }[] = [
-  { id: 'paper', label: '납작종이' },
+  { id: 'paper', label: '스팽글' },
   { id: 'powder', label: '가루' },
   { id: 'ink', label: '잉크' }
+]
+
+/** 스팽글 "종류" — plastic vs paper. Swaps the ambient loop sample AND
+ *  the geometry treatment: paper keeps the Sprink.mp3 rustle and a
+ *  paper-thin puck; plastic switches to Spang.mp3 and thickens the
+ *  extrusion into a glossy moulded bead. */
+export type SpangleKindId = 'paper' | 'plastic'
+
+export const SPANGLE_KINDS: readonly {
+  id: SpangleKindId
+  label: string
+}[] = [
+  { id: 'paper', label: '종이' },
+  { id: 'plastic', label: '플라스틱' }
 ]
 
 /** Sub-categories surfaced in the panel for each type. Empty entries let
@@ -795,6 +1070,7 @@ export const SPRINKLE_SUB_CATEGORIES: Record<
   readonly { id: string; label: string }[]
 > = {
   paper: [
+    { id: 'kind', label: '종류' },
     { id: 'count', label: '양' },
     { id: 'color', label: '색상' },
     { id: 'size', label: '크기' },
@@ -927,6 +1203,13 @@ export interface PaperSprinklesConfig {
   shape: SprinkleShapeId
   material: SprinkleMaterialId
   fill: boolean
+  /** 스팽글 kind — swaps the ambient loop sample (paper → Sprink.mp3,
+   *  plastic → Spang.mp3) and switches the visual to a thicker glossy
+   *  moulded piece for plastic. */
+  kind: SpangleKindId
+  /** 슬라임 안 — see BeadsConfig.inside. Shrinks the spangle layer inward
+   *  so the pieces read as embedded inclusions inside the slime. */
+  inside?: boolean
 }
 
 export interface PowderSprinklesConfig {
@@ -963,7 +1246,8 @@ export const SPRINKLES_DEFAULT: SprinklesConfig = {
     count: 0,
     shape: 'star',
     material: 'glitter',
-    fill: false
+    fill: false,
+    kind: 'paper'
   },
   powder: {
     colors: [],
@@ -979,7 +1263,7 @@ export const SPRINKLES_DEFAULT: SprinklesConfig = {
 
 export const SPRINKLES_LIMITS = {
   sizeMin: 0.03,
-  sizeMax: 0.08,
+  sizeMax: 0.18,
   countMin: 0,
   countMax: 400,
   /** Per-type slider maxes. Paper caps at 260 because visually adding more
@@ -1046,6 +1330,9 @@ export interface EmojiBeadsConfig {
   emojis: string[]
   size: number
   count: number
+  /** 슬라임 안 — see BeadsConfig.inside. Shrinks the emoji layer inward
+   *  so the emojis read as embedded inclusions inside the slime volume. */
+  inside?: boolean
 }
 
 export const EMOJI_BEADS_DEFAULT: EmojiBeadsConfig = {
@@ -1075,6 +1362,17 @@ export interface CustomBeadsConfig {
   /** 0 = 원래 비율 그대로, 1 = 완전히 납작한 원반. 로컬 +Z (outward
    *  방향)에 대한 스케일 배수 = mix(1.0, 0.15, flatness). */
   flatness: number
+  /** Optional per-bead position overrides (unit vectors from origin).
+   *  Populated when the user drags a custom bead to a new spot on the
+   *  slime surface; empty entries fall back to the Fibonacci layout. */
+  positions?: { [beadIndex: number]: [number, number, number] }
+  /** When true, palette colours interpolate across beads instead of
+   *  cycling — bead index n picks a lerp between adjacent palette
+   *  entries. Matches the compact-beads gradient toggle. */
+  gradient?: boolean
+  /** 슬라임 안 — see BeadsConfig.inside. Shrinks the custom-beads layer
+   *  inward so the beads read as embedded inclusions inside the slime. */
+  inside?: boolean
 }
 
 export const CUSTOM_BEADS_DEFAULT: CustomBeadsConfig = {
@@ -1086,14 +1384,15 @@ export const CUSTOM_BEADS_DEFAULT: CustomBeadsConfig = {
   shapes: ['disc'],
   size: 0.28,
   count: 0,
-  flatness: 0
+  flatness: 0,
+  gradient: false
 }
 
 export const CUSTOM_BEADS_LIMITS = {
   sizeMin: 0.15,
-  sizeMax: 0.45,
+  sizeMax: 0.28,
   countMin: 0,
-  countMax: 20
+  countMax: 40
 }
 
 export const THEMES: readonly ThemePreset[] = [

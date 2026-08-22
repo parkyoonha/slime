@@ -118,6 +118,14 @@ export class EmojiBeadsLayer {
    *  slime" motion feel slow / molasses-like rather than tracking the
    *  finger 1:1. Reallocated whenever the sprite count changes. */
   private smoothedLifts: Float32Array | null = null
+  /** Per-emoji "spawn anchor blend" — 1.0 = anchor emoji to REST
+   *  vertex position (so a fresh sprite lands on the original
+   *  silhouette even if the underlying vertex is currently dented
+   *  inward), 0.0 = anchor to the current deformed vertex (normal
+   *  press-follows-slime behaviour). Freshly spawned sprites start
+   *  at 1.0 and decay to 0.0 over ~300 ms so the emoji doesn't
+   *  visually drift after landing. */
+  private spawnRestBlend: Float32Array = new Float32Array(0)
 
   constructor() {
     this.group = new THREE.Group()
@@ -219,29 +227,87 @@ export class EmojiBeadsLayer {
     // keep their old vertex; only freshly-added slots (i >= prev length)
     // pull a fresh default anchor from the front-facing pool. The pool
     // skips already-used vertices so a new sprite doesn't spawn on top
-    // of a preserved one.
+    // of a preserved one, AND enforces a minimum angular gap between
+    // fresh anchors sized to the current sprite diameter so large
+    // emojis don't visually overlap each other. Preserved sprites act
+    // as immovable obstacles for the spacing check (a user drag is more
+    // important than automatic spacing).
     const usedVerts = new Set<number>()
     this.vertexIndices = []
+    // Minimum chord distance we want between anchor unit-dirs, sized to
+    // the sprite diameter with a small overlap tolerance so adjacent
+    // emojis nearly touch instead of leaving a visible gap. Converted
+    // to a maxDot threshold (unit vectors → chord² = 2 − 2·dot) so the
+    // per-candidate check is a single dot product. Clamped to −1 for
+    // sprite sizes so large the constraint is un-satisfiable, in which
+    // case every front-facing vertex passes and the fallback ordering
+    // (descending z from the sort above) still yields a sensible layout.
+    const targetChord = config.size * 0.9
+    const maxDot = Math.max(-1, 1 - (targetChord * targetChord) / 2)
+    const placedDirs: number[] = []
+    const pushPlacedDir = (idx: number) => {
+      placedDirs.push(
+        unitDirs[idx * 3],
+        unitDirs[idx * 3 + 1],
+        unitDirs[idx * 3 + 2]
+      )
+    }
+    // Reset the spawn-blend factors to the new size. Existing sprites
+    // (preserved vertex indices) leave blend = 0 (anchor to current);
+    // freshly-added slots start at 1.0 (anchor to rest silhouette so
+    // the sprite lands above any current dent instead of inside it).
+    const nextPending = new Float32Array(effectiveCount)
     for (let i = 0; i < effectiveCount; i++) {
       const prev = i < prevIndices.length ? prevIndices[i] : -1
       if (prev >= 0) {
         this.vertexIndices.push(prev)
         usedVerts.add(prev)
+        pushPlacedDir(prev)
       } else {
-        // Take the next unused front-facing vertex from the sorted pool.
+        // Prefer the next unused front-facing vertex whose direction is
+        // far enough from every already-placed anchor to avoid overlap.
         let picked = -1
         for (const cand of frontIndices) {
-          if (!usedVerts.has(cand)) {
+          if (usedVerts.has(cand)) continue
+          const cx = unitDirs[cand * 3]
+          const cy = unitDirs[cand * 3 + 1]
+          const cz = unitDirs[cand * 3 + 2]
+          let ok = true
+          for (let k = 0; k < placedDirs.length; k += 3) {
+            const dot =
+              cx * placedDirs[k] +
+              cy * placedDirs[k + 1] +
+              cz * placedDirs[k + 2]
+            if (dot > maxDot) {
+              ok = false
+              break
+            }
+          }
+          if (ok) {
             picked = cand
             break
           }
         }
-        // Fall back to any front vertex if the pool is fully used.
+        // Fallback — no candidate satisfies the spacing (usually because
+        // the requested count × size exceeds the front-cap area); take
+        // the next unused front vertex so we still honour the count.
+        if (picked < 0) {
+          for (const cand of frontIndices) {
+            if (!usedVerts.has(cand)) {
+              picked = cand
+              break
+            }
+          }
+        }
+        // Final fallback: pool fully consumed, wrap around.
         if (picked < 0) picked = frontIndices[i % frontIndices.length]
         this.vertexIndices.push(picked)
         usedVerts.add(picked)
+        pushPlacedDir(picked)
+        nextPending[i] = 1
       }
     }
+    this.spawnRestBlend = nextPending
 
     for (let i = 0; i < effectiveCount; i++) {
       // Cycle emoji index per sprite so consecutive placements alternate
@@ -369,6 +435,14 @@ export class EmojiBeadsLayer {
       // current base lift so no visible jump on init / config change.
       this.smoothedLifts = new Float32Array(n).fill(baseLift)
     }
+    // Spawn-blend decay per frame. The slime retains most of a dent
+    // after release (RELEASE_RESTORE = 0.1 in SlimeSphere) so we can't
+    // gate decay on vertex-near-rest — the blend would never expire.
+    // Time-based decay (~500 ms total) lets a freshly-spawned emoji
+    // ease from its rest-silhouette landing spot down to the anchor
+    // vertex position, so subsequent presses can drag the emoji into
+    // the slime like every other sprite.
+    const SPAWN_DECAY = 0.03
     for (let i = 0; i < n; i++) {
       const vi = this.vertexIndices[i]
       const x = currentPositions[vi * 3]
@@ -381,11 +455,12 @@ export class EmojiBeadsLayer {
       // itself). Depth test on the main sprite then handles the visual
       // burial — beads / opaque slime in front hide the sunk emoji.
       let targetLift = baseLift
+      let restLen = len
       if (restPositions) {
         const rx = restPositions[vi * 3]
         const ry = restPositions[vi * 3 + 1]
         const rz = restPositions[vi * 3 + 2]
-        const restLen = Math.hypot(rx, ry, rz)
+        restLen = Math.hypot(rx, ry, rz)
         // Dead-zone the compression before scaling so tiny physics
         // wobbles don't move the emoji at all. Only when the vertex
         // is meaningfully pressed inward does the sprite start sinking.
@@ -402,7 +477,18 @@ export class EmojiBeadsLayer {
       const ease = targetLift < prev ? SINK_EASE : RISE_EASE
       const smoothed = prev + (targetLift - prev) * ease
       this.smoothedLifts[i] = smoothed
-      const s = 1 + smoothed / len
+      // Blend the anchor length between rest (spawn-pinned) and
+      // current (physics-tracking). Fresh sprites start with
+      // spawnRestBlend = 1 so they land on top of any current dent,
+      // then decay unconditionally each frame so existing emojis
+      // eventually track the anchor vertex normally (and can be
+      // pressed into the slime with the rest of the surface).
+      const blend = this.spawnRestBlend[i] ?? 0
+      if (blend > 0) {
+        this.spawnRestBlend[i] = Math.max(0, blend - SPAWN_DECAY)
+      }
+      const anchorLen = len + (restLen - len) * blend
+      const s = (anchorLen + smoothed) / len
       const px = x * s
       const py = y * s
       const pz = z * s

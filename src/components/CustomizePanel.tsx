@@ -3,15 +3,22 @@ import {
   BEAD_COLORS,
   BEAD_COMBOS,
   BEAD_MATERIALS,
+  COMPACT_BEAD_MATERIALS,
+  CHUNK_BEAD_MATERIALS,
   BEAD_SHAPES,
   BEADS_LIMITS,
   CUSTOM_BEADS_LIMITS,
   beadShapesMaxSize,
   beadShapesMinSize,
+  COATING_COLORS,
   COATINGS,
   COLORS,
   resolveColorHex,
   resolveColorLabel,
+  resolveCustomBeadHex,
+  resolveFoilCoatingHex,
+  resolveInnerCoatingHex,
+  resolveWaxCoatingHex,
   EMOJI_BEADS_LIMITS,
   MATERIALS,
   SHAPES,
@@ -27,6 +34,7 @@ import {
   type BeadCombo,
   type BeadShapeId,
   type BeadsConfig,
+  type CoatingColorId,
   type CoatingId,
   type ColorAdjustments,
   type ColorId,
@@ -34,6 +42,7 @@ import {
   type EmojiBeadsConfig,
   type MaterialId,
   type ShapeId,
+  SPANGLE_KINDS,
   type SprinkleColorId,
   type SprinkleTypeId,
   type SprinklesConfig
@@ -56,15 +65,16 @@ import styles from './CustomizePanel.module.css'
  * screens just to switch which knob they're tweaking within a category.
  */
 /** Internal category id — one per distinct panel implementation.
- *  All 8 categories live at the same level now; the panel's top row
- *  scrolls horizontally to fit them all in one persistent nav strip. */
+ *  Powder/ink used to live under a single "스프링클" leaf; they're now
+ *  first-class primary chips so users reach each without an extra tap. */
 type CategoryId =
   | 'slime'
   | 'inner-slime'
   | 'compact'
   | 'chunk'
   | 'paper'
-  | 'sprinkles'
+  | 'powder'
+  | 'ink'
   | 'theme'
   | 'custom-beads'
 
@@ -76,18 +86,20 @@ const CATEGORIES: readonly { id: CategoryId; label: string }[] = [
   { id: 'inner-slime', label: '슬라임볼' },
   { id: 'compact', label: '비즈' },
   { id: 'chunk', label: '비즈볼' },
-  { id: 'paper', label: '납작종이' },
-  { id: 'sprinkles', label: '스프링클' },
+  { id: 'paper', label: '스팽글' },
+  { id: 'powder', label: '가루' },
+  { id: 'ink', label: '잉크' },
   { id: 'theme', label: '이모지' },
-  { id: 'custom-beads', label: '커스텀비즈' }
+  { id: 'custom-beads', label: '추가비즈' }
 ]
 
-type SlimeSub = 'color' | 'material' | 'coating' | 'shape'
+type SlimeSub = 'color' | 'material' | 'coating' | 'shape' | 'crunch'
 const SLIME_SUBS: readonly { id: SlimeSub; label: string }[] = [
   { id: 'color', label: '색상' },
   { id: 'material', label: '재질' },
   { id: 'coating', label: '코팅' },
-  { id: 'shape', label: '모양' }
+  { id: 'shape', label: '모양' },
+  { id: 'crunch', label: '크런치' }
 ]
 
 /** Per-combo bead sub-categories. Compact drops "count" (always fill),
@@ -102,7 +114,8 @@ const BEAD_SUB_CATEGORIES_BY_COMBO: Record<
     { id: 'color', label: '색상' },
     { id: 'size', label: '크기' },
     { id: 'shape', label: '모양' },
-    { id: 'material', label: '재질' }
+    { id: 'material', label: '재질' },
+    { id: 'flatness', label: '납작함' }
   ],
   chunk: [
     { id: 'color', label: '색상' },
@@ -118,6 +131,14 @@ interface Props {
   colors: readonly ColorId[]
   material: MaterialId
   coating: CoatingId
+  /** Coating tint colour picks, independent from the slime body colour.
+   *  Wax reads from the general slime palette (COLORS), foil reads from
+   *  the metallic COATING_COLORS palette. Multi-select paints a top-to-
+   *  bottom gradient on the coating; a single pick is a flat tint. */
+  coatingColors: readonly ColorId[]
+  foilColors: readonly CoatingColorId[]
+  onCoatingColors: (v: ColorId[]) => void
+  onFoilColors: (v: CoatingColorId[]) => void
   shape: ShapeId
   beads: BeadsConfig
   sprinkles: SprinklesConfig
@@ -126,6 +147,10 @@ interface Props {
   onMaterial: (v: MaterialId) => void
   onCoating: (v: CoatingId) => void
   onShape: (v: ShapeId) => void
+  /** 크런치 — hidden grain bumps that pop out on the slime surface where
+   *  the user is pressing. Simple boolean toggle. */
+  crunchOn: boolean
+  onCrunchOn: (v: boolean) => void
   onBeads: (v: BeadsConfig) => void
   onSprinkles: (v: SprinklesConfig) => void
   onEmojiBeads: (v: EmojiBeadsConfig) => void
@@ -145,7 +170,7 @@ interface Props {
    *  preset ColorId so tweaks stay attached to their base colour
    *  across sessions and across surfaces (slime + beads share). */
   colorAdjustments: ColorAdjustments
-  onColorAdjustment: (id: ColorId, dh: number, dl: number) => void
+  onColorAdjustment: (id: string, dh: number, dl: number) => void
   /** 속슬라임 config — same shape as beads (BeadsConfig) with combo
    *  forced to 'chunk' when active. Rendered inside the slime by a
    *  dedicated BeadsLayer instance that applies a soft squish on press. */
@@ -160,6 +185,17 @@ interface Props {
   customBeadsPhotoOn: boolean
   onPickCustomBeadsPhoto: (file: File) => void
   onClearCustomBeadsPhoto: () => void
+  /** Fires whenever the user opens/closes a primary category. Lets
+   *  SlimeApp decide which per-category chrome (e.g. the 슬라임 안 toggle
+   *  in the unified tag row) is currently applicable — a plain string
+   *  keeps CategoryId internal to this file. */
+  onActivePanelChange?: (panel: string | null) => void
+  /** Registers an imperative "jump to category" handle with the parent.
+   *  SlimeApp uses this so a tag click in the unified tag row can open
+   *  the panel that owns the tag without lifting category state up.
+   *  Passing `null` closes whatever category is currently open — used by
+   *  the reset button so nuking every option also collapses the panel. */
+  onRegisterOpenCategory?: (fn: (id: string | null) => void) => void
 }
 
 function hexToCss(h: number): string {
@@ -175,13 +211,15 @@ function ColorAdjustSliders({
   adjustments,
   onChange
 }: {
-  colorId: ColorId
+  // Accepts either the slime/beads ColorId or a namespaced sprinkle
+  // id (e.g. `sp:gold`), keyed into the shared colorAdjustments map.
+  colorId: string
   adjustments: ColorAdjustments
-  onChange: (id: ColorId, dh: number, dl: number) => void
+  onChange: (id: string, dh: number, dl: number) => void
 }) {
-  const preset = COLORS.find((c) => c.id === colorId)
-  if (!preset) return null
-  const cur = adjustments[colorId] ?? [0, 0]
+  const cur = (adjustments as Record<string, readonly [number, number]>)[
+    colorId
+  ] ?? [0, 0]
   const dh = cur[0]
   const dl = cur[1]
   return (
@@ -336,6 +374,161 @@ function CameraIcon() {
  *  position so the leading / trailing edge fade only appears when
  *  there's actually more content in that direction — the first chip
  *  and last chip stay crisp when they're pinned to the visible edge. */
+/** Per-category outline icons rendered above the label inside each
+ *  PrimaryChipsRow chip. All icons share a 24×24 viewBox and use
+ *  `stroke="currentColor"` so their tint inherits from the chip's
+ *  text colour (dim when inactive, full-contrast when active). Only
+ *  outlines — no fills — per the user's spec.
+ *
+ *  Icon designs, in `CATEGORIES` order:
+ *    slime         → single circle
+ *    inner-slime   → circle within circle
+ *    compact       → 7 small circles arranged as a ring (1 centre + 6)
+ *    chunk         → outer circle with 2 diagonal small circles inside
+ *    paper         → 11 diagonal hatches arranged as a ring
+ *    powder        → 11 dots arranged as a ring
+ *    ink           → single wavy path traced as a closed circular loop
+ *    theme         → star + square + triangle arranged as a triangle
+ *    custom-beads  → "+" and circle side by side (horizontal)
+ */
+function CategoryIcon({ id }: { id: CategoryId }) {
+  const svgProps = {
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.6,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+    width: 22,
+    height: 22
+  }
+  if (id === 'slime') {
+    return (
+      <svg {...svgProps}>
+        <circle cx="12" cy="12" r="8" />
+      </svg>
+    )
+  }
+  if (id === 'inner-slime') {
+    return (
+      <svg {...svgProps}>
+        <circle cx="12" cy="12" r="9" />
+        <circle cx="12" cy="12" r="4" />
+      </svg>
+    )
+  }
+  if (id === 'compact') {
+    const dots: JSX.Element[] = []
+    dots.push(<circle key="c" cx={12} cy={12} r={1.9} />)
+    for (let i = 0; i < 6; i++) {
+      const a = (i * Math.PI) / 3
+      dots.push(
+        <circle
+          key={i}
+          cx={+(12 + 4 * Math.cos(a)).toFixed(2)}
+          cy={+(12 + 4 * Math.sin(a)).toFixed(2)}
+          r={1.9}
+        />
+      )
+    }
+    return <svg {...svgProps}>{dots}</svg>
+  }
+  if (id === 'chunk') {
+    return (
+      <svg {...svgProps}>
+        <circle cx="12" cy="12" r="9" />
+        <circle cx="9" cy="9" r="2.2" />
+        <circle cx="15" cy="15" r="2.2" />
+      </svg>
+    )
+  }
+  if (id === 'paper') {
+    const lines: JSX.Element[] = []
+    const N = 11
+    for (let i = 0; i < N; i++) {
+      const a = (i * 2 * Math.PI) / N
+      const cx = 12 + 7 * Math.cos(a)
+      const cy = 12 + 7 * Math.sin(a)
+      lines.push(
+        <line
+          key={i}
+          x1={+(cx - 1.2).toFixed(2)}
+          y1={+(cy - 1.2).toFixed(2)}
+          x2={+(cx + 1.2).toFixed(2)}
+          y2={+(cy + 1.2).toFixed(2)}
+        />
+      )
+    }
+    return <svg {...svgProps}>{lines}</svg>
+  }
+  if (id === 'powder') {
+    const dots: JSX.Element[] = []
+    const N = 11
+    for (let i = 0; i < N; i++) {
+      const a = (i * 2 * Math.PI) / N
+      dots.push(
+        <circle
+          key={i}
+          cx={+(12 + 7 * Math.cos(a)).toFixed(2)}
+          cy={+(12 + 7 * Math.sin(a)).toFixed(2)}
+          r={0.9}
+        />
+      )
+    }
+    return <svg {...svgProps}>{dots}</svg>
+  }
+  if (id === 'ink') {
+    const N = 60
+    const parts: string[] = []
+    for (let i = 0; i < N; i++) {
+      const t = (i * 2 * Math.PI) / N
+      const r = 7 + 1.3 * Math.sin(5 * t)
+      const x = 12 + r * Math.cos(t)
+      const y = 12 + r * Math.sin(t)
+      parts.push(`${i === 0 ? 'M' : 'L'}${x.toFixed(2)} ${y.toFixed(2)}`)
+    }
+    parts.push('Z')
+    return (
+      <svg {...svgProps}>
+        <path d={parts.join(' ')} />
+      </svg>
+    )
+  }
+  if (id === 'theme') {
+    // Star at top, square bottom-left, triangle bottom-right —
+    // three points of an equilateral-ish arrangement.
+    const starPts: string[] = []
+    const scx = 12
+    const scy = 6.5
+    const outer = 2.6
+    const inner = outer * 0.42
+    for (let i = 0; i < 10; i++) {
+      const r = i % 2 === 0 ? outer : inner
+      const a = -Math.PI / 2 + (i * Math.PI) / 5
+      starPts.push(
+        `${(scx + r * Math.cos(a)).toFixed(2)},${(scy + r * Math.sin(a)).toFixed(2)}`
+      )
+    }
+    return (
+      <svg {...svgProps}>
+        <polygon points={starPts.join(' ')} />
+        <rect x="4.5" y="14.5" width="5" height="5" />
+        <polygon points="19,14 22,19.5 16,19.5" />
+      </svg>
+    )
+  }
+  if (id === 'custom-beads') {
+    return (
+      <svg {...svgProps}>
+        <line x1="6" y1="8" x2="6" y2="16" />
+        <line x1="2" y1="12" x2="10" y2="12" />
+        <circle cx="17" cy="12" r="4" />
+      </svg>
+    )
+  }
+  return null
+}
+
 function PrimaryChipsRow({
   category,
   openCategory,
@@ -387,7 +580,10 @@ function PrimaryChipsRow({
               isActive ? closeCategory() : openCategory(c.id)
             }
           >
-            {c.label}
+            <span className={styles.primaryChipIcon}>
+              <CategoryIcon id={c.id} />
+            </span>
+            <span className={styles.primaryChipLabel}>{c.label}</span>
           </button>
         )
       })}
@@ -399,6 +595,10 @@ export default function CustomizePanel({
   colors,
   material,
   coating,
+  coatingColors,
+  foilColors,
+  onCoatingColors,
+  onFoilColors,
   shape,
   beads,
   sprinkles,
@@ -407,6 +607,8 @@ export default function CustomizePanel({
   onMaterial,
   onCoating,
   onShape,
+  crunchOn,
+  onCrunchOn,
   onBeads,
   onSprinkles,
   onEmojiBeads,
@@ -424,9 +626,17 @@ export default function CustomizePanel({
   onCustomBeads,
   customBeadsPhotoOn,
   onPickCustomBeadsPhoto,
-  onClearCustomBeadsPhoto
+  onClearCustomBeadsPhoto,
+  onActivePanelChange,
+  onRegisterOpenCategory
 }: Props) {
   const [category, setCategory] = useState<CategoryId | null>(null)
+  useEffect(() => {
+    // Mirror the panel's active category out to the parent so the unified
+    // tag row can render per-category chrome (currently only the 슬라임 안
+    // toggle for the four embed-capable leaves).
+    onActivePanelChange?.(category)
+  }, [category, onActivePanelChange])
   // Whether the photo sub-options row (containing "+" slot buttons)
   // is currently unfolded under the sub-cat tab strip. Toggled by
   // the leading camera chip. Auto-closed on category switch so a
@@ -436,23 +646,48 @@ export default function CustomizePanel({
   // sub-cat the user was on so re-entering the category feels continuous.
   const [slimeSub, setSlimeSub] = useState<SlimeSub>('color')
   const [beadsSub, setBeadsSub] = useState<string>('color')
-  const [sprinkleType, setSprinkleType] = useState<SprinkleTypeId>('paper')
   // Sub-cat inside a sprinkle type — defaults to 'count' so drilling into
   // paper / powder / ink lands the user on the amount slider first (the
   // most common tweak) instead of the colour picker.
   const [sprinkleSub, setSprinkleSub] = useState<string>('count')
-  // Two-step drill for sprinkles: entering the category shows ONLY the
-  // 2nd-level picker (type) — the sub-cat chips + detail control appear
-  // once the user commits to a type. Beads used to have the same drill
-  // but the compact / chunk combos are now dedicated top-level chips,
-  // so there's no drill state for beads anymore.
-  const [sprinklesDrilled, setSprinklesDrilled] = useState(false)
   // The colour chip whose hue / lightness sliders are currently visible
   // under the chip row. Shared across slime + beads panels because
   // colour adjustments themselves are shared — clicking a chip in
   // either surface opens its sliders for tuning within-family.
+  // Accepts any adjustment key (ColorId for slime/beads, `sp:<id>` for
+   // sprinkle types) since sprinkle-colour adjustments share the same
+   // colorAdjustments map under a namespaced key.
   const [activeAdjustColor, setActiveAdjustColor] =
-    useState<ColorId | null>(null)
+    useState<string | null>(null)
+
+  // Attach scroll-edge detection to every `.options` row currently in
+  // the panel — mirrors PrimaryChipsRow's behaviour so the mask fade
+  // only appears on the side that actually has more content, keeping
+  // the first / last chip fully crisp when the row is scrolled to
+  // that extreme. Runs on every render because .options divs mount
+  // and unmount as the user drills between categories.
+  useEffect(() => {
+    const rows = Array.from(
+      document.querySelectorAll<HTMLDivElement>('.' + styles.options)
+    )
+    const cleanups: (() => void)[] = []
+    rows.forEach((row) => {
+      const update = () => {
+        const max = row.scrollWidth - row.clientWidth
+        row.dataset.atStart = String(row.scrollLeft <= 1)
+        row.dataset.atEnd = String(max <= 0 || row.scrollLeft >= max - 1)
+      }
+      update()
+      row.addEventListener('scroll', update, { passive: true })
+      const ro = new ResizeObserver(update)
+      ro.observe(row)
+      cleanups.push(() => {
+        row.removeEventListener('scroll', update)
+        ro.disconnect()
+      })
+    })
+    return () => cleanups.forEach((c) => c())
+  })
   // Single hidden <input> reused for every photo pick — the pending
   // target (sticker | first empty photo bead slot) is stashed in this
   // ref so the file input's onChange dispatches to the right handler.
@@ -518,39 +753,99 @@ export default function CustomizePanel({
     if (c === 'inner-slime' && innerSlime.combo !== 'chunk') {
       const cfg = BEAD_COMBOS.find((x) => x.id === 'chunk')
       if (cfg) {
+        // Coerce the material to a valid slime MaterialId on first entry
+        // — legacy configs may still carry BeadMaterialId 'plastic' from
+        // before 슬라임볼 switched to the MATERIALS palette.
+        const materialValid = MATERIALS.some(
+          (m) => m.id === innerSlime.material
+        )
+        // Inherit the slime's own shape — a cube slime should get a
+        // cube 슬라임볼 by default, sphere → sphere, etc. rect/twist
+        // fall back to their closest bead-shape analogue.
+        const inheritedShape: BeadShapeId =
+          shape === 'cube' || shape === 'rect'
+            ? 'cube'
+            : 'sphere'
         onInnerSlime({
           ...innerSlime,
           combo: 'chunk',
           ...cfg.defaults,
+          // 슬라임볼 defaults to a single ball at MAX size (0.58) so the
+          // core reads as a dominant buried element straight away —
+          // matches the 슬라임볼 size-slider ceiling for count === 1.
+          size: 0.58,
           count: 1,
-          coating: 'none'
+          shapes: [inheritedShape],
+          coating: 'none',
+          // 슬라임볼 default is 광택 — polished candy with a mirror
+          // clearcoat, opaque so single- and multi-colour balls render
+          // at the same size (opaqueBallMaterial hides the wrap-shell).
+          material: materialValid
+            ? (innerSlime.material as MaterialId)
+            : 'glossy'
         })
       }
     }
-    if (c === 'sprinkles') {
-      setSprinklesDrilled(false)
-      // Paper is a separate primary chip now — if the sprinkles
-      // state left sprinkleType on 'paper', it'd land the user on
-      // an option that's been filtered out of the picker. Reset to
-      // powder so the panel shows something valid.
-      if (sprinkleType === 'paper') setSprinkleType('powder')
-    }
-    // 납작종이 is a dedicated leaf that shares the sprinkles panel
-    // implementation with sprinkleType forced to 'paper'. Auto-drill
-    // so the sub-cat control is visible immediately + turn on fill
-    // by default so the surface reads as populated the moment the
-    // user clicks the primary chip.
+    // 스팽글 / 가루 / 잉크 are each dedicated leaves. sprinkleType is
+    // pinned to the matching type so the shared panel renders that type's
+    // sub-cats. 스팽글 also seeds fill=true + a default color so the
+    // surface reads populated the moment the user opens the leaf.
     if (c === 'paper') {
-      setSprinkleType('paper')
-      setSprinklesDrilled(true)
+      // 스팽글 lands on 종류 first — that's the identity choice
+      // (paper vs plastic) users typically pick before tuning count /
+      // colour / shape, so it belongs at the top of the sub-cat row.
+      setSprinkleSub('kind')
       if (!sprinkles.paper.fill && sprinkles.paper.count === 0) {
         onSprinkles({
           ...sprinkles,
-          paper: { ...sprinkles.paper, fill: true }
+          paper: {
+            ...sprinkles.paper,
+            fill: true,
+            colors:
+              sprinkles.paper.colors.length > 0
+                ? sprinkles.paper.colors
+                : [SPRINKLE_COLORS[0].id]
+          }
         })
       }
     }
+    if (c === 'powder') {
+      setSprinkleSub('count')
+    }
+    if (c === 'ink') {
+      setSprinkleSub('count')
+    }
+    // 커스텀비즈 lands on the 양(count) sub-cat first, and if there
+    // aren't any beads yet, seeds count=2 so the user sees beads on
+    // the slime immediately without having to touch the slider.
+    if (c === 'custom-beads') {
+      setBeadsSub('count')
+      if (customBeads.count === 0) {
+        onCustomBeads({ ...customBeads, count: 2 })
+      }
+    }
+    // Fresh entry into any category clears the persisted colour-
+    // adjust focus so the panel doesn't auto-open a slider row from
+    // a previous session — the user only sees hue / lightness after
+    // clicking a specific colour chip on this visit.
+    setActiveAdjustColor(null)
   }
+
+  // Expose openCategory to the parent via a ref-of-latest so tag clicks
+  // in SlimeApp's unified tag row can jump straight into the panel that
+  // owns the tag. Registered once — the ref inside always points at the
+  // most recent closure so it stays in sync with current state.
+  const openCategoryLatestRef = useRef(openCategory)
+  openCategoryLatestRef.current = openCategory
+  useEffect(() => {
+    onRegisterOpenCategory?.((id) => {
+      if (id === null) {
+        setCategory(null)
+      } else {
+        openCategoryLatestRef.current(id as CategoryId)
+      }
+    })
+  }, [onRegisterOpenCategory])
 
   const toggleBeadShape = (id: BeadShapeId) => {
     const has = beads.shapes.includes(id)
@@ -606,12 +901,6 @@ export default function CustomizePanel({
 
   const catLabel = CATEGORIES.find((c) => c.id === category)?.label
   const goBack = () => {
-    // Drilled sprinkles view goes back to its 2nd-level picker
-    // first, THEN to the root chip row.
-    if (category === 'sprinkles' && sprinklesDrilled) {
-      setSprinklesDrilled(false)
-      return
-    }
     setCategory(null)
   }
 
@@ -706,7 +995,10 @@ export default function CustomizePanel({
               className={styles.tab}
               data-active={slimeSub === s.id}
               type="button"
-              onClick={() => setSlimeSub(s.id)}
+              onClick={() => {
+                setSlimeSub(s.id)
+                setActiveAdjustColor(null)
+              }}
             >
               {s.label}
             </button>
@@ -744,21 +1036,26 @@ export default function CustomizePanel({
                     key={c.id}
                     className={styles.chip}
                     data-active={active}
+                    data-adjust-target={activeAdjustColor === c.id ? 'true' : undefined}
                     type="button"
                     onClick={() => {
                       if (active) {
-                        if (activeAdjustColor === c.id) {
-                          // Second click on the already-focused chip
-                          // = full deselect. Empty selection is now
-                          // valid (slime falls back to a neutral
-                          // near-white via SlimeSphere).
-                          onColors(colors.filter((x) => x !== c.id))
-                          setActiveAdjustColor(null)
-                        } else {
-                          setActiveAdjustColor(c.id)
-                        }
+                        // Clicking an already-selected colour NEVER
+                        // deselects it — only switches which colour the
+                        // adjustment sliders act on. Removal happens
+                        // exclusively via the option's tag × button
+                        // (user's explicit UX rule).
+                        setActiveAdjustColor(c.id)
                       } else {
                         onColors([...colors, c.id])
+                        // Fresh pick that has never been tuned before:
+                        // seed the entry at zero so the sliders render
+                        // in the default state instead of an implicit
+                        // "undefined" that also happens to be zero but
+                        // reads inconsistently.
+                        if (colorAdjustments[c.id] === undefined) {
+                          onColorAdjustment(c.id, 0, 0)
+                        }
                         setActiveAdjustColor(c.id)
                       }
                     }}
@@ -803,19 +1100,128 @@ export default function CustomizePanel({
           </div>
         )}
         {slimeSub === 'coating' && (
-          <div className={styles.options}>
-            {COATINGS.map((c) => (
-              <button
-                key={c.id}
-                className={styles.chip}
-                data-active={coating === c.id}
-                type="button"
-                onClick={() => onCoating(c.id)}
-              >
-                <span className={styles.chipLabel}>{c.label}</span>
-              </button>
-            ))}
-          </div>
+          <>
+            <div className={styles.options}>
+              {COATINGS.map((c) => (
+                <button
+                  key={c.id}
+                  className={styles.chip}
+                  data-active={coating === c.id}
+                  type="button"
+                  onClick={() => onCoating(c.id)}
+                >
+                  <span className={styles.chipLabel}>{c.label}</span>
+                </button>
+              ))}
+            </div>
+            {(coating === 'wax' ||
+              coating === 'thinwax' ||
+              coating === 'tube' ||
+              coating === 'ice') && (
+              <>
+                <div className={styles.options}>
+                  {COLORS.map((c) => {
+                    const active = coatingColors.includes(c.id)
+                    const adjustKey = `wc:${c.id}`
+                    return (
+                      <button
+                        key={c.id}
+                        className={styles.chip}
+                        data-active={active}
+                        data-adjust-target={activeAdjustColor === adjustKey ? 'true' : undefined}
+                        type="button"
+                        onClick={() => {
+                          const has = coatingColors.includes(c.id)
+                          if (!has) {
+                            onCoatingColors([...coatingColors, c.id])
+                            if (colorAdjustments[adjustKey] === undefined) {
+                              onColorAdjustment(adjustKey, 0, 0)
+                            }
+                          }
+                          // Click on already-selected coating colour
+                          // only switches adjust target — removal via
+                          // tag × only, matching the body-colour UX.
+                          setActiveAdjustColor(adjustKey)
+                        }}
+                        aria-label={c.label}
+                        aria-pressed={active}
+                      >
+                        <span
+                          className={styles.swatch}
+                          style={{
+                            background: hexToCss(
+                              resolveWaxCoatingHex(c.id, colorAdjustments)
+                            )
+                          }}
+                        />
+                        <span className={styles.chipLabel}>{c.label}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+                {activeAdjustColor &&
+                  activeAdjustColor.startsWith('wc:') && (
+                    <ColorAdjustSliders
+                      colorId={activeAdjustColor}
+                      adjustments={colorAdjustments}
+                      onChange={onColorAdjustment}
+                    />
+                  )}
+              </>
+            )}
+            {coating === 'foil' && (
+              <>
+                <div className={styles.options}>
+                  {COATING_COLORS.map((c) => {
+                    const active = foilColors.includes(c.id)
+                    const adjustKey = `fc:${c.id}`
+                    return (
+                      <button
+                        key={c.id}
+                        className={styles.chip}
+                        data-active={active}
+                        data-adjust-target={activeAdjustColor === adjustKey ? 'true' : undefined}
+                        type="button"
+                        onClick={() => {
+                          const has = foilColors.includes(c.id)
+                          if (!has) {
+                            onFoilColors([...foilColors, c.id])
+                            if (colorAdjustments[adjustKey] === undefined) {
+                              onColorAdjustment(adjustKey, 0, 0)
+                            }
+                          }
+                          // Click on already-selected coating colour
+                          // only switches adjust target — removal via
+                          // tag × only, matching the body-colour UX.
+                          setActiveAdjustColor(adjustKey)
+                        }}
+                        aria-label={c.label}
+                        aria-pressed={active}
+                      >
+                        <span
+                          className={styles.swatch}
+                          style={{
+                            background: hexToCss(
+                              resolveFoilCoatingHex(c.id, colorAdjustments)
+                            )
+                          }}
+                        />
+                        <span className={styles.chipLabel}>{c.label}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+                {activeAdjustColor &&
+                  activeAdjustColor.startsWith('fc:') && (
+                    <ColorAdjustSliders
+                      colorId={activeAdjustColor}
+                      adjustments={colorAdjustments}
+                      onChange={onColorAdjustment}
+                    />
+                  )}
+              </>
+            )}
+          </>
         )}
         {slimeSub === 'shape' && (
           <div className={styles.options}>
@@ -830,6 +1236,20 @@ export default function CustomizePanel({
                 <span className={styles.chipLabel}>{s.label}</span>
               </button>
             ))}
+          </div>
+        )}
+        {slimeSub === 'crunch' && (
+          <div className={styles.options}>
+            <button
+              className={styles.chip}
+              data-active={crunchOn}
+              type="button"
+              onClick={() => onCrunchOn(!crunchOn)}
+            >
+              <span className={styles.chipLabel}>
+                {crunchOn ? '크런치 켬' : '크런치 끔'}
+              </span>
+            </button>
           </div>
         )}
       </div>
@@ -996,7 +1416,10 @@ export default function CustomizePanel({
               className={styles.tab}
               data-active={activeSub === s.id}
               type="button"
-              onClick={() => setBeadsSub(s.id)}
+              onClick={() => {
+                setBeadsSub(s.id)
+                setActiveAdjustColor(null)
+              }}
             >
               {s.label}
             </button>
@@ -1043,23 +1466,23 @@ export default function CustomizePanel({
         {activeSub === 'color' && (
           <>
             <div className={styles.options}>
-              {activeCombo === 'compact' && (
-                /* 그라데이션 토글: OFF → 반반 나눠진 밴드,
-                   ON → 부드러운 상하 그라데이션. beads.colors 두 개 이상
-                   일 때만 시각적으로 차이가 남. */
-                <button
-                  type="button"
-                  className={styles.chip}
-                  data-active={beads.gradient ? 'true' : undefined}
-                  onClick={() =>
-                    onBeads({ ...beads, gradient: !beads.gradient })
-                  }
-                  aria-label="그라데이션 토글"
-                  aria-pressed={!!beads.gradient}
-                >
-                  <GradientIcon />
-                </button>
-              )}
+              {/* 그라데이션 토글 — compact / chunk 양쪽에서 노출. OFF일
+                  때 다수색은 첫 색 하나만 적용, ON일 때 상하 그라데이션
+                  (compact = 슬라임 세로축 밴드, chunk = 비드마다 위→아래
+                  전체 팔레트) 사용. beads.colors 두 개 이상일 때만 실질
+                  차이가 남. */}
+              <button
+                type="button"
+                className={styles.chip}
+                data-active={beads.gradient ? 'true' : undefined}
+                onClick={() =>
+                  onBeads({ ...beads, gradient: !beads.gradient })
+                }
+                aria-label="그라데이션 토글"
+                aria-pressed={!!beads.gradient}
+              >
+                <GradientIcon />
+              </button>
               {BEAD_COLORS.map((c) => {
                 const active = beads.colors.includes(c.id)
                 return (
@@ -1067,6 +1490,7 @@ export default function CustomizePanel({
                     key={c.id}
                     className={styles.chip}
                     data-active={active}
+                    data-adjust-target={activeAdjustColor === c.id ? 'true' : undefined}
                     type="button"
                     onClick={() => {
                       // Same double-click semantics as slime: first
@@ -1074,20 +1498,18 @@ export default function CustomizePanel({
                       // chip deselects it, click a different active
                       // chip re-focuses without deselect.
                       if (active) {
-                        if (activeAdjustColor === c.id) {
-                          onBeads({
-                            ...beads,
-                            colors: beads.colors.filter((x) => x !== c.id)
-                          })
-                          setActiveAdjustColor(null)
-                        } else {
-                          setActiveAdjustColor(c.id)
-                        }
+                        // Click on already-selected colour never
+                        // deselects — only switches the adjust slider
+                        // target. Removal via tag × only.
+                        setActiveAdjustColor(c.id)
                       } else {
                         onBeads({
                           ...beads,
                           colors: [...beads.colors, c.id]
                         })
+                        if (colorAdjustments[c.id] === undefined) {
+                          onColorAdjustment(c.id, 0, 0)
+                        }
                         setActiveAdjustColor(c.id)
                       }
                     }}
@@ -1116,29 +1538,47 @@ export default function CustomizePanel({
             )}
           </>
         )}
-        {activeSub === 'count' && activeCombo === 'chunk' && (
+        {activeSub === 'count' && activeCombo === 'chunk' && (() => {
+          // Same fallback as 속슬라임: if beads.combo is still stuck at
+          // the compact / none default (size 0.13, below chunk sizeMin
+          // 0.3) after a global reset that landed the user on this tab,
+          // treat the slider ceiling as the chunk default so counts stay
+          // sensible, and snap size / fill into chunk defaults on move.
+          const chunkCfg = BEAD_COMBOS.find((x) => x.id === 'chunk')
+          const sizeForCap =
+            beads.combo === 'chunk'
+              ? beads.size
+              : (chunkCfg?.defaults.size ?? 0.46)
+          return (
           <div className={styles.sliderRow}>
             <input
               type="range"
               min={1}
-              max={beadChunkMaxCount(beads.size)}
+              max={beadChunkMaxCount(sizeForCap)}
               step={1}
-              value={Math.min(beads.count, beadChunkMaxCount(beads.size))}
-              onChange={(e) =>
+              value={Math.min(beads.count, beadChunkMaxCount(sizeForCap))}
+              onChange={(e) => {
+                const nextCount = parseInt(e.currentTarget.value)
+                const needsDefaults = beads.combo !== 'chunk'
                 onBeads({
                   ...beads,
-                  count: parseInt(e.currentTarget.value),
+                  ...(needsDefaults && chunkCfg
+                    ? chunkCfg.defaults
+                    : {}),
+                  combo: 'chunk',
+                  count: nextCount,
                   fill: false
                 })
-              }
+              }}
               className={styles.slider}
               aria-label="비즈 양"
             />
             <span className={styles.sliderValue}>
-              {Math.min(beads.count, beadChunkMaxCount(beads.size))}
+              {Math.min(beads.count, beadChunkMaxCount(sizeForCap))}
             </span>
           </div>
-        )}
+          )
+        })()}
         {activeSub === 'size' && (() => {
           const comboMin = combo?.sizeMin ?? BEADS_LIMITS.sizeMin
           // Per-shape min applies ONLY to the compact (mini) combo.
@@ -1223,7 +1663,10 @@ export default function CustomizePanel({
         })()}
         {activeSub === 'material' && (
           <div className={styles.options}>
-            {BEAD_MATERIALS.map((m) => (
+            {(activeCombo === 'compact'
+              ? COMPACT_BEAD_MATERIALS
+              : CHUNK_BEAD_MATERIALS
+            ).map((m) => (
               <button
                 key={m.id}
                 className={styles.chip}
@@ -1251,39 +1694,59 @@ export default function CustomizePanel({
             ))}
           </div>
         )}
+        {activeSub === 'flatness' && activeCombo === 'compact' && (
+          <div className={styles.sliderRow}>
+            <input
+              type="range"
+              min={0}
+              max={0.58}
+              step={0.05}
+              value={Math.min(beads.flatness ?? 0, 0.58)}
+              onChange={(e) =>
+                onBeads({
+                  ...beads,
+                  flatness: parseFloat(e.currentTarget.value)
+                })
+              }
+              className={styles.slider}
+              aria-label="꽉비즈 납작함"
+            />
+            <span className={styles.sliderValue}>
+              {Math.round(Math.min(beads.flatness ?? 0, 0.58) * 100)}%
+            </span>
+          </div>
+        )}
       </div>
     )
   }
 
-  /* ── Sprinkles: two-step drill.
-        Step 1 — only the type picker (종이/가루/잉크) is shown so the user
-        commits to a type before seeing its knobs.
-        Step 2 — after picking a type, the picker stays and the type's sub-cat
-        chips + active control render below. Back arrow returns to Step 1. */
-  if (category === 'sprinkles' || category === 'paper') {
-    // 납작종이 leaf reuses this whole panel with sprinkleType forced
-    // to 'paper' (openCategory set it) and the type picker hidden —
-    // users land straight in paper sub-cats. The regular sprinkles
-    // panel keeps the type picker but with paper filtered out.
-    const isPaperLeaf = category === 'paper'
-    const typeCfg = sprinkles[sprinkleType]
-    const subs = SPRINKLE_SUB_CATEGORIES[sprinkleType] ?? []
+  /* ── Sprinkle leaves (스팽글 / 가루 / 잉크): each is its own primary
+        chip now, so the type picker is never rendered — the sprinkleType
+        is force-set by openCategory to match the leaf and users land
+        directly in the sub-cat chips + active control. */
+  if (category === 'paper' || category === 'powder' || category === 'ink') {
+    // Derive the sprinkle type from the category itself instead of the
+    // sprinkleType state — that way switching primary chips can never
+    // show stale sub-cats for the previous type between renders.
+    const effectiveType: SprinkleTypeId = category
+    const typeCfg = sprinkles[effectiveType]
+    const subs = SPRINKLE_SUB_CATEGORIES[effectiveType] ?? []
     const activeSub = subs.some((s) => s.id === sprinkleSub)
       ? sprinkleSub
       : (subs[0]?.id ?? '')
-    const isPaper = sprinkleType === 'paper'
-    const isInk = sprinkleType === 'ink'
-    const showDetail = sprinklesDrilled && subs.length > 0
+    const isPaper = effectiveType === 'paper'
+    const isInk = effectiveType === 'ink'
+    // Each sprinkle leaf lands straight in its sub-cat picker — no
+    // step-1 type chip row to bounce through anymore.
+    const showDetail = subs.length > 0
     const countMax =
-      sprinkleType === 'paper'
+      effectiveType === 'paper'
         ? SPRINKLES_LIMITS.paperCountMax
-        : sprinkleType === 'powder'
+        : effectiveType === 'powder'
           ? SPRINKLES_LIMITS.powderCountMax
           : SPRINKLES_LIMITS.inkCountMax
-    // Per-type minimum count. Powder needs at least 85 grains to
-    // read as a real dust layer; other types can start at 0.
     const countMin =
-      sprinkleType === 'powder'
+      effectiveType === 'powder'
         ? SPRINKLES_LIMITS.powderCountMin
         : SPRINKLES_LIMITS.countMin
     // Tags for currently-active sprinkle type's selections. Removing
@@ -1291,18 +1754,18 @@ export default function CustomizePanel({
     // 'active' tag zeroes the count so the whole type turns off.
     const sprinkleTags: SelectionTag[] = []
     if (typeCfg.count > 0 || ('fill' in typeCfg && typeCfg.fill)) {
-      const tLabel = SPRINKLE_TYPES.find((t) => t.id === sprinkleType)?.label
+      const tLabel = SPRINKLE_TYPES.find((t) => t.id === effectiveType)?.label
       if (tLabel) {
         sprinkleTags.push({
-          key: `stype-${sprinkleType}`,
+          key: `stype-${effectiveType}`,
           label: `${tLabel} 사용중`,
           onRemove: () => {
-            if (sprinkleType === 'paper') {
+            if (effectiveType === 'paper') {
               onSprinkles({
                 ...sprinkles,
                 paper: { ...sprinkles.paper, count: 0, fill: false }
               })
-            } else if (sprinkleType === 'powder') {
+            } else if (effectiveType === 'powder') {
               onSprinkles({
                 ...sprinkles,
                 powder: { ...sprinkles.powder, count: 0, fill: false }
@@ -1320,16 +1783,16 @@ export default function CustomizePanel({
         const c = SPRINKLE_COLORS.find((x) => x.id === cid)
         if (!c) return
         sprinkleTags.push({
-          key: `sc-${sprinkleType}-${cid}`,
+          key: `sc-${effectiveType}-${cid}`,
           label: c.label,
           onRemove: () => {
             const next = typeCfg.colors.filter((x) => x !== cid)
-            if (sprinkleType === 'paper') {
+            if (effectiveType === 'paper') {
               onSprinkles({
                 ...sprinkles,
                 paper: { ...sprinkles.paper, colors: next }
               })
-            } else if (sprinkleType === 'powder') {
+            } else if (effectiveType === 'powder') {
               onSprinkles({
                 ...sprinkles,
                 powder: { ...sprinkles.powder, colors: next }
@@ -1348,44 +1811,6 @@ export default function CustomizePanel({
       <div className={styles.panel} data-hud>
         {primaryChipsRow}
         <Header title={catLabel} onBack={goBack} tags={sprinkleTags} />
-        {/* Type picker only shows in Step 1 (undrilled) of the plain
-            sprinkles leaf. 납작종이 leaf hides it entirely because the
-            type is pinned to 'paper'. Paper is filtered out of the
-            sprinkles picker too — it's reachable via its own primary
-            chip so the sprinkles tab focuses on 가루/잉크. */}
-        {!isPaperLeaf && !showDetail && (
-          <div className={styles.tabs}>
-            {SPRINKLE_TYPES.filter((t) => t.id !== 'paper').map((t) => {
-              // Highlight the currently-active type AND any type that
-              // already has grains applied, so users spot which they've
-              // configured at a glance while still on the picker.
-              const isOpen = sprinkleType === t.id
-              const isConfigured = sprinkles[t.id].count > 0
-              return (
-                <button
-                  key={t.id}
-                  className={styles.tab}
-                  data-active={isOpen || isConfigured}
-                  type="button"
-                  onClick={() => {
-                    setSprinkleType(t.id)
-                    // Jump straight to the '양' (count) sub-cat every time
-                    // a type is picked — that's the first tweak users
-                    // reach for, so opening on 색상 felt off. Falls back
-                    // to the type's first sub-cat only if 'count' isn't
-                    // in its list (defensive; every current type has it).
-                    const nextSubs = SPRINKLE_SUB_CATEGORIES[t.id]
-                    const hasCount = nextSubs.some((s) => s.id === 'count')
-                    setSprinkleSub(hasCount ? 'count' : nextSubs[0]?.id ?? '')
-                    setSprinklesDrilled(true)
-                  }}
-                >
-                  {t.label}
-                </button>
-              )
-            })}
-          </div>
-        )}
         {showDetail && (
           <div className={styles.tabs}>
             {subs.map((s) => (
@@ -1394,7 +1819,10 @@ export default function CustomizePanel({
                 className={styles.tab}
                 data-active={activeSub === s.id}
                 type="button"
-                onClick={() => setSprinkleSub(s.id)}
+                onClick={() => {
+                  setSprinkleSub(s.id)
+                  setActiveAdjustColor(null)
+                }}
               >
                 {s.label}
               </button>
@@ -1403,31 +1831,57 @@ export default function CustomizePanel({
         )}
         {showDetail && activeSub === 'color' && (
           <div className={styles.options}>
-            {SPRINKLE_COLORS.map((c) => (
-              <button
-                key={c.id}
-                className={styles.chip}
-                data-active={typeCfg.colors.includes(c.id)}
-                type="button"
-                onClick={() => toggleSprinkleColor(sprinkleType, c.id)}
-                aria-label={c.label}
-                aria-pressed={typeCfg.colors.includes(c.id)}
-              >
-                <span
-                  className={styles.swatch}
-                  style={{ background: hexToCss(c.hex) }}
-                />
-                <span className={styles.chipLabel}>{c.label}</span>
-              </button>
-            ))}
+            {SPRINKLE_COLORS.map((c) => {
+              // Sprinkle colours share the same colourAdjustments map
+              // as slime/beads, but under a `sp:` prefix so a sprinkle
+              // 'pink' tune doesn't collide with the slime 'pink' tune.
+              const adjustKey = `sp:${c.id}`
+              return (
+                <button
+                  key={c.id}
+                  className={styles.chip}
+                  data-active={typeCfg.colors.includes(c.id)}
+                  type="button"
+                  onClick={() => {
+                    const has = typeCfg.colors.includes(c.id)
+                    toggleSprinkleColor(effectiveType, c.id)
+                    if (!has) {
+                      if (colorAdjustments[adjustKey] === undefined) {
+                        onColorAdjustment(adjustKey, 0, 0)
+                      }
+                      setActiveAdjustColor(adjustKey)
+                    } else if (activeAdjustColor === adjustKey) {
+                      setActiveAdjustColor(null)
+                    } else {
+                      setActiveAdjustColor(adjustKey)
+                    }
+                  }}
+                  aria-label={c.label}
+                  aria-pressed={typeCfg.colors.includes(c.id)}
+                >
+                  <span
+                    className={styles.swatch}
+                    style={{ background: hexToCss(c.hex) }}
+                  />
+                  <span className={styles.chipLabel}>{c.label}</span>
+                </button>
+              )
+            })}
           </div>
+        )}
+        {showDetail && activeSub === 'color' && activeAdjustColor && (
+          <ColorAdjustSliders
+            colorId={activeAdjustColor}
+            adjustments={colorAdjustments}
+            onChange={onColorAdjustment}
+          />
         )}
         {showDetail && activeSub === 'count' && (() => {
           // Paper and powder both expose a "꽉 채우기" toggle in count —
           // paper's fills the surface with confetti pieces, powder's swaps
           // the marble-ribbon distribution for a uniform coating scatter.
           // Ink has no fill mode (it's a shader effect).
-          const isPowder = sprinkleType === 'powder'
+          const isPowder = effectiveType === 'powder'
           const supportsFill = isPaper || isPowder
           const isFilling =
             (isPaper && sprinkles.paper.fill) ||
@@ -1444,11 +1898,31 @@ export default function CustomizePanel({
                   onChange={(e) => {
                     const count = parseInt(e.currentTarget.value)
                     if (isPaper) {
-                      updateSprinkleSub('paper', { count, fill: false })
+                      updateSprinkleSub('paper', {
+                        count,
+                        fill: false,
+                        colors:
+                          sprinkles.paper.colors.length > 0
+                            ? sprinkles.paper.colors
+                            : [SPRINKLE_COLORS[0].id]
+                      })
                     } else if (isPowder) {
-                      updateSprinkleSub('powder', { count, fill: false })
+                      updateSprinkleSub('powder', {
+                        count,
+                        fill: false,
+                        colors:
+                          sprinkles.powder.colors.length > 0
+                            ? sprinkles.powder.colors
+                            : [SPRINKLE_COLORS[0].id]
+                      })
                     } else {
-                      updateSprinkleSub(sprinkleType, { count })
+                      updateSprinkleSub(effectiveType, {
+                        count,
+                        colors:
+                          typeCfg.colors.length > 0
+                            ? typeCfg.colors
+                            : [SPRINKLE_COLORS[0].id]
+                      })
                     }
                   }}
                   className={styles.slider}
@@ -1484,27 +1958,35 @@ export default function CustomizePanel({
             </div>
           )
         })()}
-        {showDetail && activeSub === 'size' && isPaper && (
-          <div className={styles.sliderRow}>
-            <input
-              type="range"
-              min={SPRINKLES_LIMITS.sizeMin}
-              max={SPRINKLES_LIMITS.sizeMax}
-              step={0.005}
-              value={sprinkles.paper.size}
-              onChange={(e) =>
-                updateSprinkleSub('paper', {
-                  size: parseFloat(e.currentTarget.value)
-                })
-              }
-              className={styles.slider}
-              aria-label="스프링클 크기"
-            />
-            <span className={styles.sliderValue}>
-              {sprinkles.paper.size.toFixed(2)}
-            </span>
-          </div>
-        )}
+        {showDetail && activeSub === 'size' && isPaper && (() => {
+          // Plastic pieces stop reading as chunky beads below ~0.05 —
+          // they collapse into visual noise. Floor plastic's slider at
+          // 0.05 while paper keeps the full 0.03 range.
+          const isPlastic = sprinkles.paper.kind === 'plastic'
+          const sMin = isPlastic ? 0.05 : SPRINKLES_LIMITS.sizeMin
+          const clamped = Math.max(sprinkles.paper.size, sMin)
+          return (
+            <div className={styles.sliderRow}>
+              <input
+                type="range"
+                min={sMin}
+                max={SPRINKLES_LIMITS.sizeMax}
+                step={0.005}
+                value={clamped}
+                onChange={(e) =>
+                  updateSprinkleSub('paper', {
+                    size: parseFloat(e.currentTarget.value)
+                  })
+                }
+                className={styles.slider}
+                aria-label="스프링클 크기"
+              />
+              <span className={styles.sliderValue}>
+                {clamped.toFixed(2)}
+              </span>
+            </div>
+          )
+        })()}
         {showDetail && activeSub === 'shape' && isPaper && (
           <div className={styles.options}>
             {SPRINKLE_SHAPES.map((s) => (
@@ -1525,7 +2007,7 @@ export default function CustomizePanel({
         {showDetail && activeSub === 'material' && !isInk && (
           <div className={styles.options}>
             {SPRINKLE_MATERIALS.filter((m) =>
-              SPRINKLE_MATERIALS_BY_TYPE[sprinkleType].includes(m.id)
+              SPRINKLE_MATERIALS_BY_TYPE[effectiveType].includes(m.id)
             ).map((m) => (
               <button
                 key={m.id}
@@ -1543,6 +2025,31 @@ export default function CustomizePanel({
                 }
               >
                 <span className={styles.chipLabel}>{m.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {showDetail && activeSub === 'kind' && isPaper && (
+          <div className={styles.options}>
+            {SPANGLE_KINDS.map((k) => (
+              <button
+                key={k.id}
+                className={styles.chip}
+                data-active={sprinkles.paper.kind === k.id}
+                type="button"
+                onClick={() => {
+                  // Plastic reads best at max size — a chunky moulded
+                  // bead look. Snap the size slider up on the plastic
+                  // pick so the user sees the intended silhouette without
+                  // having to hunt for the size sub-cat.
+                  const patch: Partial<typeof sprinkles.paper> = { kind: k.id }
+                  if (k.id === 'plastic') {
+                    patch.size = SPRINKLES_LIMITS.sizeMax
+                  }
+                  updateSprinkleSub('paper', patch)
+                }}
+              >
+                <span className={styles.chipLabel}>{k.label}</span>
               </button>
             ))}
           </div>
@@ -1587,13 +2094,17 @@ export default function CustomizePanel({
           })
       })
     })
-    if (innerSlime.material !== 'plastic') {
-      const bm = BEAD_MATERIALS.find((x) => x.id === innerSlime.material)
-      if (bm) {
+    // 슬라임볼 material palette matches the slime's own (crystal / glossy /
+    // matte / metal); tag it against MATERIALS instead of BEAD_MATERIALS,
+    // and treat 'crystal' as the default (no chip → no tag).
+    if (innerSlime.material !== 'crystal') {
+      const sm = MATERIALS.find((x) => x.id === innerSlime.material)
+      if (sm) {
         beadTags.push({
           key: `is-m-${innerSlime.material}`,
-          label: bm.label,
-          onRemove: () => onInnerSlime({ ...innerSlime, material: 'plastic' })
+          label: sm.label,
+          onRemove: () =>
+            onInnerSlime({ ...innerSlime, material: 'crystal' })
         })
       }
     }
@@ -1609,7 +2120,12 @@ export default function CustomizePanel({
     }
     const isSphereMin = beadShapesMinSize(innerSlime.shapes)
     const sizeMin = Math.max(combo?.sizeMin ?? BEADS_LIMITS.sizeMin, isSphereMin)
-    const sizeMax = combo?.sizeMax ?? BEADS_LIMITS.sizeMax
+    // 슬라임볼 lets a SINGLE ball grow up to 0.58 so it reads as a
+    // notably larger core than the multi-ball chunk max (0.46) without
+    // overflowing the slime volume. Multi-ball layouts stay on the
+    // chunk sizeMax (0.46).
+    const sizeMax =
+      innerSlime.count <= 1 ? 0.58 : combo?.sizeMax ?? BEADS_LIMITS.sizeMax
     const clampedSize = Math.min(
       Math.max(innerSlime.size, sizeMin),
       sizeMax
@@ -1625,7 +2141,10 @@ export default function CustomizePanel({
               className={styles.tab}
               data-active={activeSub === s.id}
               type="button"
-              onClick={() => setBeadsSub(s.id)}
+              onClick={() => {
+                setBeadsSub(s.id)
+                setActiveAdjustColor(null)
+              }}
             >
               {s.label}
             </button>
@@ -1633,20 +2152,46 @@ export default function CustomizePanel({
         </div>
         {activeSub === 'color' && (
           <div className={styles.options}>
+            {/* Gradient toggle — same as beads. Multi-colour slime ball
+                only shows a top-to-bottom gradient when ON; otherwise
+                the ball uses the first picked colour. */}
+            <button
+              type="button"
+              className={styles.chip}
+              data-active={innerSlime.gradient ? 'true' : undefined}
+              onClick={() =>
+                onInnerSlime({
+                  ...innerSlime,
+                  gradient: !innerSlime.gradient
+                })
+              }
+              aria-label="그라데이션 토글"
+              aria-pressed={!!innerSlime.gradient}
+            >
+              <GradientIcon />
+            </button>
             {BEAD_COLORS.map((c) => (
               <button
                 key={c.id}
                 className={styles.chip}
                 data-active={innerSlime.colors.includes(c.id)}
+                data-adjust-target={activeAdjustColor === c.id ? 'true' : undefined}
                 type="button"
                 onClick={() => {
                   const has = innerSlime.colors.includes(c.id)
-                  onInnerSlime({
-                    ...innerSlime,
-                    colors: has
-                      ? innerSlime.colors.filter((x) => x !== c.id)
-                      : [...innerSlime.colors, c.id]
-                  })
+                  if (!has) {
+                    onInnerSlime({
+                      ...innerSlime,
+                      colors: [...innerSlime.colors, c.id]
+                    })
+                    if (colorAdjustments[c.id] === undefined) {
+                      onColorAdjustment(c.id, 0, 0)
+                    }
+                  }
+                  // Click on already-selected colour never deselects —
+                  // only switches the adjust slider target. Removal
+                  // via tag × only.
+                  setActiveAdjustColor(c.id)
                 }}
                 aria-label={c.label}
                 aria-pressed={innerSlime.colors.includes(c.id)}
@@ -1664,36 +2209,63 @@ export default function CustomizePanel({
             ))}
           </div>
         )}
-        {activeSub === 'count' && (
+        {activeSub === 'color' && activeAdjustColor && (
+          <ColorAdjustSliders
+            colorId={activeAdjustColor}
+            adjustments={colorAdjustments}
+            onChange={onColorAdjustment}
+          />
+        )}
+        {activeSub === 'count' && (() => {
+          // If the ball hasn't been flipped into the chunk combo yet
+          // (e.g. after a global reset that dropped innerSlime back to
+          // BEADS_DEFAULT while the user was still on this tab), the
+          // stored size (0.13) is below chunk's 0.3 sizeMin and would
+          // render as tiny sub-min balls. Coerce the slider ceiling to
+          // the chunk default and, when the user actually moves the
+          // slider, spread the chunk defaults so size / fill snap to
+          // sensible chunk values as the combo flips over.
+          const chunkCfg = BEAD_COMBOS.find((x) => x.id === 'chunk')
+          const sizeForCap =
+            innerSlime.combo === 'chunk'
+              ? innerSlime.size
+              : (chunkCfg?.defaults.size ?? 0.46)
+          return (
           <div className={styles.sliderRow}>
             <input
               type="range"
               min={1}
-              max={beadChunkMaxCount(innerSlime.size)}
+              max={beadChunkMaxCount(sizeForCap)}
               step={1}
               value={Math.min(
                 innerSlime.count,
-                beadChunkMaxCount(innerSlime.size)
+                beadChunkMaxCount(sizeForCap)
               )}
-              onChange={(e) =>
+              onChange={(e) => {
+                const nextCount = parseInt(e.currentTarget.value)
+                const needsDefaults = innerSlime.combo !== 'chunk'
                 onInnerSlime({
                   ...innerSlime,
+                  ...(needsDefaults && chunkCfg
+                    ? chunkCfg.defaults
+                    : {}),
                   combo: 'chunk',
-                  count: parseInt(e.currentTarget.value),
+                  count: nextCount,
                   fill: false
                 })
-              }
+              }}
               className={styles.slider}
               aria-label="속슬라임 양"
             />
             <span className={styles.sliderValue}>
               {Math.min(
                 innerSlime.count,
-                beadChunkMaxCount(innerSlime.size)
+                beadChunkMaxCount(sizeForCap)
               )}
             </span>
           </div>
-        )}
+          )
+        })()}
         {activeSub === 'size' && (
           <div className={styles.sliderRow}>
             <input
@@ -1747,7 +2319,7 @@ export default function CustomizePanel({
         )}
         {activeSub === 'material' && (
           <div className={styles.options}>
-            {BEAD_MATERIALS.map((m) => (
+            {MATERIALS.map((m) => (
               <button
                 key={m.id}
                 className={styles.chip}
@@ -1763,21 +2335,81 @@ export default function CustomizePanel({
           </div>
         )}
         {activeSub === 'coating' && (
-          <div className={styles.options}>
-            {COATINGS.map((c) => (
-              <button
-                key={c.id}
-                className={styles.chip}
-                data-active={innerSlime.coating === c.id}
-                type="button"
-                onClick={() =>
-                  onInnerSlime({ ...innerSlime, coating: c.id })
-                }
-              >
-                <span className={styles.chipLabel}>{c.label}</span>
-              </button>
-            ))}
-          </div>
+          <>
+            <div className={styles.options}>
+              {COATINGS.map((c) => (
+                <button
+                  key={c.id}
+                  className={styles.chip}
+                  data-active={innerSlime.coating === c.id}
+                  type="button"
+                  onClick={() =>
+                    onInnerSlime({ ...innerSlime, coating: c.id })
+                  }
+                >
+                  <span className={styles.chipLabel}>{c.label}</span>
+                </button>
+              ))}
+            </div>
+            {innerSlime.coating !== 'none' && (
+              <>
+                <div className={styles.options}>
+                  {COLORS.map((c) => {
+                    const active = (innerSlime.coatingColors ?? []).includes(
+                      c.id
+                    )
+                    const adjustKey = `ic:${c.id}`
+                    return (
+                      <button
+                        key={c.id}
+                        className={styles.chip}
+                        data-active={active}
+                        data-adjust-target={activeAdjustColor === adjustKey ? 'true' : undefined}
+                        type="button"
+                        onClick={() => {
+                          const cur = innerSlime.coatingColors ?? []
+                          const has = cur.includes(c.id)
+                          if (!has) {
+                            onInnerSlime({
+                              ...innerSlime,
+                              coatingColors: [...cur, c.id]
+                            })
+                            if (colorAdjustments[adjustKey] === undefined) {
+                              onColorAdjustment(adjustKey, 0, 0)
+                            }
+                          }
+                          // Click on already-selected coating colour
+                          // only switches adjust target — removal via
+                          // tag × only.
+                          setActiveAdjustColor(adjustKey)
+                        }}
+                        aria-label={c.label}
+                        aria-pressed={active}
+                      >
+                        <span
+                          className={styles.swatch}
+                          style={{
+                            background: hexToCss(
+                              resolveInnerCoatingHex(c.id, colorAdjustments)
+                            )
+                          }}
+                        />
+                        <span className={styles.chipLabel}>{c.label}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+                {activeAdjustColor &&
+                  activeAdjustColor.startsWith('ic:') && (
+                    <ColorAdjustSliders
+                      colorId={activeAdjustColor}
+                      adjustments={colorAdjustments}
+                      onChange={onColorAdjustment}
+                    />
+                  )}
+              </>
+            )}
+          </>
         )}
       </div>
     )
@@ -1874,7 +2506,10 @@ export default function CustomizePanel({
               className={styles.tab}
               data-active={activeSub === s.id}
               type="button"
-              onClick={() => setBeadsSub(s.id)}
+              onClick={() => {
+                setBeadsSub(s.id)
+                setActiveAdjustColor(null)
+              }}
             >
               {s.label}
             </button>
@@ -1900,35 +2535,70 @@ export default function CustomizePanel({
         )}
         {activeSub === 'color' && (
           <div className={styles.options}>
-            {BEAD_COLORS.map((c) => (
-              <button
-                key={c.id}
-                className={styles.chip}
-                data-active={customBeads.colors.includes(c.id)}
-                type="button"
-                onClick={() => {
-                  const has = customBeads.colors.includes(c.id)
-                  onCustomBeads({
-                    ...customBeads,
-                    colors: has
-                      ? customBeads.colors.filter((x) => x !== c.id)
-                      : [...customBeads.colors, c.id]
-                  })
-                }}
-                aria-pressed={customBeads.colors.includes(c.id)}
-              >
-                <span
-                  className={styles.swatch}
-                  style={{
-                    background: hexToCss(
-                      resolveColorHex(c.id, colorAdjustments)
-                    )
+            {/* Gradient toggle mirrors the compact-beads one — 2+
+                palette picks interpolate across beads when active. */}
+            <button
+              type="button"
+              className={styles.chip}
+              data-active={customBeads.gradient ? 'true' : undefined}
+              onClick={() =>
+                onCustomBeads({
+                  ...customBeads,
+                  gradient: !customBeads.gradient
+                })
+              }
+              aria-label="그라데이션 토글"
+              aria-pressed={!!customBeads.gradient}
+            >
+              <GradientIcon />
+            </button>
+            {BEAD_COLORS.map((c) => {
+              const adjustKey = `cb:${c.id}`
+              return (
+                <button
+                  key={c.id}
+                  className={styles.chip}
+                  data-active={customBeads.colors.includes(c.id)}
+                  data-adjust-target={activeAdjustColor === adjustKey ? 'true' : undefined}
+                  type="button"
+                  onClick={() => {
+                    const has = customBeads.colors.includes(c.id)
+                    if (!has) {
+                      onCustomBeads({
+                        ...customBeads,
+                        colors: [...customBeads.colors, c.id]
+                      })
+                      if (colorAdjustments[adjustKey] === undefined) {
+                        onColorAdjustment(adjustKey, 0, 0)
+                      }
+                    }
+                    // Click on already-selected colour never deselects
+                    // — only switches the adjust slider target. Removal
+                    // via tag × only.
+                    setActiveAdjustColor(adjustKey)
                   }}
-                />
-                <span className={styles.chipLabel}>{c.label}</span>
-              </button>
-            ))}
+                  aria-pressed={customBeads.colors.includes(c.id)}
+                >
+                  <span
+                    className={styles.swatch}
+                    style={{
+                      background: hexToCss(
+                        resolveCustomBeadHex(c.id, colorAdjustments)
+                      )
+                    }}
+                  />
+                  <span className={styles.chipLabel}>{c.label}</span>
+                </button>
+              )
+            })}
           </div>
+        )}
+        {activeSub === 'color' && activeAdjustColor && (
+          <ColorAdjustSliders
+            colorId={activeAdjustColor}
+            adjustments={colorAdjustments}
+            onChange={onColorAdjustment}
+          />
         )}
         {activeSub === 'count' && (
           <div className={styles.sliderRow}>
@@ -1945,7 +2615,7 @@ export default function CustomizePanel({
                 })
               }
               className={styles.slider}
-              aria-label="커스텀비즈 양"
+              aria-label="추가비즈 양"
             />
             <span className={styles.sliderValue}>
               {customBeads.count}
@@ -1967,7 +2637,7 @@ export default function CustomizePanel({
                 })
               }
               className={styles.slider}
-              aria-label="커스텀비즈 크기"
+              aria-label="추가비즈 크기"
             />
             <span className={styles.sliderValue}>
               {customBeads.size.toFixed(2)}
@@ -2004,9 +2674,9 @@ export default function CustomizePanel({
             <input
               type="range"
               min={0}
-              max={0.9}
+              max={0.58}
               step={0.05}
-              value={Math.min(customBeads.flatness, 0.9)}
+              value={Math.min(customBeads.flatness, 0.58)}
               onChange={(e) =>
                 onCustomBeads({
                   ...customBeads,
@@ -2014,10 +2684,10 @@ export default function CustomizePanel({
                 })
               }
               className={styles.slider}
-              aria-label="커스텀비즈 납작함"
+              aria-label="추가비즈 납작함"
             />
             <span className={styles.sliderValue}>
-              {Math.round(Math.min(customBeads.flatness, 0.9) * 100)}%
+              {Math.round(Math.min(customBeads.flatness, 0.58) * 100)}%
             </span>
           </div>
         )}
@@ -2160,8 +2830,17 @@ export default function CustomizePanel({
 
 export type SelectionTag = {
   key: string
-  label: string
+  label?: string
+  /** Optional swatch. When present the tag renders a filled circle
+   *  in this colour instead of (or alongside) the label. Format is
+   *  any valid CSS colour string (`#a1b2c3`, `rgb(...)`, etc.). */
+  swatchColor?: string
   onRemove: () => void
+  /** Optional category id to navigate to when the tag body is
+   *  clicked (i.e. clicking anywhere on the pill EXCEPT the ×
+   *  button). Lets users jump straight from a tag back into the
+   *  option that owns it. */
+  targetCategory?: string
 }
 
 function Header(_: {

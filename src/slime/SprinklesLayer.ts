@@ -1,8 +1,10 @@
 import * as THREE from 'three'
 import {
-  SPRINKLE_COLORS,
   SPRINKLE_MATERIAL_PARAMS,
   SPRINKLES_LIMITS,
+  resolveSprinkleColorHex,
+  type ColorAdjustments,
+  type SpangleKindId,
   type SprinkleColorId,
   type SprinkleMaterialId,
   type SprinkleShapeId,
@@ -24,6 +26,11 @@ export interface SprinklesLayerConfig {
   shape: SprinkleShapeId
   material: SprinkleMaterialId
   fill: boolean
+  /** 스팽글 종류. Only meaningful when type === 'paper': 'plastic'
+   *  overrides the material chip with a glossy-plastic look and thickens
+   *  the extrusion depth so the pieces read as chunky beads instead of
+   *  paper-thin confetti. Ignored for powder/ink. */
+  kind?: SpangleKindId
 }
 
 const MAX_SPRINKLES = 150000
@@ -69,6 +76,7 @@ export class SprinklesLayer {
   private fillSpin: Float32Array = new Float32Array(0)
 
   private currentMaterialId: SprinkleMaterialId = 'glitter'
+  private currentKind: SpangleKindId | undefined = undefined
   /** Tracks which geometry is currently on the InstancedMesh. Uses the
    *  sentinel string 'powder' when a faceted powder grain is bound, else a
    *  standard SprinkleShapeId. Lets swapGeometry detect the powder-⇄-paper
@@ -83,6 +91,7 @@ export class SprinklesLayer {
     material: 'glitter',
     fill: false
   }
+  private currentColorAdjustments: ColorAdjustments | undefined = undefined
 
   private readonly _matrix = new THREE.Matrix4()
   private readonly _pos = new THREE.Vector3()
@@ -108,8 +117,9 @@ export class SprinklesLayer {
       color: 0xffffff,
       side: THREE.DoubleSide
     })
-    this.applyMaterialParams(mat, this.config.material)
+    this.applyMaterialParams(mat, this.config.material, this.config.kind)
     this.currentMaterialId = this.config.material
+    this.currentKind = this.config.kind
     this.currentShapeKey = this.config.shape
     const im = new THREE.InstancedMesh(geo, mat, MAX_SPRINKLES)
     im.frustumCulled = false
@@ -133,8 +143,13 @@ export class SprinklesLayer {
 
   private applyMaterialParams(
     mat: THREE.MeshPhysicalMaterial,
-    id: SprinkleMaterialId
+    id: SprinkleMaterialId,
+    kind?: SpangleKindId
   ) {
+    // Start from the material preset so 무광/반짝이/크리스탈 keep driving
+    // the underlying look (roughness / metalness / sheen / iridescence /
+    // transmission). This is the base for BOTH kinds — paper renders it
+    // as-is, plastic layers a glossy clearcoat on top below.
     const p = SPRINKLE_MATERIAL_PARAMS[id]
     mat.roughness = p.roughness
     mat.metalness = p.metalness
@@ -151,7 +166,42 @@ export class SprinklesLayer {
     mat.transmission = p.transmission ?? 0
     mat.thickness = p.thickness ?? 0
     if (p.ior !== undefined) mat.ior = p.ior
+    // 플라스틱 종류: force a hard glossy clearcoat over whatever material
+    // preset the user picked so the surface reads as moulded plastic
+    // regardless of base material. Base roughness / metalness / sheen /
+    // iridescence / transmission from the material preset are preserved
+    // so 반짝이 plastic still sparkles, 크리스탈 plastic still transmits
+    // light, 무광 plastic reads as diffuse under the shiny coat.
+    if (kind === 'plastic') {
+      mat.clearcoat = 1.0
+      mat.clearcoatRoughness = 0.03
+      // Bump envMap so the plastic coat picks up the room reflection
+      // strongly (that's what makes plastic read as plastic).
+      mat.envMapIntensity = Math.max(mat.envMapIntensity, 1.4)
+    }
     mat.needsUpdate = true
+  }
+
+  /** Cache the shared colour adjustments map so the next
+   *  applyInstanceColors pass picks up per-sprinkle-colour hue /
+   *  lightness deltas set via the panel sliders. */
+  setColorAdjustments(adjustments: ColorAdjustments) {
+    this.currentColorAdjustments = adjustments
+    // Re-emit the instance colours immediately so the change lands
+    // this frame without waiting for the next setConfig call.
+    const im = this.instanced
+    if (!im) return
+    const count = im.count
+    if (count <= 0) return
+    const palette = colorsToHex(
+      this.config.colors.length > 0 ? this.config.colors : ['gold'],
+      this.currentColorAdjustments
+    )
+    for (let i = 0; i < count; i++) {
+      this._color.setHex(palette[i % palette.length])
+      im.setColorAt(i, this._color)
+    }
+    if (im.instanceColor) im.instanceColor.needsUpdate = true
   }
 
   setConfig(
@@ -193,12 +243,17 @@ export class SprinklesLayer {
       ? 'powder'
       : effectiveShape
 
-    if (config.material !== this.currentMaterialId) {
+    if (
+      config.material !== this.currentMaterialId ||
+      config.kind !== this.currentKind
+    ) {
       this.applyMaterialParams(
         im.material as THREE.MeshPhysicalMaterial,
-        config.material
+        config.material,
+        config.kind
       )
       this.currentMaterialId = config.material
+      this.currentKind = config.kind
     }
     if (shapeKey !== this.currentShapeKey) {
       this.swapGeometry(shapeKey)
@@ -256,11 +311,14 @@ export class SprinklesLayer {
       this.vertexIndices = []
       this.spinAngles = new Float32Array(0)
     } else if (config.fill) {
-      // Sprinkles are non-overlapping and roughly square-bounded, so we need
-      // ~(2·size)² of area per piece. Sphere area 4π → count ≈ π/size². The
-      // 1.6× over-count compensates for Fibonacci sampling irregularity.
+      // Paper spangles use the original 1.6× factor — a clean non-
+      // overlapping scatter at every size. Plastic spangles ALWAYS
+      // overshoot to 5·π/size² so pieces overlap by roughly half their
+      // width and no gaps show between the chunky moulded silhouettes
+      // (which don't tile like flat paper).
+      const densityK = config.kind === 'plastic' ? 5 : 1.6
       const target = Math.ceil(
-        (Math.PI * 1.6) / (effectiveSize * effectiveSize)
+        (Math.PI * densityK) / (effectiveSize * effectiveSize)
       )
       effectiveCount = Math.min(MAX_SPRINKLES, Math.max(64, target))
       this.fillMode = true
@@ -286,7 +344,8 @@ export class SprinklesLayer {
     im.count = effectiveCount
 
     const palette = colorsToHex(
-      config.colors.length > 0 ? config.colors : ['gold']
+      config.colors.length > 0 ? config.colors : ['gold'],
+      this.currentColorAdjustments
     )
     for (let i = 0; i < effectiveCount; i++) {
       this._color.setHex(palette[i % palette.length])
@@ -639,11 +698,18 @@ export class SprinklesLayer {
 
     const halfWidth = size
     const halfHeight = size
-    // Paper sprinkles are flat pucks (depth ≈ 0.08 × width). Powder grains
-    // are 3D faceted octahedra, so depth must equal width — otherwise the
-    // grain gets squashed into a disc and the sparkle collapses back into
-    // one facet.
-    const halfDepth = isPowder ? size : size * 0.08
+    // Paper sprinkles are near-flat foil (depth ≈ 0.02 × width) — as thin
+    // as the extrude bevel allows. Plastic spangles are noticeably thicker
+    // (2.5 × width) so they read as chunky moulded beads instead of
+    // paper-thin confetti. Powder grains are 3D faceted octahedra, so
+    // depth must equal width — otherwise the grain gets squashed into a
+    // disc and the sparkle collapses back into one facet.
+    const isPlastic = this.config.kind === 'plastic'
+    const halfDepth = isPowder
+      ? size
+      : isPlastic
+        ? size * 2.5
+        : size * 0.02
     // Base lift = 0 so sprinkles ride flush with the mesh. `beadLift[i]` adds
     // a per-instance outward offset where a bead is underneath, so sprinkles
     // sit on top of beads (slime → beads → sprinkles) instead of poking into
@@ -800,11 +866,13 @@ export class SprinklesLayer {
 
 /* ─── helpers ─────────────────────────────────────────── */
 
-function colorsToHex(colors: SprinkleColorId[]): number[] {
+function colorsToHex(
+  colors: SprinkleColorId[],
+  adjustments?: ColorAdjustments
+): number[] {
   const out: number[] = []
   for (const id of colors) {
-    const preset = SPRINKLE_COLORS.find((c) => c.id === id)
-    if (preset) out.push(preset.hex)
+    out.push(resolveSprinkleColorHex(id, adjustments))
   }
   return out.length > 0 ? out : [0xffcf5e]
 }

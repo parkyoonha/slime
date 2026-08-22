@@ -2,13 +2,13 @@ import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
 import {
   BEAD_MATERIAL_PARAMS,
-  resolveColorHex,
+  resolveCustomBeadHex,
   type BeadShapeId,
   type ColorAdjustments,
   type CustomBeadsConfig
 } from './presets'
 
-const MAX_CUSTOM_BEADS = 20
+const MAX_CUSTOM_BEADS = 40
 
 /**
  * 커스텀비즈. Emoji-style additive layer of coloured 3D bead meshes.
@@ -58,9 +58,26 @@ export class CustomBeadsLayer {
   private readonly _forward = new THREE.Vector3(0, 0, 1)
   private readonly _outward = new THREE.Vector3()
   private readonly _quat = new THREE.Quaternion()
+  /** Set true by SlimeApp whenever the outer slime is covered by a
+   *  full-fill compact bead shell. Adds a small outward offset so
+   *  custom beads clear the shell instead of sinking into it; when
+   *  false (naked slime), custom beads sit flush against the surface. */
+  private fillLayerActive = false
+  /** Gradient LUT uniforms — shared across every cloned bead material
+   *  so one recolour rebuild updates all beads at once. */
+  private readonly gradientUseUniform = { value: 0.0 }
+  private readonly gradientTexUniform: { value: THREE.Texture | null } = {
+    value: null
+  }
+  private gradientTexture: THREE.DataTexture | null = null
 
   constructor() {
     this.group = new THREE.Group()
+    // Draw custom beads AFTER the main compact / chunk bead layers so
+    // they visually sit on top even when a full-fill shell would
+    // otherwise Z-fight or occlude them. Depth test stays on so a bead
+    // on the far side still hides behind the slime silhouette.
+    this.group.renderOrder = 20
     // One shared material — per-bead colour comes via mesh.material
     // clone on rebuild. Plastic params match BEAD_MATERIAL_PARAMS so
     // the accent beads read consistent with the main beads layer.
@@ -90,9 +107,13 @@ export class CustomBeadsLayer {
   private installPhotoShader(mat: THREE.MeshPhysicalMaterial) {
     const useU = this.photoUseUniform
     const mapU = this.photoMapUniform
+    const gradUseU = this.gradientUseUniform
+    const gradTexU = this.gradientTexUniform
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uCbPhotoUse = useU
       shader.uniforms.uCbPhotoMap = mapU
+      shader.uniforms.uCbGradientUse = gradUseU
+      shader.uniforms.uCbGradient = gradTexU
       shader.vertexShader =
         `varying vec3 vCbLocal;\n` +
         shader.vertexShader.replace(
@@ -103,11 +124,22 @@ export class CustomBeadsLayer {
       shader.fragmentShader =
         `uniform float uCbPhotoUse;
          uniform sampler2D uCbPhotoMap;
+         uniform float uCbGradientUse;
+         uniform sampler2D uCbGradient;
          varying vec3 vCbLocal;
         ` +
         shader.fragmentShader.replace(
           '#include <map_fragment>',
           `#include <map_fragment>
+           // Per-bead gradient — samples the shared palette LUT keyed
+           // off this vertex's Y in bead-local space, so every bead
+           // shows the full top-to-bottom gradient across ITSELF (not
+           // one flat colour per bead).
+           if (uCbGradientUse > 0.5) {
+             float gt = clamp(vCbLocal.y * 0.5 + 0.5, 0.0, 1.0);
+             diffuseColor.rgb =
+               texture2D(uCbGradient, vec2(gt, 0.5)).rgb;
+           }
            if (uCbPhotoUse > 0.5) {
              vec2 uv = vec2(
                vCbLocal.x * 0.5 + 0.5,
@@ -177,6 +209,11 @@ export class CustomBeadsLayer {
       ) {
         const geo = buildBeadGeometry(wantShape)
         const mat = this.material.clone()
+        // `.clone()` copies material params but does NOT re-run the
+        // onBeforeCompile mixin — every cloned material has to be
+        // hooked separately so its shader receives the photo + per-
+        // bead gradient uniforms.
+        this.installPhotoShader(mat)
         const mesh = new THREE.Mesh(geo, mat)
         if (i < this.meshes.length) {
           this.group.remove(this.meshes[i])
@@ -199,30 +236,104 @@ export class CustomBeadsLayer {
   }
 
   /** Re-assign each bead's anchor to its nearest slime vertex. Called
-   *  by SlimeApp on shape change and after setConfig. */
+   *  by SlimeApp on shape change and after setConfig.
+   *
+   *  Placement matches EmojiBeadsLayer's "cluster tight on +Z front cap"
+   *  strategy — beads bunch up on the visible face like a pinned set of
+   *  charms instead of spreading around the full front hemisphere. Each
+   *  fresh anchor observes a minimum angular gap sized to the current
+   *  bead diameter so beads don't overlap each other, matching the
+   *  emoji layer's spacing rule. Preserved anchors (existing bead slots
+   *  the user may have dragged) survive across reseats and act as
+   *  immovable obstacles for the spacing check on new slots. */
   reseat(unitDirs: Float32Array) {
     const n = this.meshes.length
     if (this.anchorIdx.length !== n) {
       this.anchorIdx = new Uint32Array(n)
     }
-    if (this.anchorDirs.length !== n * 3) {
-      // Even Fibonacci sample of the FRONT hemisphere so N beads are
-      // spread evenly across the visible face. Same fibonacci trick
-      // BeadsLayer chunk uses, but constrained to y = 1 - t (t in
-      // [0, 0.5]) so all directions have z > 0.
-      const dirs = new Float32Array(n * 3)
-      const phi = Math.PI * (Math.sqrt(5) - 1)
-      for (let i = 0; i < n; i++) {
-        const t = n > 1 ? (i + 0.5) / n : 0.5
-        const y = 1 - t
-        const r = Math.sqrt(Math.max(0, 1 - y * y))
-        const theta = phi * i
-        dirs[i * 3] = Math.cos(theta) * r
-        dirs[i * 3 + 1] = Math.sin(theta) * r * 0.6
-        dirs[i * 3 + 2] = Math.abs(y)
-      }
-      this.anchorDirs = dirs
+    const prevDirs = this.anchorDirs
+    const prevN = Math.floor(prevDirs.length / 3)
+    const newDirs = new Float32Array(n * 3)
+    const preservedCount = Math.min(prevN, n)
+    for (let i = 0; i < preservedCount * 3; i++) {
+      newDirs[i] = prevDirs[i]
     }
+    // Only rebuild fresh anchors when there are new slots to fill —
+    // shrinking or same-count reseat leaves every drag-position intact.
+    if (n > preservedCount) {
+      const total = unitDirs.length / 3
+      // Rank EVERY vertex by descending z so beads start clustered at
+      // the +Z pole (visible face) and spill outward toward the equator
+      // (and beyond, if needed) as count × size demands. No hard front-
+      // cap: capping to z > 0.4 makes 40 large beads impossible to place
+      // without overlap. Sorting the entire sphere means we always find
+      // room while still preferring the front for the first picks.
+      const rankedIndices: number[] = new Array(total)
+      for (let j = 0; j < total; j++) rankedIndices[j] = j
+      rankedIndices.sort(
+        (a, b) => unitDirs[b * 3 + 2] - unitDirs[a * 3 + 2]
+      )
+      // Chord distance we require between anchor unit-dirs. Sized to
+      // the WORST-CASE per-shape footprint: cube extends to 1.5× the
+      // slider size (RoundedBoxGeometry outer = 1.5), torus / heart /
+      // star also stretch past a plain sphere's radius, so 1× the
+      // slider size would let those shapes visibly overlap even
+      // though sphere-to-sphere beads at that distance just touched.
+      // 2.4× the slider size leaves a clear visual gap for every
+      // shape in the mix. Clamped so it never becomes un-satisfiable.
+      const targetChord = Math.min(1.9, this.config.size * 2.4)
+      const maxDot = Math.max(-1, 1 - (targetChord * targetChord) / 2)
+      const placedDirs: number[] = []
+      for (let i = 0; i < preservedCount; i++) {
+        placedDirs.push(
+          newDirs[i * 3],
+          newDirs[i * 3 + 1],
+          newDirs[i * 3 + 2]
+        )
+      }
+      const usedVerts = new Set<number>()
+      for (let i = preservedCount; i < n; i++) {
+        let picked = -1
+        for (const cand of rankedIndices) {
+          if (usedVerts.has(cand)) continue
+          const cx = unitDirs[cand * 3]
+          const cy = unitDirs[cand * 3 + 1]
+          const cz = unitDirs[cand * 3 + 2]
+          let ok = true
+          for (let k = 0; k < placedDirs.length; k += 3) {
+            const dot =
+              cx * placedDirs[k] +
+              cy * placedDirs[k + 1] +
+              cz * placedDirs[k + 2]
+            if (dot > maxDot) {
+              ok = false
+              break
+            }
+          }
+          if (ok) {
+            picked = cand
+            break
+          }
+        }
+        // Truly no room — sphere is packed to the limit for this size.
+        // Skip the remaining beads rather than fall back to any vertex,
+        // because a fallback would guarantee overlap and the user asked
+        // for strict non-overlap regardless of count / size. In practice
+        // this branch is unreachable under CUSTOM_BEADS_LIMITS (40 beads
+        // at size 0.45 occupy ~40% of the sphere with slack to spare).
+        if (picked < 0) break
+        usedVerts.add(picked)
+        newDirs[i * 3] = unitDirs[picked * 3]
+        newDirs[i * 3 + 1] = unitDirs[picked * 3 + 1]
+        newDirs[i * 3 + 2] = unitDirs[picked * 3 + 2]
+        placedDirs.push(
+          unitDirs[picked * 3],
+          unitDirs[picked * 3 + 1],
+          unitDirs[picked * 3 + 2]
+        )
+      }
+    }
+    this.anchorDirs = newDirs
     const total = unitDirs.length / 3
     for (let i = 0; i < n; i++) {
       const dx = this.anchorDirs[i * 3]
@@ -242,6 +353,43 @@ export class CustomBeadsLayer {
       }
       this.anchorIdx[i] = best
     }
+  }
+
+  /** Raycast pick — returns the index of the topmost hit custom-bead
+   *  mesh, or -1 if the ray misses every bead. Meshes are children of
+   *  `group`, so caller can also raycast the group directly; this
+   *  helper hides the mesh → index mapping. */
+  pickBead(raycaster: THREE.Raycaster): number {
+    if (this.meshes.length === 0) return -1
+    const hits = raycaster.intersectObjects(this.meshes, false)
+    if (hits.length === 0) return -1
+    return this.meshes.indexOf(hits[0].object as THREE.Mesh)
+  }
+
+  /** Re-seat a single bead at the requested unit direction on the slime
+   *  surface. Updates the persisted anchorDirs slot AND re-picks the
+   *  nearest slime vertex for anchorIdx so the drag position sticks
+   *  across subsequent frames / reseats. */
+  setBeadDir(idx: number, unitDir: THREE.Vector3, unitDirs: Float32Array) {
+    if (idx < 0 || idx >= this.meshes.length) return
+    if (this.anchorDirs.length < (idx + 1) * 3) return
+    this.anchorDirs[idx * 3] = unitDir.x
+    this.anchorDirs[idx * 3 + 1] = unitDir.y
+    this.anchorDirs[idx * 3 + 2] = unitDir.z
+    const total = unitDirs.length / 3
+    let best = 0
+    let bestDot = -Infinity
+    for (let j = 0; j < total; j++) {
+      const d =
+        unitDirs[j * 3] * unitDir.x +
+        unitDirs[j * 3 + 1] * unitDir.y +
+        unitDirs[j * 3 + 2] * unitDir.z
+      if (d > bestDot) {
+        bestDot = d
+        best = j
+      }
+    }
+    this.anchorIdx[idx] = best
   }
 
   update(currentPositions: Float32Array) {
@@ -267,7 +415,14 @@ export class CustomBeadsLayer {
         0,
         Math.min(1, this.config.flatness)
       )
-      const outward = this.config.size * (0.4 - 0.5 * flatness)
+      // Base outward offset — bead nestled into the slime surface.
+      // Reduced baseline (was 0.4) so a naked slime shows the bead
+      // partially embedded rather than sitting proud. A full-fill
+      // compact shell adds a small extra lift so custom beads still
+      // clear it without floating too far above.
+      const fillLift = this.fillLayerActive ? 0.05 : 0
+      const outward =
+        fillLift + this.config.size * (0.15 - 0.4 * flatness)
       mesh.position.set(
         px + nx * outward,
         py + ny * outward,
@@ -281,16 +436,72 @@ export class CustomBeadsLayer {
 
   private recolour() {
     const palette = this.config.colors
-    for (let i = 0; i < this.meshes.length; i++) {
+    const gradient = !!this.config.gradient
+    const n = this.meshes.length
+    const paletteColors = palette.map(
+      (cid) => new THREE.Color(resolveCustomBeadHex(cid, this.adjustments))
+    )
+    const useGradientShader = gradient && paletteColors.length >= 2
+    if (useGradientShader) {
+      this.rebuildGradientTexture(paletteColors)
+      this.gradientUseUniform.value = 1
+    } else {
+      this.gradientUseUniform.value = 0
+    }
+    for (let i = 0; i < n; i++) {
       const mesh = this.meshes[i]
       const mat = mesh.material as THREE.MeshPhysicalMaterial
-      if (palette.length === 0) {
+      if (useGradientShader) {
+        // Shader samples the gradient LUT; base colour set to white
+        // so the sampled RGB isn't multiplied down.
+        mat.color.setRGB(1, 1, 1)
+      } else if (paletteColors.length === 0) {
         mat.color.setHex(0xffffff)
       } else {
-        const cid = palette[i % palette.length]
-        mat.color.setHex(resolveColorHex(cid, this.adjustments))
+        mat.color.copy(paletteColors[i % paletteColors.length])
       }
     }
+  }
+
+  private rebuildGradientTexture(colors: readonly THREE.Color[]) {
+    if (this.gradientTexture) this.gradientTexture.dispose()
+    const size = 64
+    const data = new Uint8Array(size * 4)
+    const cA = new THREE.Color()
+    const cB = new THREE.Color()
+    for (let i = 0; i < size; i++) {
+      const t = i / (size - 1)
+      const scaled = t * (colors.length - 1)
+      const lo = Math.floor(scaled)
+      const hi = Math.min(lo + 1, colors.length - 1)
+      const frac = scaled - lo
+      cA.copy(colors[lo])
+      cB.copy(colors[hi])
+      cA.lerp(cB, frac)
+      data[i * 4] = Math.round(cA.r * 255)
+      data[i * 4 + 1] = Math.round(cA.g * 255)
+      data[i * 4 + 2] = Math.round(cA.b * 255)
+      data[i * 4 + 3] = 255
+    }
+    const tex = new THREE.DataTexture(
+      data,
+      size,
+      1,
+      THREE.RGBAFormat,
+      THREE.UnsignedByteType
+    )
+    tex.colorSpace = THREE.SRGBColorSpace
+    tex.needsUpdate = true
+    this.gradientTexture = tex
+    this.gradientTexUniform.value = tex
+  }
+
+  /** Called by SlimeApp whenever the outer slime's compact-fill bead
+   *  shell toggles active / inactive — adjusts the outward offset so
+   *  custom beads clear the shell only when it exists, and sit flush
+   *  against the naked slime otherwise. */
+  setFillLayerActive(active: boolean) {
+    this.fillLayerActive = active
   }
 
   dispose() {

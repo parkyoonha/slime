@@ -91,6 +91,10 @@ export class SlimeSphere {
   // look before the initial useEffects fire.
   private currentMaterialId: MaterialId = 'crystal'
   private currentCoatingId: CoatingId = 'none'
+  /** Which UI theme drives the crystal rim brightness (see setEdgeTheme
+   *  for the visual rationale). Default 'dark' matches the app's boot
+   *  theme; SlimeApp pushes the actual value on mount + on toggle. */
+  private currentEdgeTheme: 'dark' | 'light' = 'dark'
   // Colour used for coating accent sheen (wax / foil / ice). Kept
   // independent of the slime's base colour so users can pick e.g. white
   // slime with gold foil coating. Neutral default so the first frame under
@@ -135,17 +139,36 @@ export class SlimeSphere {
    *  otherwise. Ice cracks reveal a bright wet version of the slime base
    *  colour to look like wet slime bulging through a frozen shell. */
   private readonly damageIsIceUniform = { value: 0.0 }
+  /** 1 when the coating is 젤 (tube). Tube shares foil's damage/crack
+   *  shader path (both flip uCoatingIsFoil for the tear pattern) but
+   *  its SHELL is glossy PAPER — no metallic reflection — so this
+   *  extra flag lets the shell roughness / metalness branches override
+   *  the metal shell that foil forces. */
+  private readonly damageIsTubeUniform = { value: 0.0 }
   /** Shader uniform: 1 when the (new, crack-less) wax coating is active,
    *  0 otherwise. Only used to gate the shader's diffuse override (wax
    *  paints the whole surface in the coating colour) — wax has no
    *  shatter behaviour, so this flag never touches the crack pass. */
   private readonly damageIsWaxUniform = { value: 0.0 }
+  /** Wax coating "coat" opacity 0..1 — how much of the wax tint
+   *  overrides the underlying slime colour. 1.0 = full opaque wax
+   *  shell (default 4콧), 0.1 = a thin single-coat wax where most
+   *  of the inner slime shows through. Only sampled inside the
+   *  wax branch of the shader; other coatings render at full alpha. */
+  private readonly waxThicknessAlphaUniform = { value: 1.0 }
   /** Shader uniform: 1 when the base material is matte, 0 otherwise. Toggles
    *  a procedural foam pattern in the fragment shader so matte slime reads
    *  as an aerated / bubbly cream (like whipped bath foam) instead of a
    *  flat matte surface — matches the reference capture. Ignored under
    *  crack-drawing coatings (foil/wax/ice paint the whole shell). */
   private readonly materialIsMatteUniform = { value: 0.0 }
+  /** Shader uniform: 1 when 크런치 is on. Enables a vertex-shader mixin
+   *  that samples a Fibonacci-like hash at each vertex's rest position
+   *  and adds a small outward bump displacement proportional to the
+   *  vertex's INWARD compression amount. Result: pressing an opaque
+   *  slime makes tiny "grain" bumps appear on the surface where the
+   *  finger is squeezing (like biting into a candy with beads inside). */
+  private readonly crunchOnUniform = { value: 0.0 }
   /** Shader uniform: the coating colour used as the full-surface tint when
    *  a diffuse-overriding coating (wax / foil) is active. Feeds diffuseColor
    *  across the whole ball so the entire sphere reads as e.g. gold foil or
@@ -207,6 +230,42 @@ export class SlimeSphere {
   /** Per-vertex nearest-bead unit direction stored as an attribute. */
   private beadDirAttr!: THREE.BufferAttribute
   private accumulatedForce = 0
+
+  /** wax shell — single OUTER wax surface wrapping the slime at
+   *  SHELL_OUTER × slime radius. Cracks discard fragments so the
+   *  slime shows through the gap; a rim-darkening shader trick at
+   *  the discard threshold fakes wall thickness at crack edges.
+   *  Positions / damage / crackLevel are copied from the slime each
+   *  frame so the shell deforms with the slime body it wraps. */
+  private shellMesh!: THREE.Mesh
+  private shellMaterial!: THREE.MeshPhysicalMaterial
+  private readonly shellModeUniform = { value: 0.0 }
+  private shellPositions!: Float32Array
+  private shellDamage!: Float32Array
+  private shellCrackLevel!: Float32Array
+  private shellPositionAttr!: THREE.BufferAttribute
+  private shellDamageAttr!: THREE.BufferAttribute
+  private shellCrackLevelAttr!: THREE.BufferAttribute
+  /** Independent uniform bank for the shell so it can render wax while
+   *  the slime body renders 'none'. Isolated from the body's damage /
+   *  coating flags. */
+  private readonly shellDamageEnabledUniform = { value: 1.0 }
+  private readonly shellDamageIsFoilUniform = { value: 0.0 }
+  private readonly shellDamageIsIceUniform = { value: 0.0 }
+  private readonly shellDamageIsWaxUniform = { value: 1.0 }
+  private readonly shellDamageIsTubeUniform = { value: 0.0 }
+  private readonly shellWaxThicknessAlphaUniform = { value: 1.0 }
+  /** Default outer wax shell radius as a multiplier of the slime
+   *  radius. Runtime `this.shellRadius` overrides this per coating. */
+  private static readonly SHELL_OUTER = 1.02
+  /** Per-coating shell radii. thinwax hugs closest, wax slightly
+   *  further out. */
+  private static readonly SHELL_RADII = {
+    thinwax: 1.005,
+    wax: 1.015
+  } as const
+  /** Live shell radius used by _updateShellGeometry each frame. */
+  private shellRadius = SlimeSphere.SHELL_OUTER
 
   /** True while at least one fingertip is actively pressing. Used to detect
    *  the release edge (true → false) so we can snapshot the "retained shape"
@@ -305,9 +364,14 @@ export class SlimeSphere {
       transmission: 0.95,
       thickness: 0.4,
       ior: 1.5,
-      clearcoat: 0,
+      clearcoat: 0.001, // >0 so USE_CLEARCOAT define fires at compile
       clearcoatRoughness: 0,
-      sheen: 0,
+      // sheen must be initialised > 0 so USE_SHEEN is defined at
+      // program compile time — _applyLook later dials it up to 1.0
+      // for coated slime to brighten the grazing-angle rim, and that
+      // increase is a no-op unless the shader was built with sheen
+      // enabled from the start.
+      sheen: 0.01,
       sheenColor: new THREE.Color(0xffffff),
       iridescence: 0,
       side: THREE.DoubleSide
@@ -319,6 +383,7 @@ export class SlimeSphere {
       this.damageIsFoilUniform,
       this.damageIsIceUniform,
       this.damageIsWaxUniform,
+      this.damageIsTubeUniform,
       this.materialIsMatteUniform,
       this.coatingTintUniform,
       this.inkColorUniform,
@@ -332,12 +397,194 @@ export class SlimeSphere {
       this.coatingGradientTexUniform,
       this.photoUseUniform,
       this.photoMapUniform,
-      this.photoRadiusUniform
+      this.photoRadiusUniform,
+      this.waxThicknessAlphaUniform,
+      this.crunchOnUniform
     )
 
     this.mesh = new THREE.Mesh(this.geometry, material)
     this.mesh.castShadow = false
     this.mesh.receiveShadow = false
+
+    // wax shell mesh — separate material with its OWN uniform bank
+    // so it can render as wax even when the slime body coating is
+    // 'none'. Shares this.geometry so vertex physics deforms both
+    // meshes in sync; scaled outward by SHELL_SCALE to sit as a
+    // bigger sphere/cube/rect/twist wrapping the slime body. Wax
+    // shell params (matte, opaque, coating tint) match how the wax
+    // coating draws on the slime body so the two look identical at
+    // rest — the ONLY visible difference on press is that shell
+    // cracks discard fragments (slime shows through) instead of
+    // painting a "cracked" colour on the shell surface itself.
+    // Wax bead material — one material for both outer + inner surfaces
+    // of the hollow-bead geometry. Matte wax params with a hint of
+    // clearcoat for wet sheen.
+    this.shellMaterial = new THREE.MeshPhysicalMaterial({
+      color: 0xfbf7f2,
+      roughness: 0.5,
+      metalness: 0,
+      transmission: 0,
+      thickness: 0,
+      ior: 1.5,
+      clearcoat: 0.001,
+      clearcoatRoughness: 0,
+      sheen: 0.01,
+      sheenColor: new THREE.Color(0xffffff),
+      iridescence: 0,
+      side: THREE.DoubleSide
+    })
+    // Outer discard threshold. Fragments on the inner surface fall
+    // back to a higher threshold (0.85) via the fragment shader's
+    // mix(uShellMode, 0.85, vShellSide) so a crack cuts through the
+    // outer wall first and only the widest cracks reach the inner.
+    this.shellModeUniform.value = 0.2
+    installDamageShader(
+      this.shellMaterial,
+      this.shellDamageEnabledUniform,
+      this.shellDamageIsFoilUniform,
+      this.shellDamageIsIceUniform,
+      this.shellDamageIsWaxUniform,
+      this.shellDamageIsTubeUniform,
+      this.materialIsMatteUniform,
+      this.coatingTintUniform,
+      this.inkColorUniform,
+      this.inkAmountUniform,
+      this.beadRadiusUniform,
+      this.beadWrapAmountUniform,
+      this.gradientUseUniform,
+      this.gradientTexUniform,
+      this.gradientRadiusUniform,
+      this.coatingGradientUseUniform,
+      this.coatingGradientTexUniform,
+      this.photoUseUniform,
+      this.photoMapUniform,
+      this.photoRadiusUniform,
+      this.shellWaxThicknessAlphaUniform,
+      this.crunchOnUniform,
+      this.shellModeUniform
+    )
+    const beadGeo = this._buildHollowBeadGeometry()
+    this.shellMesh = new THREE.Mesh(beadGeo, this.shellMaterial)
+    this.shellMesh.castShadow = false
+    this.shellMesh.receiveShadow = false
+    this.shellMesh.frustumCulled = false
+    this.shellMesh.visible = false
+    this.shellMesh.renderOrder = 2
+    this.mesh.add(this.shellMesh)
+
+
+    // Kick _applyLook once at construction so the crystal-material
+    // specularIntensity (and any other coating-driven material params)
+    // land on the correct values from the very first render. Without
+    // this the material stayed at three.js's default specularIntensity
+    // = 1.0 until the user did SOMETHING that fired _applyLook (change
+    // material / coating / tag reset), which meant the default crystal
+    // slime rendered with a hard mirror rim on first paint.
+    this._applyLook()
+  }
+
+  /** Wax coating rendering params applied to the shell material each
+   *  time the coating tint changes. thinwax renders the shell with
+   *  reduced opacity so the slime shows through the wax — preserves
+   *  the semantic difference from opaque wax which shares
+   *  the same fully-opaque shell. */
+  private _applyShellLook() {
+    const mat = this.shellMaterial
+    mat.color.setHex(this.currentCoatingColorHex)
+    mat.roughness = 0.5
+    mat.metalness = 0
+    mat.transmission = 0
+    mat.thickness = 0
+    mat.clearcoat = 0
+    mat.sheen = 1.0
+    mat.sheenRoughness = 0.85
+    mat.sheenColor.setHex(0xffffff)
+    mat.iridescence = 0
+    mat.envMapIntensity = 2.2
+    const thinwax = this.currentCoatingId === 'thinwax'
+    mat.transparent = thinwax
+    mat.opacity = thinwax ? 0.55 : 1.0
+    mat.depthWrite = !thinwax
+    mat.needsUpdate = true
+  }
+
+  /** Build the OUTER wax-bead shell geometry ONCE at construction.
+   *  Single surface (outer only — inner face removed per user request;
+   *  the rim-darkening shader depth-fake gives the wall its perceived
+   *  thickness). Positions / damage / crackLevel are refreshed each
+   *  frame from slime by _updateShellGeometry(). */
+  private _buildHollowBeadGeometry(): THREE.BufferGeometry {
+    const N = this.vertexCount
+    const idxArr = this.geometry.index!.array as Uint16Array | Uint32Array
+    const M = idxArr.length / 3
+    const positions = new Float32Array(N * 3)
+    const damage = new Float32Array(N)
+    const crackLevel = new Float32Array(N)
+    const restPos = new Float32Array(N * 3)
+    const beadDir = new Float32Array(N * 3)
+    for (let i = 0; i < N; i++) {
+      const rx = this.restPositions[i * 3]
+      const ry = this.restPositions[i * 3 + 1]
+      const rz = this.restPositions[i * 3 + 2]
+      positions[i * 3] = rx * SlimeSphere.SHELL_OUTER
+      positions[i * 3 + 1] = ry * SlimeSphere.SHELL_OUTER
+      positions[i * 3 + 2] = rz * SlimeSphere.SHELL_OUTER
+      restPos[i * 3] = rx
+      restPos[i * 3 + 1] = ry
+      restPos[i * 3 + 2] = rz
+    }
+    const indices = new Uint32Array(M * 3)
+    let k = 0
+    for (let t = 0; t < M; t++) {
+      indices[k++] = idxArr[t * 3]
+      indices[k++] = idxArr[t * 3 + 1]
+      indices[k++] = idxArr[t * 3 + 2]
+    }
+    const geo = new THREE.BufferGeometry()
+    this.shellPositions = positions
+    this.shellDamage = damage
+    this.shellCrackLevel = crackLevel
+    this.shellPositionAttr = new THREE.BufferAttribute(positions, 3)
+    this.shellPositionAttr.setUsage(THREE.DynamicDrawUsage)
+    this.shellDamageAttr = new THREE.BufferAttribute(damage, 1)
+    this.shellDamageAttr.setUsage(THREE.DynamicDrawUsage)
+    this.shellCrackLevelAttr = new THREE.BufferAttribute(crackLevel, 1)
+    this.shellCrackLevelAttr.setUsage(THREE.DynamicDrawUsage)
+    geo.setAttribute('position', this.shellPositionAttr)
+    geo.setAttribute('damage', this.shellDamageAttr)
+    geo.setAttribute('crackLevel', this.shellCrackLevelAttr)
+    geo.setAttribute('aRestPos', new THREE.BufferAttribute(restPos, 3))
+    geo.setAttribute('aBeadDir', new THREE.BufferAttribute(beadDir, 3))
+    geo.setIndex(new THREE.BufferAttribute(indices, 1))
+    geo.computeVertexNormals()
+    return geo
+  }
+
+  /** Mirror slime's live positions / damage / crackLevel into the
+   *  shell geometry each frame while the shell is visible. Single
+   *  outer surface — inner face was removed per user request; the
+   *  shader's rim-darkening depth-fake gives the visible wall its
+   *  thickness cue. Cheap: O(vertex count) per frame. */
+  private _updateShellGeometry() {
+    if (!this.shellMesh.visible) return
+    const N = this.vertexCount
+    const src = this.geometry.attributes.position.array as Float32Array
+    const outer = this.shellRadius
+    const dst = this.shellPositions
+    const dmgSrc = this.damage
+    const dmgDst = this.shellDamage
+    const clSrc = this.crackLevel
+    const clDst = this.shellCrackLevel
+    for (let i = 0; i < N; i++) {
+      dst[i * 3] = src[i * 3] * outer
+      dst[i * 3 + 1] = src[i * 3 + 1] * outer
+      dst[i * 3 + 2] = src[i * 3 + 2] * outer
+      dmgDst[i] = dmgSrc[i]
+      clDst[i] = clSrc[i]
+    }
+    this.shellPositionAttr.needsUpdate = true
+    this.shellDamageAttr.needsUpdate = true
+    this.shellCrackLevelAttr.needsUpdate = true
   }
 
   /** Reshape rest positions in place. Physics resumes from these. */
@@ -370,11 +617,12 @@ export class SlimeSphere {
     this.recomputeRestVolumeMetric()
     posAttr.needsUpdate = true
 
-    // Preset mesh orientation per shape. Cube gets a 3/4 hero view
-    // (yaw so the right face peeks in + pitch so the top face peeks
-    // down) so the user immediately sees it as a cube rather than as
-    // a flat square silhouette. Sphere resets to identity.
-    if (shape === 'cube') {
+    // Preset mesh orientation per shape. Cube / rect get a 3/4 hero
+    // view (yaw so the right face peeks in + pitch so the top face
+    // peeks down) so the user immediately sees the box silhouette
+    // rather than a flat square / bar face. Sphere / twist reset to
+    // identity so their symmetric silhouettes read straight-on.
+    if (shape === 'cube' || shape === 'rect') {
       this.mesh.quaternion.setFromEuler(
         new THREE.Euler(-0.26, 0.44, 0, 'YXZ')
       )
@@ -409,12 +657,34 @@ export class SlimeSphere {
       resolveColorHex(id, this.currentColorAdjustments)
     )
     const mat = this.mesh.material as THREE.MeshPhysicalMaterial
+    // When 글레이즈 (ice) coating is active, mat.color is owned by the
+    // coating tint (crystal-glaze look) rather than by the slime pick —
+    // don't stomp on it here or the coating's colour would flicker back
+    // to the slime hue whenever the user re-runs setColors.
+    const iceCoatingActive = this.currentCoatingId === 'ice'
+    // 소프트 material + default / white base needs a slightly-grey tint
+    // (instead of near-white) so press dents cast visible shadows. The
+    // matte surface's env + hemi contribution otherwise fills the
+    // shaded side almost to the same brightness as the lit side —
+    // giving the dent nothing to visually stand out against. A gentle
+    // tint darkens BOTH sides but the delta between them stays the
+    // same in absolute terms, which reads as stronger contrast at the
+    // dent boundary. Applied only when no coating is active.
+    const softShadowBoost =
+      this.currentMaterialId === 'soft' &&
+      this.currentCoatingId === 'none'
     if (hexes.length === 0) {
-      mat.color.setHex(0xfbf7f2)
+      if (!iceCoatingActive) {
+        mat.color.setHex(softShadowBoost ? 0xd6d6d6 : 0xfbf7f2)
+      }
       this.gradientUseUniform.value = 0
       return
     }
-    mat.color.setHex(hexes[0])
+    if (!iceCoatingActive) {
+      let hex = hexes[0]
+      if (softShadowBoost && ids[0] === 'white') hex = 0xd6d6d6
+      mat.color.setHex(hex)
+    }
     if (hexes.length === 1) {
       this.gradientUseUniform.value = 0
       return
@@ -471,24 +741,75 @@ export class SlimeSphere {
     this.currentMaterialId = id
     this.materialIsMatteUniform.value = id === 'matte' ? 1.0 : 0.0
     this._applyLook()
+    // Re-run colour resolution so the soft-material shadow-tint (see
+    // setColors) is applied or removed as the material changes into or
+    // out of 소프트.
+    this.setColors(this.currentColorIds)
   }
 
   /** Outer surface treatment. Non-`none` coatings add clearcoat + accent
    *  sheen tinted by the user's coating colour; ice/foil turn on the crack
    *  shader so kneading draws cracks (ice) or wrinkles / tears (foil). */
+  /** How opaque the wax coating overlay reads — see waxThicknessAlpha
+   *  uniform. 1 = full 4-coat opaque, 0.1 = 1-coat thin translucent
+   *  layer that lets the inner slime show through. */
+  setWaxThicknessAlpha(a: number) {
+    this.waxThicknessAlphaUniform.value = Math.max(0, Math.min(1, a))
+  }
+
+  setCrunchOn(on: boolean) {
+    this.crunchOnUniform.value = on ? 1.0 : 0.0
+  }
+
+  /** UI theme drives the crystal material's grazing-angle rim brightness:
+   *  the mirror-smooth crystal picks up the environment map strongly at
+   *  edges (Schlick fresnel → nearly full reflectance at grazing) which
+   *  reads as a bright white outline. Dial specularIntensity down per
+   *  theme so:
+   *    light mode → edges settle into a pale grey rim that blends into
+   *      the light-mode background rather than punching out as white.
+   *    dark mode → the white rim stays present but subdued so the
+   *      crystal shape reads without a hard mirror outline.
+   *  Non-crystal materials keep specularIntensity = 1 (default). */
+  setEdgeTheme(theme: 'dark' | 'light') {
+    this.currentEdgeTheme = theme
+    this._applyLook()
+  }
+
   setCoating(id: CoatingId) {
     this.currentCoatingId = id
     this._applyLook()
     const hasCracks =
       COATINGS.find((c) => c.id === id)?.params.hasCracks ?? false
     this.setDamageRenderingEnabled(hasCracks)
+    // Toggle the wax hollow shell. Body still reads its coating id
+    // for material params (wax / thinwax are excluded from the
+    // coated-body branches in _applyLook so the body renders as
+    // user's material — the two wax coatings render via the
+    // separate shell mesh).
+    const isShellWax = id === 'wax' || id === 'thinwax'
+    this.shellMesh.visible = isShellWax
+    if (isShellWax) {
+      // Per-coating shell radius — thinwax hugs slightly closer.
+      this.shellRadius =
+        id === 'thinwax'
+          ? SlimeSphere.SHELL_RADII.thinwax
+          : SlimeSphere.SHELL_RADII.wax
+      this._applyShellLook()
+    }
     // 'tube' piggybacks on the foil shader path — same wispy tear
     // behaviour, and the paper's metalness is 0 so the foil-only
     // "kill metalness in crack" step is a no-op.
     this.damageIsFoilUniform.value =
       id === 'foil' || id === 'tube' ? 1.0 : 0.0
     this.damageIsIceUniform.value = id === 'ice' ? 1.0 : 0.0
-    this.damageIsWaxUniform.value = id === 'wax' ? 1.0 : 0.0
+    // Wax family now renders on the SHELL mesh instead of the body,
+    // so the body's wax uniform stays off. Damage still accumulates
+    // per-vertex (used by the shell's own shader for cracks) — this
+    // uniform only gates the BODY shader's wax visual which we're
+    // taking off.
+    this.damageIsWaxUniform.value = 0.0
+    this.damageIsTubeUniform.value = id === 'tube' ? 1.0 : 0.0
     if (!hasCracks) this.clearDamage()
   }
 
@@ -504,6 +825,15 @@ export class SlimeSphere {
     this.coatingTintUniform.value.setHex(hex)
     this.coatingGradientUseUniform.value = 0
     this._applyLook()
+    // Keep the shell tint in sync — the shell shares coatingTintUniform
+    // (uCoatingTint drives its wax diffuse), but its base material.color
+    // needs the hex applied directly since it's a separate material.
+    if (
+      this.currentCoatingId === 'wax' ||
+      this.currentCoatingId === 'thinwax'
+    ) {
+      this._applyShellLook()
+    }
   }
 
   /** Multi-colour coating tint. One colour → falls back to the single-
@@ -520,6 +850,12 @@ export class SlimeSphere {
     this.rebuildCoatingGradientTexture(hexes)
     this.coatingGradientUseUniform.value = 1
     this._applyLook()
+    if (
+      this.currentCoatingId === 'wax' ||
+      this.currentCoatingId === 'thinwax'
+    ) {
+      this._applyShellLook()
+    }
   }
 
   private rebuildCoatingGradientTexture(hexes: readonly number[]) {
@@ -716,17 +1052,81 @@ export class SlimeSphere {
         mat.sheenColor.setHex(this.currentCoatingColorHex)
       }
     }
-    // Coating-driven material transforms — restore each coating's
-    // signature finish regardless of what base material the user
-    // picked. These change reflectance/roughness/transmission only;
-    // the diffuse colour is separately owned by the slime colour
-    // picker (setCoatingColors), so the picked hue stays the same,
-    // only the surface FINISH switches. Layout:
-    //   wax  → opaque matte candle body (forceMatteBase)
-    //   tube → matte paper + high clearcoat (forceMatteBase +
-    //          coating params bring clearcoat)
-    //   foil → glossy metal (base extras handle metalness/clearcoat)
-    //   ice  → glassy crystal shell (forceCrystalBase)
+    // Coating keeps the user's ROUGHNESS + METALNESS on the base material
+    // (shader mixin overrides them to coating-specific values on the shell
+    // and reverts to base in crack areas — see roughnessmap_fragment). But
+    // transmission / sheen / iridescence are ZEROED at the material level
+    // whenever a coating is active so the coating diffuse reads with the
+    // SAME tone regardless of which underlying material the user picked.
+    // Wax family coatings (wax / thinwax) are excluded — wax now
+    // lives on a SEPARATE shell mesh wrapping the slime, so the
+    // slime body itself renders as the user's chosen base material
+    // (no shader wax overlay on the body).
+    if (
+      this.currentCoatingId !== 'none' &&
+      this.currentCoatingId !== 'wax' &&
+      this.currentCoatingId !== 'thinwax'
+    ) {
+      mat.transmission = 0
+      mat.thickness = 0
+      // Coated slime gets a FULL-strength white grazing-angle sheen so
+      // the rim doesn't collapse into a dim grey band. Env-reflection
+      // alone at the coating's dielectric F0 (~4%) leaves the rim much
+      // darker than the interior. sheen=1.0 with wide sheenRoughness
+      // (0.85) spreads a bright white glow across the whole grazing
+      // band; combined with the envMapIntensity boost below, the rim
+      // reads as pale white blending into the light-mode background.
+      mat.sheen = 1.0
+      mat.sheenRoughness = 0.85
+      mat.sheenColor.setHex(0xffffff)
+      mat.iridescence = 0
+    }
+    // Foil / tube (젤) / ice (글레이즈) coatings ship with a full mirror
+    // clearcoat (1.0) that BLOCKS the base BRDF — including the sheen —
+    // at grazing angles (clearcoat fresnel = 1 at the rim). Dial down
+    // to 0.35 so a softer lacquer stays on for the wet look while the
+    // sheen glow can still bleed through and blend the rim into the
+    // interior tone. Wax coatings already have clearcoat=0 so this
+    // branch doesn't apply.
+    if (
+      this.currentCoatingId === 'foil' ||
+      this.currentCoatingId === 'tube' ||
+      this.currentCoatingId === 'ice'
+    ) {
+      mat.clearcoat = 0.35
+    }
+    // 글레이즈 (ice) coating is meant to READ AS CRYSTAL — a clear
+    // candy-glass shell. Override transmission back on so the coating
+    // shell renders see-through (crystal material params) rather than
+    // as an opaque tint. Roughness / thickness / ior match the crystal
+    // preset so the visual matches slime's own crystal material. Also
+    // OVERRIDE mat.color = coating tint so both the diffuse contribution
+    // AND the transmitted volume light carry the picked colour with the
+    // same saturation as a crystal-material-with-colour slime would.
+    // Tight attenuationDistance (0.12) pushes Beer-Lambert to saturate
+    // the transmitted tint quickly so the light passing through reads
+    // as deeply coloured, not a faint hint.
+    if (this.currentCoatingId === 'ice') {
+      mat.transmission = 0.9
+      mat.thickness = 0.4
+      mat.ior = 1.5
+      mat.color.setHex(this.currentCoatingColorHex)
+      mat.attenuationColor.setHex(this.currentCoatingColorHex)
+      mat.attenuationDistance = 0.12
+    } else {
+      // Restore default attenuation (white / infinite) so non-ice
+      // coatings and uncoated slime don't inherit a stale glaze tint.
+      mat.attenuationColor.setHex(0xffffff)
+      mat.attenuationDistance = Infinity
+      // Restore mat.color to the user-picked slime colour (or default
+      // off-white) so the glaze-override doesn't linger after switching
+      // to a non-ice coating. Reads currentColorIds via the same helper
+      // setColors uses so the two paths stay in lock-step.
+      const slimeHexes = this.currentColorIds.map((id) =>
+        resolveColorHex(id, this.currentColorAdjustments)
+      )
+      mat.color.setHex(slimeHexes[0] ?? 0xfbf7f2)
+    }
     if (c.forceMatteBase) {
       mat.roughness = Math.max(mat.roughness, 0.85)
       mat.transmission = 0
@@ -745,12 +1145,59 @@ export class SlimeSphere {
       mat.iridescence = 0
     }
     if (c.forceOpaqueBase) {
-      // Zero transmission only — keeps metalness / roughness / sheen
-      // set by the coating's extras intact. Used by foil so its
-      // metallic outside stays intact but crack reveals can't see
-      // through a transparent-base slime.
       mat.transmission = 0
       mat.thickness = 0
+    }
+    // Theme-driven crystal rim brightness — mirror-smooth crystal picks
+    // up strong fresnel reflection at grazing angles which reads as a
+    // hard white outline. Dial specularIntensity down ONLY for UNCOATED
+    // crystal so the rim softens into a pale grey. When a coating is
+    // active the coating's own shell response (roughness / metalness set
+    // by the shader) drives the edge look; dampening dielectric spec on
+    // top of that made foil / tube / glaze rims collapse into a too-dark
+    // grey band in light mode — full specularIntensity keeps the coating
+    // rim reading correctly. currentEdgeTheme is intentionally unused
+    // here (both themes settle on the same 0.55 pale rim) but the
+    // setEdgeTheme setter still kicks _applyLook so the value re-lands
+    // if we ever wire theme-specific values back in.
+    void this.currentEdgeTheme
+    if (
+      this.currentMaterialId === 'crystal' &&
+      this.currentCoatingId === 'none'
+    ) {
+      mat.specularIntensity = 0.55
+    } else {
+      mat.specularIntensity = 1.0
+    }
+    // Coated slime (foil / tube / glaze / wax) picks up a brighter env
+    // reflection at grazing so the rim reads as PALE grey rather than
+    // the deep grey band it settled into at default envMapIntensity=1.
+    // Kept at 1.0 for uncoated slime so the base material's own edge
+    // brightness (matte foam / metal / glossy / crystal) isn't shifted
+    // by this coating-only boost.
+    mat.envMapIntensity =
+      this.currentCoatingId !== 'none' &&
+      this.currentCoatingId !== 'wax' &&
+      this.currentCoatingId !== 'thinwax'
+        ? 2.2
+        : 1.0
+    // 소프트 material with a DEFAULT or WHITE base colour reads too
+    // uniformly bright — the ambient env fills the shadowed side of
+    // a press dent almost to the same level as the lit side, so the
+    // dent barely shows. Dropping env intensity for this specific
+    // case deepens the shadowed side (grey shading) without touching
+    // any coloured / non-soft combinations.
+    if (
+      this.currentMaterialId === 'soft' &&
+      this.currentCoatingId === 'none'
+    ) {
+      const ids = this.currentColorIds
+      const isDefaultOrWhite =
+        ids.length === 0 ||
+        (ids.length === 1 && ids[0] === 'white')
+      if (isDefaultOrWhite) {
+        mat.envMapIntensity = 0.55
+      }
     }
     mat.needsUpdate = true
   }
@@ -758,6 +1205,21 @@ export class SlimeSphere {
   get restPositionArray(): Float32Array {
     return this.restPositions
   }
+
+  /** Per-vertex accumulated press damage (0..1). Read-only view for
+   *  layers that want to react to where cracks are forming (e.g. the
+   *  WaxCoatingLayer chip mode fades chips in based on local damage). */
+  get damageArray(): Float32Array {
+    return this.damage
+  }
+
+  /** Per-vertex continuous crack level (0..5) — PROPAGATES across the
+   *  mesh so the wax bead's cell layer can activate over the full
+   *  crack-territory (matches the shader's spreadVis). */
+  get crackLevelArray(): Float32Array {
+    return this.crackLevel
+  }
+
 
   get positionArray(): Float32Array {
     return this.geometry.attributes.position.array as Float32Array
@@ -818,7 +1280,8 @@ export class SlimeSphere {
     const damageRate =
       this.currentCoatingId === 'foil'
         ? 0.14
-        : this.currentCoatingId === 'wax'
+        : this.currentCoatingId === 'wax' ||
+            this.currentCoatingId === 'thinwax'
           ? 0.24
           : this.currentCoatingId === 'ice'
             ? 0.18
@@ -917,7 +1380,8 @@ export class SlimeSphere {
           this.crackLevel[vi] = Math.min(3, this.crackLevel[vi] + 1)
           crackLevelChanged = true
         } else if (
-          this.currentCoatingId === 'wax' &&
+          (this.currentCoatingId === 'wax' ||
+            this.currentCoatingId === 'thinwax') &&
           this.crackLevel[vi] < 5
         ) {
           this.crackLevel[vi] = Math.min(5, this.crackLevel[vi] + 1)
@@ -950,6 +1414,7 @@ export class SlimeSphere {
         localForceMag > 0.1 &&
         (this.currentCoatingId === 'ice' ||
           this.currentCoatingId === 'wax' ||
+          this.currentCoatingId === 'thinwax' ||
           this.currentCoatingId === 'foil' ||
           this.currentCoatingId === 'tube')
       ) {
@@ -1099,7 +1564,8 @@ export class SlimeSphere {
     // not the network spread wax and ice do.
     if (
       this.currentCoatingId === 'ice' ||
-      this.currentCoatingId === 'wax'
+      this.currentCoatingId === 'wax' ||
+      this.currentCoatingId === 'thinwax'
     ) {
     const decayPerHop =
       this.currentCoatingId === 'ice' ? 0.9 : 0.85
@@ -1171,6 +1637,10 @@ export class SlimeSphere {
 
     posAttr.needsUpdate = true
     this.geometry.computeVertexNormals()
+    // Mirror the deformation + damage / crackLevel into the hollow-
+    // bead geometry each frame so the shell tracks the slime. No-op
+    // when the shell isn't visible (guard inside).
+    this._updateShellGeometry()
   }
 
   reset() {
@@ -1265,6 +1735,30 @@ export class SlimeSphere {
     this.damageEnabledUniform.value = on ? 1.0 : 0.0
   }
 
+  /** Aggregate crack progress across every vertex, in 0..1 where 1
+   *  means every vertex has reached its per-coating cap (ice → 3,
+   *  wax/foil → 5). Used to gate coating loop sounds so the crack
+   *  hiss cuts off once the shell is fully shattered — pressing an
+   *  already-shattered slime is silent for the coating channel. */
+  get coatingCrackProgress(): number {
+    const id = this.currentCoatingId
+    let cap = 0
+    if (id === 'ice') cap = 3
+    else if (
+      id === 'wax' ||
+      id === 'thinwax' ||
+      id === 'foil' ||
+      id === 'tube'
+    )
+      cap = 5
+    else return 0
+    let sum = 0
+    const cl = this.crackLevel
+    for (let i = 0; i < cl.length; i++) sum += cl[i]
+    const max = cl.length * cap
+    return max > 0 ? sum / max : 0
+  }
+
   get damageRenderingEnabled(): boolean {
     return this.damageEnabledUniform.value > 0.5
   }
@@ -1303,6 +1797,8 @@ export class SlimeSphere {
     }
     this.geometry.dispose()
     ;(this.mesh.material as THREE.Material).dispose()
+    this.shellMaterial.dispose()
+    this.shellMesh.geometry.dispose()
   }
 }
 
@@ -1359,6 +1855,7 @@ function installDamageShader(
   isFoilUniform: { value: number },
   isIceUniform: { value: number },
   isWaxUniform: { value: number },
+  isTubeUniform: { value: number },
   isMatteUniform: { value: number },
   coatingTintUniform: { value: THREE.Color },
   inkColorUniform: { value: THREE.Color },
@@ -1372,17 +1869,27 @@ function installDamageShader(
   coatingGradientTexUniform: { value: THREE.Texture | null },
   photoUseUniform: { value: number },
   photoMapUniform: { value: THREE.Texture | null },
-  photoRadiusUniform: { value: number }
+  photoRadiusUniform: { value: number },
+  waxThicknessAlphaUniform: { value: number },
+  crunchOnUniform: { value: number },
+  /** When 1, the material is a WAX-BEAD SHELL mesh (not the slime
+   *  body): crack areas discard the fragment so the slime shows
+   *  through the gaps. Slime body materials pass 0 to keep the
+   *  existing "crack reveals base colour" behaviour. */
+  shellModeUniform: { value: number } = { value: 0 }
 ) {
   material.onBeforeCompile = (shader) => {
     shader.uniforms.uDamageEnabled = enabledUniform
     shader.uniforms.uCoatingIsFoil = isFoilUniform
     shader.uniforms.uCoatingIsIce = isIceUniform
     shader.uniforms.uCoatingIsWax = isWaxUniform
+    shader.uniforms.uCoatingIsTube = isTubeUniform
     shader.uniforms.uMaterialIsMatte = isMatteUniform
     shader.uniforms.uCoatingTint = coatingTintUniform
     shader.uniforms.uInkColor = inkColorUniform
     shader.uniforms.uInkAmount = inkAmountUniform
+    shader.uniforms.uWaxThicknessAlpha = waxThicknessAlphaUniform
+    shader.uniforms.uCrunchOn = crunchOnUniform
     shader.uniforms.uBeadRadius = beadRadiusUniform
     shader.uniforms.uBeadWrapAmount = beadWrapAmountUniform
     shader.uniforms.uUseGradient = gradientUseUniform
@@ -1393,6 +1900,7 @@ function installDamageShader(
     shader.uniforms.uPhotoUse = photoUseUniform
     shader.uniforms.uPhotoMap = photoMapUniform
     shader.uniforms.uPhotoRadius = photoRadiusUniform
+    shader.uniforms.uShellMode = shellModeUniform
 
     shader.vertexShader =
       `attribute float damage;
@@ -1401,6 +1909,7 @@ function installDamageShader(
        attribute vec3 aBeadDir;
        uniform float uBeadRadius;
        uniform float uBeadWrapAmount;
+       uniform float uCrunchOn;
        varying float vDamage;
        varying float vCrackLevel;
        varying vec3 vRest;
@@ -1422,6 +1931,24 @@ function installDamageShader(
            ? aRestPos / length(aRestPos)
            : vec3(0.0, 0.0, 1.0);
          vStretch = max(0.0, dot(position - aRestPos, restDir));
+         // 크런치 — at Fibonacci-hashed rest positions, add tiny outward
+         // bumps whose amplitude tracks how compressed this vertex is
+         // right now. Rest state → no bumps; a pressed vertex reveals
+         // the "grain" underneath as small pimples pushing back against
+         // the compression. Sampled in REST space so grains stay anchored
+         // to the slime body across deformation.
+         if (uCrunchOn > 0.5) {
+           float _crunchCompression =
+             max(0.0, -dot(position - aRestPos, restDir));
+           float _crunchHash = fract(
+             sin(dot(aRestPos * 8.0, vec3(12.9898, 78.233, 45.164))) *
+             43758.5453
+           );
+           float _crunchGrain = smoothstep(0.72, 0.92, _crunchHash);
+           float _crunchAmp =
+             _crunchCompression * _crunchGrain * 0.35;
+           transformed += restDir * _crunchAmp;
+         }
 
          // Bead taffy stretch. Each vertex has a nearest-bead direction
          // baked in (aBeadDir). Compute the bead centre at the same rest
@@ -1450,7 +1977,10 @@ function installDamageShader(
        uniform float uCoatingIsFoil;
        uniform float uCoatingIsIce;
        uniform float uCoatingIsWax;
+       uniform float uCoatingIsTube;
        uniform float uMaterialIsMatte;
+       uniform float uWaxThicknessAlpha;
+       uniform float uShellMode;
        uniform vec3 uCoatingTint;
        uniform vec3 uInkColor;
        uniform float uInkAmount;
@@ -1613,16 +2143,35 @@ function installDamageShader(
                diffuseColor.rgb = mix(diffuseColor.rgb, photoRGB, photoAlpha);
              }
            }
-           // Slime body colour that shows THROUGH crack / tear reveals
-           // is forced to pure WHITE whenever a crack-drawing coating
-           // is active. Reads as a "wet cream" interior no matter what
-           // colour the user picked for the outer coating — matches
-           // the request to keep the slime under coatings uniformly
-           // white. Uncoated slime still uses its own diffuse colour
-           // for the (unused) snapshot path.
-           vec3 slimeBaseColor = uDamageEnabled > 0.5
-             ? vec3(1.0)
-             : diffuseColor.rgb;
+           // Matte foam pattern — mottles the base slime colour with fine
+           // brightness variation so the surface reads as aerated bath
+           // foam. Applied BEFORE the coating overlay and the
+           // slimeBaseColor snapshot so cracks reveal the foam-textured
+           // inner slime (matches user request: the material chosen in
+           // slime options should show through when the coating cracks).
+           float vFoam = 0.0;
+           if (uMaterialIsMatte > 0.5) {
+             float fbm = foamFbm(vRest * 22.0);
+             float fine = foamNoise(vRest * 55.0);
+             vFoam = clamp(fbm * 0.75 + fine * 0.35, 0.0, 1.0);
+             float bright = smoothstep(0.4, 0.9, vFoam);
+             float shade  = smoothstep(0.6, 0.1, vFoam);
+             diffuseColor.rgb = mix(
+               diffuseColor.rgb,
+               diffuseColor.rgb * 0.3,
+               bright * 0.95
+             );
+             diffuseColor.rgb = mix(
+               diffuseColor.rgb,
+               diffuseColor.rgb * 0.2,
+               shade
+             );
+           }
+           // Snapshot the slime's own diffuse (including foam pattern +
+           // gradient / photo + user-picked colour) BEFORE the coating
+           // overlay so cracks / tears reveal the actual material the
+           // user chose in slime options.
+           vec3 slimeBaseColor = diffuseColor.rgb;
 
            // Wax, foil, and ice paint the ENTIRE ball in the coating
            // colour so the sphere reads as "red wax" / "gold foil" /
@@ -1632,6 +2181,7 @@ function installDamageShader(
            // metallic + iridescent, ice is fully matte + crackable) and
            // the flags are mutually exclusive so whichever is 1 wins.
            if (uCoatingIsFoil > 0.5 || uCoatingIsIce > 0.5 || uCoatingIsWax > 0.5) {
+             vec3 coatingRGB;
              if (uUseCoatingGradient > 0.5) {
                // Sample coating LUT keyed off the vertex's rest Y — same
                // top-to-bottom direction the slime gradient uses — so a
@@ -1642,11 +2192,28 @@ function installDamageShader(
                  0.0,
                  1.0
                );
-               diffuseColor.rgb =
+               coatingRGB =
                  texture2D(uCoatingGradient, vec2(ct, 0.5)).rgb;
              } else {
-               diffuseColor.rgb = uCoatingTint;
+               coatingRGB = uCoatingTint;
              }
+             // Wax thickness ("콧") — 1콧 = translucent thin coat where
+             // the inner slime shows through. Other coatings ignore the
+             // uniform (mixAlpha = 1) so their tint stays fully opaque.
+             float mixAlpha;
+             if (uCoatingIsWax > 0.5) {
+               mixAlpha = clamp(uWaxThicknessAlpha, 0.0, 1.0);
+             } else if (uCoatingIsIce > 0.5) {
+               // 글레이즈 — crystal-glass shell. Full-strength diffuse
+               // tint so the shell reads with the same colour intensity
+               // as a slime-crystal-material would with the user's pick;
+               // transmission (kept on via _applyLook) then carries the
+               // tint through the volume so light passes coloured too.
+               mixAlpha = 1.0;
+             } else {
+               mixAlpha = 1.0;
+             }
+             diffuseColor.rgb = mix(diffuseColor.rgb, coatingRGB, mixAlpha);
            }
 
            float crackReveal = 0.0;
@@ -1870,21 +2437,43 @@ function installDamageShader(
              }
            }
 
-           // No tap-count intensity multiplier — visibility stays
-           // at full opacity from the FIRST tap. Range/area growth
-           // is handled by the per-branch width formulas above,
-           // which start small at crackLevel 1 and widen with each
-           // additional tap (and with continuous long-press growth).
            // Cracks reveal the slime's own base colour (snapshotted
-           // before the coating overrode diffuseColor). Ice and wax
-           // cracks brighten a little toward a wet-cream tone so
-           // slime showing through the shell reads as glistening
-           // wet; foil shows the raw slime colour unaltered.
-           vec3 wetReveal = mix(slimeBaseColor, vec3(1.0), 0.35);
-           float wetMix = max(uCoatingIsIce, uCoatingIsWax);
-           vec3 crackTarget = mix(slimeBaseColor, wetReveal, wetMix);
+           // before the coating overrode diffuseColor). No "wet cream"
+           // whitewash — the user-picked slime colour must show through
+           // faithfully regardless of material. Previously ice / wax on
+           // non-matte materials blended 35% white into the reveal which
+           // combined with the diffuse boost clipped saturated colours to
+           // solid white (e.g. pink crystal under wax read as white).
+           vec3 crackTarget = slimeBaseColor;
            diffuseColor.rgb =
              mix(diffuseColor.rgb, crackTarget, crackReveal);
+
+           // Shell-bead mode: discard fragments inside crack lines so
+           // the underlying slime mesh shows through the physical gap.
+           //   uShellMode = 0 → slime body, no discard (colour-blend
+           //     crack — legacy behaviour).
+           //   uShellMode in (0, 1] → hollow-bead SHELL SURFACE. Per-
+           //     vertex aShellSide (0 outer, 1 inner) picks between
+           //     uShellMode (outer threshold) and 0.85 (inner). Outer
+           //     cracks open early; inner only at wide cracks. Both
+           //     surfaces discard normally.
+           if (uShellMode > 0.001) {
+             float threshold = uShellMode;
+             if (crackReveal > threshold) discard;
+             // Rim darkening: fragments just below the discard
+             // threshold read as darker — fakes the shadow cast by
+             // the wall cross-section receding into the crack.
+             // A pure 2D shader trick (no real 3D geometry), so it
+             // only reads convincingly from head-on angles, but it
+             // gives cracks visible depth without a mesh rewrite.
+             float rimBand = 0.22;
+             float rimEdge = threshold - rimBand;
+             if (crackReveal > rimEdge) {
+               float rimT = (crackReveal - rimEdge) / rimBand;
+               rimT = rimT * rimT;
+               diffuseColor.rgb *= 1.0 - rimT * 0.65;
+             }
+           }
 
            if (uInkAmount > 0.005) {
              float t = inkTurb(vRest * 1.6);
@@ -1898,87 +2487,122 @@ function installDamageShader(
                mix(diffuseColor.rgb, uInkColor, clamp(band, 0.0, 1.0));
            }
 
-           // Matte foam pattern — mottles the base slime colour with fine
-           // brightness variation so the surface reads as aerated bath
-           // foam (see reference capture). Only mixes when NO crack-
-           // drawing coating is active (wax/foil/ice/tube all paint
-           // the whole shell with their own tint, so foam speckle
-           // would leak onto those surfaces).
-           float vFoam = 0.0;
-           if (uMaterialIsMatte > 0.5 && uDamageEnabled < 0.5) {
-             // Two-scale foam: fbm gives soft cellular pockets, a second
-             // higher-frequency layer adds tiny bubble highlights.
-             float fbm = foamFbm(vRest * 22.0);
-             float fine = foamNoise(vRest * 55.0);
-             vFoam = clamp(fbm * 0.75 + fine * 0.35, 0.0, 1.0);
-             // Both bubble masks push toward DARKER shades of the slime's
-             // OWN colour — no added white/grey. Mid-frequency pockets
-             // get a mild darken (subtle mottling) and the deep pockets
-             // get a stronger darken (bubble crevice), so foam always
-             // reads as a darker tone of whatever colour the slime is
-             // (mint slime → darker mint pockets, pink slime → darker
-             // pink pockets), matching the reference capture.
-             // Widen the smoothstep bands so more of the surface takes
-             // a darkening pass — reduces the amount of pure slime-tone
-             // area between pockets, pushing the overall look darker.
-             float bright = smoothstep(0.4, 0.9, vFoam);
-             float shade  = smoothstep(0.6, 0.1, vFoam);
-             diffuseColor.rgb = mix(
-               diffuseColor.rgb,
-               diffuseColor.rgb * 0.3,
-               bright * 0.95
-             );
-             diffuseColor.rgb = mix(
-               diffuseColor.rgb,
-               diffuseColor.rgb * 0.2,
-               shade
-             );
-           }
-
            `
         )
         .replace(
           '#include <roughnessmap_fragment>',
           `#include <roughnessmap_fragment>
-           if (crackReveal > 0.0) {
-             // Ice cracks expose wet inner cream — nearly mirror glossy.
-             // Foil tears expose raw slime body — soft slime gloss, not
-             // mirror, so the exposed patch reads as squishy rather than
-             // as another shiny surface layer.
-             float crackRoughness = mix(0.12, 0.35, uCoatingIsFoil);
-             roughnessFactor =
-               mix(roughnessFactor, crackRoughness, crackReveal * 0.9);
-           }
-           // Matte foam roughness modulation. Bright bubble spots
-           // (highlights) drop roughness a touch so a tiny glint reads
-           // as the top of an aerated bubble, while shaded pockets push
-           // roughness up so the cavity looks dry / dusty. The overall
-           // material stays matte — this is just enough variation to
-           // fake surface bumps without a normal map.
-           if (uMaterialIsMatte > 0.5 && uDamageEnabled < 0.5) {
+           // Base material's own roughness (matte foam / metal / glossy /
+           // crystal) as picked by the user — captured BEFORE the coating
+           // shell override so the crack pass can revert to it.
+           float _baseRoughness = roughnessFactor;
+           // Matte foam roughness modulation on the base surface. Bright
+           // bubble spots drop roughness so a tiny glint reads as an
+           // aerated bubble top, shaded pockets bump roughness so the
+           // cavity looks dry / dusty. Applied to _baseRoughness so the
+           // foam pattern reads correctly whether visible directly or
+           // revealed through a coating crack.
+           if (uMaterialIsMatte > 0.5) {
              float bright = smoothstep(0.55, 0.95, vFoam);
              float shade  = smoothstep(0.45, 0.05, vFoam);
-             roughnessFactor =
-               clamp(roughnessFactor + shade * 0.15 - bright * 0.35, 0.05, 1.0);
-           }`
+             _baseRoughness =
+               clamp(_baseRoughness + shade * 0.15 - bright * 0.35, 0.05, 1.0);
+           }
+           // Coating enforces its OWN shell material response — wax
+           // always reads as matte, foil always reads as polished metal,
+           // regardless of what the user picked for the underlying slime.
+           // The coating's target is applied to the SHELL area only; the
+           // crack area reverts to _baseRoughness so torn shell exposes
+           // the material's own finish. Wax alpha (1~4콧) scales the
+           // shell override so a thin 1콧 coating still lets the base
+           // material's finish read through where the shell is intact.
+           float _shellR = _baseRoughness;
+           float _shellCoverage = 0.0;
+           if (uCoatingIsWax > 0.5) {
+             // Wax reads as matte but not fully rough — 0.9 dropped the
+             // env reflection so far that a pure-white shell looked light
+             // grey against a white-mode background. 0.4 keeps the shell
+             // clearly less shiny than glossy (0.18) / foil (0.2) while
+             // reflecting enough environment light to read as bright
+             // white wax.
+             _shellR = 0.4;
+             _shellCoverage = clamp(uWaxThicknessAlpha, 0.0, 1.0);
+           } else if (uCoatingIsTube > 0.5) {
+             // 젤 (tube) = glossy paper: check BEFORE foil since tube
+             // also flips uCoatingIsFoil (they share the crack shader).
+             // Slightly rougher than metal foil for a paper feel.
+             _shellR = 0.15;
+             _shellCoverage = 1.0;
+           } else if (uCoatingIsFoil > 0.5) {
+             _shellR = 0.2;
+             _shellCoverage = 1.0;
+           } else if (uCoatingIsIce > 0.5) {
+             // 글레이즈 (ice) = crystal glaze: very low roughness for the
+             // wet mirror-glass sheen.
+             _shellR = 0.05;
+             _shellCoverage = 1.0;
+           }
+           float _coatedR = mix(_baseRoughness, _shellR, _shellCoverage);
+           // Crack revealed roughness is clamped to a satin minimum so a
+           // crystal-base (0.05) or glossy-base (0.18) slime doesn't turn
+           // the crack area into a mirror that reflects the bright env
+           // map and washes the slime colour out to white. Matte / metal
+           // are already >= 0.28 so this clamp is a no-op for them.
+           float _crackR = max(_baseRoughness, 0.3);
+           roughnessFactor = mix(_coatedR, _crackR, crackReveal);`
         )
         .replace(
           '#include <metalnessmap_fragment>',
           `#include <metalnessmap_fragment>
-           if (crackReveal > 0.0 && uCoatingIsFoil > 0.5) {
-             // Torn foil exposes non-metallic slime — kill metalness in
-             // the crack area so the base colour is rendered as diffuse
-             // slime instead of being swallowed by the specular BRDF.
-             metalnessFactor = mix(metalnessFactor, 0.0, crackReveal);
-           }`
+           // Coating's shell metalness — foil forces polished metal,
+           // wax forces zero metal (matte wax has no metal reflection).
+           // Crack area reverts to the material's own metalness so a
+           // torn foil on metal-putty slime still shows metal through
+           // the tear, while a torn foil on foam slime shows foam.
+           float _baseMetalness = metalnessFactor;
+           float _shellM = _baseMetalness;
+           float _shellCoverageM = 0.0;
+           if (uCoatingIsWax > 0.5) {
+             _shellM = 0.0;
+             _shellCoverageM = clamp(uWaxThicknessAlpha, 0.0, 1.0);
+           } else if (uCoatingIsTube > 0.5) {
+             // 젤 paper = no metal. Check before foil since they share
+             // uCoatingIsFoil for the crack shader.
+             _shellM = 0.0;
+             _shellCoverageM = 1.0;
+           } else if (uCoatingIsFoil > 0.5) {
+             _shellM = 0.9;
+             _shellCoverageM = 1.0;
+           } else if (uCoatingIsIce > 0.5) {
+             // 글레이즈 crystal = no metal.
+             _shellM = 0.0;
+             _shellCoverageM = 1.0;
+           }
+           float _coatedM = mix(_baseMetalness, _shellM, _shellCoverageM);
+           metalnessFactor = mix(_coatedM, _baseMetalness, crackReveal);`
         )
         .replace(
-          // Boost the diffuse contribution inside the crack strips so the
-          // bright slime clearly punches through the ice's cool sheen tint.
+          '#include <lights_physical_fragment>',
+          `#include <lights_physical_fragment>
+           // Foil coating carries a mirror clearcoat (1.0) globally so
+           // even the crack area gets a wet-lacquer top layer that
+           // reflects env light and washes the exposed slime colour
+           // out. Reduce clearcoat in crack areas so torn foil reveals
+           // the raw slime beneath instead of a lacquered version of it.
+           #ifdef USE_CLEARCOAT
+             material.clearcoat *= mix(1.0, 0.15, clamp(crackReveal, 0.0, 1.0));
+           #endif`
+        )
+        .replace(
+          // Mild diffuse lift in crack strips so the exposed slime pops
+          // against the intact coating. Kept moderate (1.25/1.15) so
+          // saturated slime colours don't clip past 1.0 into pure white
+          // — the previous 1.95/1.7 boost was overdriving pink / red
+          // slimes under wax to look solid white through the cracks.
           'vec3 totalDiffuse = reflectedLight.directDiffuse',
           `if (crackReveal > 0.01) {
-             reflectedLight.directDiffuse *= mix(1.0, 1.95, crackReveal);
-             reflectedLight.indirectDiffuse *= mix(1.0, 1.7, crackReveal);
+             reflectedLight.directDiffuse *= mix(1.0, 1.25, crackReveal);
+             reflectedLight.indirectDiffuse *= mix(1.0, 1.15, crackReveal);
            }
            vec3 totalDiffuse = reflectedLight.directDiffuse`
         )

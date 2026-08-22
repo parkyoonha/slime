@@ -4,6 +4,11 @@
   box-sizing: border-box;
   margin: 0;
   padding: 0;
+  /* Suppress the blue tap flash Android WebView paints on every
+     touched element by default. Every interactive control in the
+     app already reads its pressed state via colour changes on
+     :active — the extra overlay just muddies those transitions. */
+  -webkit-tap-highlight-color: transparent;
 }
 
 /* ── Theme tokens ───────────────────────────────────────────
@@ -30,6 +35,10 @@
      the active chip so the picked option reads as pressed in / recessed
      against the surrounding gray chips instead of raised out of them. */
   --bg-chip-selected: rgba(20, 20, 24, 0.95);
+  /* Collection-card / checkbox fill when a card is picked. Grey that
+     reads as "selected" against the pill in each theme without a
+     crisp outline. */
+  --bg-card-selected: rgba(60, 60, 68, 0.9);
   /* Selection-summary tag pills (unified + per-detail rows) — a darker
      surface than the chip default so the read-only tags visually
      recede below the interactive option chips. */
@@ -80,6 +89,7 @@
   /* See dark-theme comment above — light mode's "selected" surface is a
      deeper mid-gray so it still reads as pressed against the pale chips. */
   --bg-chip-selected: rgba(150, 150, 158, 0.95);
+  --bg-card-selected: rgba(210, 210, 218, 0.95);
   --bg-tag: rgba(170, 170, 182, 0.95);
   --color-border-muted: rgba(150, 150, 158, 0.85);
   --bg-bottom-bar: rgba(225, 225, 232, 0.95);

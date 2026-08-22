@@ -146,7 +146,11 @@
   gap: 10px;
   padding: 2px 0;
   background: transparent;
-  border-radius: 999px;
+  /* No border-radius on the container — otherwise the pill-shape
+     combined with overflow clips the first and last chip's outer
+     corners into that same pill curve, so edge chips render with
+     rounded outer corners while middle chips stay sharp. */
+  border-radius: 0;
   overflow-x: auto;
   overflow-y: hidden;
   touch-action: pan-x;
@@ -184,42 +188,86 @@
   display: none;
 }
 
+/* Category chip — filled tile with the category icon on top and the
+   label below. Each chip has its own solid background so users see the
+   category as a distinct button rather than a pill-shaped placeholder.
+   Sharp 4px corners (vs. the previous 12px pill) removes the "rounded
+   placeholder" read at the row edges the user flagged. */
 .primaryChip {
   flex-shrink: 0;
-  padding: 6px 10px;
-  border-radius: 999px;
-  background: transparent;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 16px 10px;
+  border-radius: 10px;
+  /* Deeper dark-mode tone than --bg-chip so the tile clearly stands
+     out from the near-black page background. Overridden below for
+     the light theme with a much brighter surface. */
+  background: rgba(30, 30, 36, 0.95);
   border: none;
   outline: none;
   -webkit-tap-highlight-color: transparent;
   color: var(--color-text-muted);
-  font-size: 14px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.02em;
   white-space: nowrap;
-  transition: font-size 120ms ease;
   cursor: pointer;
+  min-width: 60px;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+:global(html[data-theme='light']) .primaryChip {
+  background: rgba(250, 250, 253, 0.98);
 }
 .primaryChip::-moz-focus-inner {
   border: 0;
   padding: 0;
 }
 .primaryChip:first-child {
-  padding-left: 4px;
+  padding-left: 8px;
+}
+
+.primaryChipIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: inherit;
+}
+.primaryChipIcon svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.primaryChipLabel {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .primaryChip[data-active='true'] {
-  /* Border-less active state — no pill background. Instead the
-     selected chip pops via a bumped font-size and full opacity
-     while non-selected chips stay at the base size + 50% opacity. */
-  background: transparent;
+  /* Active tile picks a brighter shade in dark mode so it lifts out
+     of the deeper base, and a darker shade in light mode so it sinks
+     against the paler base — both directions read as "selected". */
+  background: rgba(80, 80, 92, 0.98);
   color: var(--color-text);
   font-weight: 700;
-  font-size: 18px;
+}
+:global(html[data-theme='light']) .primaryChip[data-active='true'] {
+  background: rgba(200, 200, 210, 0.98);
+}
+.primaryChip[data-active='true'] .primaryChipLabel {
+  font-weight: 700;
 }
 
 .primaryChip[data-dim='true'] {
-  opacity: 0.5;
+  opacity: 0.55;
 }
 
 .primaryChip:not([data-active='true']):hover,
@@ -402,18 +450,28 @@
   padding: 2px 0 4px;
   scrollbar-width: none;
   justify-content: flex-start;
+  --options-fade-left: transparent 0, black 4%;
+  --options-fade-right: black 92%, transparent 100%;
   -webkit-mask-image: linear-gradient(
     to right,
-    black 0,
-    black 92%,
-    transparent 100%
+    var(--options-fade-left),
+    var(--options-fade-right)
   );
   mask-image: linear-gradient(
     to right,
-    black 0,
-    black 92%,
-    transparent 100%
+    var(--options-fade-left),
+    var(--options-fade-right)
   );
+}
+
+/* At scroll extremes, drop the fade on THAT side so the very first
+   (or very last) chip reads crisply. Data attributes are written by
+   the useEffect in CustomizePanel. */
+.options[data-at-start='true'] {
+  --options-fade-left: black 0, black 0;
+}
+.options[data-at-end='true'] {
+  --options-fade-right: black 100%, black 100%;
 }
 
 .options::-webkit-scrollbar {
@@ -466,6 +524,20 @@
   color: var(--color-selected-text);
 }
 
+/* Color chips have a two-tier active state: the currently-adjusted
+   target keeps the full --bg-selected pill (visible as "border" the
+   user reads), while other selected-but-not-target chips drop to a
+   dimmer surface so the target stands out. Per-theme tuning:
+   dark mode → darker gray, light mode → less-white gray. */
+.chip[data-active='true']:not([data-adjust-target='true']) {
+  background: rgba(90, 90, 100, 0.75);
+  color: var(--color-text);
+}
+:global(html[data-theme='light']) .chip[data-active='true']:not([data-adjust-target='true']) {
+  background: rgba(205, 205, 213, 0.9);
+  color: var(--color-text);
+}
+
 .swatch {
   width: 16px;
   height: 16px;
@@ -498,12 +570,11 @@
   flex: 1 1 0;
   min-width: 0;
   overflow: hidden;
-  /* Each slider (색조 / 명도) gets its own rounded-rectangle rim so
-     the two channels read as discrete controls, matching the visual
-     weight of the primary chip strip above. */
-  border: 1px solid var(--color-border-muted);
+  /* Borderless — the two slider pills read via their darker fill
+     against the surrounding panel instead of an outline. */
+  border: none;
   border-radius: 10px;
-  background: transparent;
+  background: var(--bg-tag);
 }
 
 .adjustHeader {

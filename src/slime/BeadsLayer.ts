@@ -2,10 +2,13 @@ import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js'
 import {
   BEAD_MATERIAL_PARAMS,
+  MATERIALS,
   COATINGS,
   resolveColorHex,
+  resolveInnerCoatingHex,
   type BeadColorId,
   type BeadMaterialId,
+  type MaterialId,
   type BeadShapeId,
   type BeadsConfig,
   type CoatingId,
@@ -144,7 +147,6 @@ export class BeadsLayer {
   // path entirely and uses the vertex / fibonacci flows.
   private gridMode = false
   private gridPositions: Float32Array = new Float32Array(0)
-  private gridNormals: Float32Array = new Float32Array(0)
   /** For every grid bead, the mesh vertex nearest to its rest position
    *  and that vertex's REST world coordinates. Update adds
    *  (currentVertex − restVertex) to the fixed grid position so beads
@@ -189,7 +191,7 @@ export class BeadsLayer {
   /** Rest magnitude (interpolated across the 3 nearest vertices) per bead. */
   private fillRestMag: Float32Array = new Float32Array(0)
 
-  private currentMaterialId: BeadMaterialId = 'plastic'
+  private currentMaterialId: BeadMaterialId | MaterialId = 'plastic'
   private currentCoatingId: CoatingId = 'none'
 
   // Per-bead damage / crackLevel / press-edge tracking, indexed by
@@ -197,6 +199,14 @@ export class BeadsLayer {
   // to its slot's per-instance attribute via the same
   // (i % slotCount, perSlotCursor) mapping used for matrices.
   private beadDamage: Float32Array = new Float32Array(0)
+  /** Total press force landed on ANY bead in this layer during the
+   *  most recent update() — read externally by SlimeApp so coating
+   *  loop sounds can be gated on whether the user's tips actually
+   *  touched a coated bead, not just any press on the outer slime. */
+  private _pressForceThisFrame = 0
+  get pressForceThisFrame(): number {
+    return this._pressForceThisFrame
+  }
   private beadCrackLevel: Float32Array = new Float32Array(0)
   private beadWasPressed: Uint8Array = new Uint8Array(0)
   // Per-bead press-origin direction (slime-local frame, unit vector),
@@ -223,6 +233,10 @@ export class BeadsLayer {
   private readonly beadIsWaxUniform = { value: 0.0 }
   private readonly beadIsIceUniform = { value: 0.0 }
   private readonly beadIsFoilUniform = { value: 0.0 }
+  /** 1 when the ball's coating is 젤 (tube). Same tear shader as foil
+   *  but a glossy PAPER shell (no metal), so this extra flag lets the
+   *  shell branches override foil's metallic override for tube. */
+  private readonly beadIsTubeUniform = { value: 0.0 }
   /** 1 when the layer is in the 속비즈 preset (chunk combo, single bead
    *  at slime origin). Tells the foil/tube branch of the crack shader
    *  to drop the press-point cone gate so tears spread across the whole
@@ -230,6 +244,49 @@ export class BeadsLayer {
    *  fully-embedded bead would otherwise only rip in a narrow patch
    *  facing the last press, reading as wax-style angular cracks. */
   private readonly beadFoilFullSurfaceUniform = { value: 0.0 }
+  /** Coating colour tint for the bead surface — independent from the per-
+   *  instance bead colour so a green ball can wear a gold wax coating.
+   *  `beadCoatingTintUniform` holds the RGB, `beadCoatingAlphaUniform`
+   *  gates it (0 = no tint, coating renders as raw bead colour; 1 = tint
+   *  fully paints the surface). The crack pass in the fragment shader
+   *  snapshots the pre-tint diffuse so cracks reveal the ball's own bead
+   *  colour underneath, matching the slime's coating-crack behaviour. */
+  private readonly beadCoatingTintUniform = {
+    value: new THREE.Color(1, 1, 1)
+  }
+  private readonly beadCoatingAlphaUniform = { value: 0.0 }
+  /** 1 when the bead's material is the slime 'matte' preset, 0 otherwise.
+   *  Enables the same procedural foam pattern the slime shader applies for
+   *  matte material so a matte 슬라임볼 reads as aerated bath foam rather
+   *  than a plain rough sphere. Only meaningful when useSlimeMaterials is
+   *  true (regular bead layers can't pick 'matte'). */
+  private readonly beadMaterialIsMatteUniform = { value: 0.0 }
+  /** 슬라임볼 (single-centered buried ball) press-dent uniforms — mimic
+   *  the outer slime's per-vertex indentation with a vertex-shader that
+   *  pushes vertices inward inside a soft cone around each active dent.
+   *  `uBallDentEnabled` gates the whole pass so multi-count 슬라임볼 (on
+   *  surface) doesn't get dented. Each slot in `uBallDents` is a vec4
+   *  (dir.xyz, strength): dir is a unit direction in bead-local frame
+   *  (= slime-local for the buried ball since its instance rotation is
+   *  identity), strength is 0..~0.35 indicating how much to push vertices
+   *  inward as a fraction of bead radius. Persists across frames — the
+   *  slime feels like clay, not spring. */
+  private readonly ballDentEnabledUniform = { value: 0.0 }
+  private readonly ballDentsUniform: { value: THREE.Vector4[] } = {
+    value: (() => {
+      const a: THREE.Vector4[] = []
+      for (let i = 0; i < 8; i++) a.push(new THREE.Vector4(1, 0, 0, 0))
+      return a
+    })()
+  }
+  /** DECOUPLED bulge amount — separate from dent slot strengths so
+   *  the ball's overall envelope can start expanding the moment ANY
+   *  press touches the slime, without waiting for the touch-through
+   *  filter (which delays dent accumulation until the slime surface
+   *  physically reaches the ball). Without this, the outer slime
+   *  bulged first and the buried ball read as "shrunk" relative to
+   *  the growing slime silhouette until dents finally kicked in. */
+  private readonly ballBulgeUniform = { value: 0.0 }
   // 사진 비즈 uniforms. `uBeadPhotoUse` gates the whole photo pass so
   // beads without a photo assigned early-out. The atlas is a 2×2 grid
   // (up to 4 photos, each in one quadrant) so a single sampler carries
@@ -282,8 +339,24 @@ export class BeadsLayer {
   private readonly _outward = new THREE.Vector3()
   private readonly _color = new THREE.Color()
 
-  constructor() {
+  /** When true, single chunk beads sit at the slime SURFACE (like any
+   *  other chunk bead) instead of collapsing to the slime's origin.
+   *  Used by the inner-slime layer so its single-ball preset bulges the
+   *  outer slime instead of vanishing inside its own volume. */
+  private readonly alwaysSurface: boolean
+  /** When true, this layer's `config.material` id is resolved against the
+   *  slime MATERIALS palette (crystal / glossy / matte / metal) instead of
+   *  the bead-specific BEAD_MATERIAL_PARAMS table. Used by the 슬라임볼
+   *  (innerSlime) layer so its material picker matches the slime's own. */
+  private readonly useSlimeMaterials: boolean
+
+  constructor(opts?: {
+    alwaysSurface?: boolean
+    useSlimeMaterials?: boolean
+  }) {
     this.group = new THREE.Group()
+    this.alwaysSurface = opts?.alwaysSurface ?? false
+    this.useSlimeMaterials = opts?.useSlimeMaterials ?? false
   }
 
   get currentConfig(): Readonly<BeadsConfig> {
@@ -502,6 +575,23 @@ export class BeadsLayer {
     }
   }
 
+  /** 슬라임 안 mode — shrink the bead instanced meshes AND the wrap-
+   *  shell meshes independently. Group-scaling everything (the naive
+   *  approach) dragged the wrap fully inward and the slime "skin"
+   *  disappeared; scaling only beads left the wrap sitting on the
+   *  surface as bead-shaped bulges that read as beads-on-surface. The
+   *  compromise: beads drop deep (small `beadScale`) while the wrap
+   *  moves inward only slightly (large `wrapScale` near 1) so the
+   *  slime keeps a soft bead-textured skin but the actual bead cores
+   *  read as separated inclusions well behind that skin. `beadScale =
+   *  wrapScale = 1` restores surface-anchored behaviour. */
+  setInsideScale(beadScale: number, wrapScale: number) {
+    for (const s of this.slots) {
+      s.instanced.scale.setScalar(beadScale)
+      s.wrapInstanced.scale.setScalar(wrapScale)
+    }
+  }
+
   /** Copy the slime's current surface look onto the wrap-shell material.
    *  Called by SlimeApp after every slime setter (color / material /
    *  coating / coating colour). Also caches the params so if the wrap
@@ -560,6 +650,45 @@ export class BeadsLayer {
   setMatteFoamUniform(uniform: { value: number }) {
     this.matteFoamUniform = uniform
     if (this.wrapMaterial) this.installWrapInkShader(this.wrapMaterial)
+  }
+
+  /** Turn the 슬라임볼 per-vertex dent pass on/off. On for the buried
+   *  single-centered ball, off for every other layout so a surface bead
+   *  under a finger doesn't ALSO indent at every stored dent direction. */
+  setBallDentEnabled(on: boolean) {
+    this.ballDentEnabledUniform.value = on ? 1.0 : 0.0
+  }
+
+  /** Write one dent slot. `dir` is a unit vector in bead-local frame
+   *  (= slime-local for the buried ball since its instance rotation is
+   *  identity), `strength` is 0..~0.35 = fraction of bead radius the
+   *  vertex is pushed inward at the centre of the cone. Zero strength
+   *  disables the slot. */
+  setBallDent(
+    i: number,
+    dx: number,
+    dy: number,
+    dz: number,
+    strength: number
+  ) {
+    const arr = this.ballDentsUniform.value
+    if (i < 0 || i >= arr.length) return
+    arr[i].set(dx, dy, dz, strength)
+  }
+
+  /** Number of dent slots the shader iterates over. Kept in sync with
+   *  the ballDentsUniform initialiser + the shader loop bound. */
+  get ballDentCapacity(): number {
+    return this.ballDentsUniform.value.length
+  }
+
+  /** Set the ball's overall bulge amount. Value is roughly a "press
+   *  time × pressure" accumulator; the shader curves it through an
+   *  exponential asymptote so a long press keeps expanding the ball
+   *  without ever hitting a hard cap. Independent from dent slots
+   *  so the bulge can lead / trail the local dent freely. */
+  setBallBulgeAmount(v: number) {
+    this.ballBulgeUniform.value = v
   }
 
   /** Attach onBeforeCompile that mixes ink swirls into the wrap fragment
@@ -737,9 +866,17 @@ export class BeadsLayer {
     const isWaxU = this.beadIsWaxUniform
     const isIceU = this.beadIsIceUniform
     const isFoilU = this.beadIsFoilUniform
+    const isTubeU = this.beadIsTubeUniform
     const foilFullU = this.beadFoilFullSurfaceUniform
     const photoUseU = this.beadPhotoUseUniform
     const photoAtlasU = this.beadPhotoAtlasUniform
+    const coatingTintU = this.beadCoatingTintUniform
+    const coatingAlphaU = this.beadCoatingAlphaUniform
+    const matteU = this.beadMaterialIsMatteUniform
+    const ballDentEnabledU = this.ballDentEnabledUniform
+    const ballDentsU = this.ballDentsUniform
+    const ballDentSlots = ballDentsU.value.length
+    const ballBulgeU = this.ballBulgeUniform
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uBeadGradientUse = useU
       shader.uniforms.uBeadGradient = texU
@@ -751,12 +888,24 @@ export class BeadsLayer {
       shader.uniforms.uBeadCoatingIsWax = isWaxU
       shader.uniforms.uBeadCoatingIsIce = isIceU
       shader.uniforms.uBeadCoatingIsFoil = isFoilU
+      shader.uniforms.uBeadCoatingIsTube = isTubeU
       shader.uniforms.uBeadFoilFullSurface = foilFullU
+      // Coating tint — independent from the per-bead colour so ball's
+      // coating can be a different hue than its body.
+      shader.uniforms.uBeadCoatingTint = coatingTintU
+      shader.uniforms.uBeadCoatingAlpha = coatingAlphaU
+      // Slime-matte foam pattern flag for inner-slime layers.
+      shader.uniforms.uBeadMaterialIsMatte = matteU
       // 사진 비즈 uniforms — atlas is a 2×2 grid of up to 4 photos.
       // aPhotoQuadrant tells each instance which quadrant to sample
       // (0..3, -1 = no photo).
       shader.uniforms.uBeadPhotoUse = photoUseU
       shader.uniforms.uBeadPhotoAtlas = photoAtlasU
+      // 슬라임볼 dent uniforms — pushed inward in the vertex shader
+      // around each active dent's direction. See ballDentsUniform doc.
+      shader.uniforms.uBallDentEnabled = ballDentEnabledU
+      shader.uniforms.uBallDents = ballDentsU
+      shader.uniforms.uBallBulge = ballBulgeU
 
       shader.vertexShader =
         `varying float vBeadGradT;
@@ -775,10 +924,68 @@ export class BeadsLayer {
          varying vec3 vBeadPressDir;
          varying vec3 vBeadVertexDir;
          varying float vBeadPhotoQuadrant;
+         uniform float uBallDentEnabled;
+         uniform vec4 uBallDents[${ballDentSlots}];
+         uniform float uBallBulge;
         ` +
         shader.vertexShader.replace(
           '#include <begin_vertex>',
           `#include <begin_vertex>
+           // 슬라임볼 dent + volume-preserving bulge. Runs BEFORE the
+           // varying hookups below so subsequent view-space calculations
+           // pick up the already-displaced position (bead centre stays
+           // at origin so vBeadVertexDir still resolves correctly). Two
+           // passes together mimic how the outer slime deforms under a
+           // press:
+           //   (1) UNIFORM BULGE — every vertex scales outward by a
+           //       factor proportional to the total dent load. This is
+           //       the "the ball's volume expands with the slime" pass:
+           //       without it, adding dents only pushed vertices IN and
+           //       the ball read as shrinking even though the slime
+           //       around it was clearly bulging outward.
+           //   (2) LOCAL DENT — inside each dent's cone, subtract along
+           //       the outward direction to carve a concave depression
+           //       where the finger landed. Dent strength is tuned to
+           //       overwhelm the bulge at the cone centre so the
+           //       depression stays clearly concave regardless of how
+           //       many dents are active.
+           // uBallDentEnabled gates the whole pass off for anything but
+           // the buried single-centered ball.
+           if (uBallDentEnabled > 0.5) {
+             // Bulge is DECOUPLED from dent slots — driven by
+             // uBallBulge (a press-time × pressure accumulator on
+             // the CPU) so the ball's outer envelope starts
+             // expanding the instant any finger touches the slime,
+             // BEFORE the touch-through filter admits tips for the
+             // local dent. Without this decoupling, the outer slime
+             // bulges first and the buried ball reads as "shrunk"
+             // relative to the growing slime silhouette until dent
+             // accumulation finally catches up.
+             //
+             // Local dent still uses the touch-filtered slot strengths
+             // (only tips that reached the ball's skin populate a
+             // slot), so the concave depression only appears at the
+             // press point AFTER contact — but by then the ball is
+             // already puffed and there's no perceived shrink.
+             //
+             // Strict cap keeps cone-centre verts at (rest .. rest+bulge)
+             // so the ball's front surface never recedes past its rest
+             // position in perspective view.
+             vec3 _bDir = normalize(transformed);
+             float _bLocalDent = 0.0;
+             for (int i = 0; i < ${ballDentSlots}; i++) {
+               vec4 _bD = uBallDents[i];
+               if (_bD.w > 0.001) {
+                 float _bCos = dot(_bDir, _bD.xyz);
+                 float _bFall = smoothstep(0.55, 1.0, _bCos);
+                 _bLocalDent = max(_bLocalDent, _bD.w * _bFall);
+               }
+             }
+             float _bBulge = 0.3 * (1.0 - exp(-uBallBulge * 2.0));
+             transformed *= (1.0 + _bBulge);
+             _bLocalDent = min(_bLocalDent, _bBulge);
+             transformed -= _bDir * _bLocalDent;
+           }
            vBeadDamage = aDamage;
            vBeadCrackLevel = aCrackLevel;
            vBeadPressDir = aPressPoint;
@@ -820,7 +1027,11 @@ export class BeadsLayer {
          uniform float uBeadCoatingIsWax;
          uniform float uBeadCoatingIsIce;
          uniform float uBeadCoatingIsFoil;
+         uniform float uBeadCoatingIsTube;
          uniform float uBeadFoilFullSurface;
+         uniform vec3 uBeadCoatingTint;
+         uniform float uBeadCoatingAlpha;
+         uniform float uBeadMaterialIsMatte;
          uniform float uBeadPhotoUse;
          uniform sampler2D uBeadPhotoAtlas;
          varying float vBeadGradT;
@@ -830,6 +1041,47 @@ export class BeadsLayer {
          varying vec3 vBeadPressDir;
          varying vec3 vBeadVertexDir;
          varying float vBeadPhotoQuadrant;
+
+         // Matte foam noise — same aerated bubble pattern the slime
+         // shader draws for its 'matte' material. Ported inline so the
+         // bead shader doesn't need to share GLSL with SlimeSphere.
+         // Declared AFTER the varyings so the compiler sees the full
+         // top-level qualifier block before any function bodies.
+         float beadFoamHash3(vec3 p) {
+           p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419));
+           p *= 17.0;
+           return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+         }
+         float beadFoamNoise(vec3 p) {
+           vec3 i = floor(p);
+           vec3 f = fract(p);
+           vec3 u = f * f * (3.0 - 2.0 * f);
+           float n000 = beadFoamHash3(i);
+           float n100 = beadFoamHash3(i + vec3(1.0, 0.0, 0.0));
+           float n010 = beadFoamHash3(i + vec3(0.0, 1.0, 0.0));
+           float n110 = beadFoamHash3(i + vec3(1.0, 1.0, 0.0));
+           float n001 = beadFoamHash3(i + vec3(0.0, 0.0, 1.0));
+           float n101 = beadFoamHash3(i + vec3(1.0, 0.0, 1.0));
+           float n011 = beadFoamHash3(i + vec3(0.0, 1.0, 1.0));
+           float n111 = beadFoamHash3(i + vec3(1.0, 1.0, 1.0));
+           float nx00 = mix(n000, n100, u.x);
+           float nx10 = mix(n010, n110, u.x);
+           float nx01 = mix(n001, n101, u.x);
+           float nx11 = mix(n011, n111, u.x);
+           float nxy0 = mix(nx00, nx10, u.y);
+           float nxy1 = mix(nx01, nx11, u.y);
+           return mix(nxy0, nxy1, u.z);
+         }
+         float beadFoamFbm(vec3 p) {
+           float total = 0.0;
+           float amp = 0.5;
+           for (int i = 0; i < 4; i++) {
+             total += beadFoamNoise(p) * amp;
+             p *= 2.15;
+             amp *= 0.55;
+           }
+           return total;
+         }
 
          float beadCrackHash(vec2 p) {
            p = fract(p * vec2(233.34, 851.73));
@@ -917,6 +1169,42 @@ export class BeadsLayer {
           .replace(
             '#include <color_fragment>',
             `#include <color_fragment>
+           // Matte foam pattern — mottle the bead's diffuse with the same
+           // aerated bubble pockets the slime shader draws for its matte
+           // material, so a matte 슬라임볼 reads as foam. Sampled in the
+           // bead's LOCAL frame (each bead gets its own stable pattern).
+           // Runs BEFORE the base-colour snapshot so cracks reveal the
+           // foam texture beneath the coating tint, matching the slime's
+           // coating-crack behaviour on matte material.
+           float vBeadFoam = 0.0;
+           if (uBeadMaterialIsMatte > 0.5) {
+             float bfbm = beadFoamFbm(vBeadLocal * 22.0);
+             float bfine = beadFoamNoise(vBeadLocal * 55.0);
+             vBeadFoam = clamp(bfbm * 0.75 + bfine * 0.35, 0.0, 1.0);
+             float bBright = smoothstep(0.4, 0.9, vBeadFoam);
+             float bShade  = smoothstep(0.6, 0.1, vBeadFoam);
+             diffuseColor.rgb = mix(
+               diffuseColor.rgb,
+               diffuseColor.rgb * 0.3,
+               bBright * 0.95
+             );
+             diffuseColor.rgb = mix(
+               diffuseColor.rgb,
+               diffuseColor.rgb * 0.2,
+               bShade
+             );
+           }
+           // Snapshot the bead's own diffuse (post per-instance colour
+           // multiply, post foam) so cracks reveal the actual bead colour
+           // beneath the coating tint.
+           vec3 _beadBaseColor = diffuseColor.rgb;
+           if (uBeadCoatingAlpha > 0.001) {
+             diffuseColor.rgb = mix(
+               diffuseColor.rgb,
+               uBeadCoatingTint,
+               clamp(uBeadCoatingAlpha, 0.0, 1.0)
+             );
+           }
            // ── Bead crack pass ─────────────────────────────────────
            // Runs AFTER color_fragment so it modifies the FINAL per-
            // instance colour (base material * instanceColor). If we
@@ -973,94 +1261,70 @@ export class BeadsLayer {
                crackReveal = max(layer1, layer2);
                revealTone = 0.7;
              }
-             // ── WAX — CHUNKY WISPY-EDGE TEAR ───────────────────
-             // Adopts the LARGER wispy voronoi that used to belong to
-             // foil (freq 2.4 → few big cells with soft feathered
-             // edges). The previous wax model used two fine voronoi
-             // layers whose fragments were too small; a chunky
-             // wax-piece look calls for one big-cell layer, so both
-             // the visual and the mental model line up with real
-             // candle wax breaking off in slabs.
+             // ── WAX — CHUNKY WISPY-EDGE TEAR with SUBDIVISION ─
+             // Two voronoi layers so a long press keeps SHATTERING the
+             // shell into MORE, SMALLER wax pieces instead of just
+             // widening the gaps until existing pieces vanish. Layer
+             // 1 (freq 2.4) opens the initial chunky slabs; layer 2
+             // (freq 5.5) subdivides those slabs once damage crosses
+             // 0.4, adding fresh crack lines through pieces rather
+             // than eroding them. Base gap width is trimmed vs. the
+             // old single-layer version so no single layer can widen
+             // a gap far enough to erase a piece — the pieces stay
+             // visible, they just keep dividing.
              else if (uBeadCoatingIsWax > 0.5 && vBeadDamage > 0.01) {
-               vec2 v = beadCrackVoronoi(vBeadLocal * 2.4);
                float visibility = smoothstep(0.01, 0.15, vBeadDamage);
-               float baseWidth = smoothstep(0.02, 0.7, vBeadDamage) * 0.85;
-               float perCell = 0.3 + v.y * 2.0;
-               float crackWidth = min(baseWidth * perCell, 0.95);
-               // Soft edge band — the wispy tear rim was the foil's
-               // signature and reads as chunky ripped wax pieces
-               // rather than sharp angular fragments.
-               float edgeBand = min(0.18, crackWidth * 0.45);
+               float baseWidth = smoothstep(0.02, 0.7, vBeadDamage) * 0.4;
+               vec2 v1 = beadCrackVoronoi(vBeadLocal * 2.4);
+               float perCell1 = 0.3 + v1.y * 2.0;
+               float crackWidth1 = min(baseWidth * perCell1, 0.55);
+               float edgeBand1 = min(0.15, crackWidth1 * 0.4);
+               float layer1 = (1.0 - smoothstep(
+                 crackWidth1 - edgeBand1,
+                 crackWidth1,
+                 v1.x
+               )) * visibility;
+               vec2 v2 = beadCrackVoronoi(
+                 vBeadLocal * 5.5 + vec3(42.7, 19.3, 77.1)
+               );
+               float visLayer2 = smoothstep(0.4, 0.75, vBeadDamage);
+               float perCell2 = 0.3 + v2.y * 2.0;
+               float crackWidth2 = min(baseWidth * perCell2, 0.5);
+               float edgeBand2 = min(0.12, crackWidth2 * 0.4);
+               float layer2 = (1.0 - smoothstep(
+                 crackWidth2 - edgeBand2,
+                 crackWidth2,
+                 v2.x
+               )) * visLayer2;
+               crackReveal = max(layer1, layer2);
+               revealTone = 0.65;
+             }
+             // ── FOIL / TUBE — SLIME-FOIL WISPY TEAR ────────────
+             // Mirror the slime option's foil coating shader as
+             // closely as possible: voronoi at freq 2.3, damage-only
+             // width ramp (no stretch proxy), tight width cap so the
+             // tear opens cleanly instead of splitting into loose
+             // fragments. No press-cone gate (whole-ball tears
+             // uniformly) and no edge-shadow (rim darkening is
+             // suppressed for foil/tube below so the boundary reads
+             // as a sharp hairline exactly like the slime's).
+             else if (uBeadCoatingIsFoil > 0.5 && vBeadDamage > 0.005) {
+               vec2 v = beadCrackVoronoi(vBeadLocal * 2.3);
+               // Gradual visibility ramp — first tap only hints at
+               // hairline tears, more taps / sustained press open the
+               // reveal further. Matches the slime option's "조금씩
+               // 찢기는" foil behaviour instead of full-crack response
+               // on the very first tap.
+               float visibility = smoothstep(0.05, 0.55, vBeadDamage);
+               float damageWidth = smoothstep(0.15, 0.85, vBeadDamage) * 0.38;
+               float perCell = 0.3 + v.y * 1.8;
+               float crackWidth = min(damageWidth * perCell, 0.68);
+               float edgeBand = min(0.004, crackWidth * 0.15);
                crackReveal = (1.0 - smoothstep(
                  crackWidth - edgeBand,
                  crackWidth,
                  v.x
                )) * visibility;
-               revealTone = 0.65;
-             }
-             // ── FOIL / TUBE — SLIME-FOIL WISPY TEAR ────────────
-             // Mirrors the slime's own foil coating: voronoi cells
-             // at freq 2.3 with damage-driven width and hairline
-             // edges. Uniform per-bead damage (no per-vertex stretch
-             // on beads) means the voronoi pattern provides spatial
-             // variation — cells with high per-cell width open first,
-             // then more open as damage climbs. Non-centred beads
-             // still gate the tear to a press-point cone so a finger
-             // rips the coating specifically where it lands; the
-             // 속비즈 preset drops that gate so the tear develops
-             // across the whole bead surface.
-             else if (uBeadCoatingIsFoil > 0.5 && vBeadDamage > 0.005) {
-               // Verbatim port of the slime foil coating shader path
-               // for BOTH multi-bead and single centred beads.
-               // Beads have no per-vertex stretch channel (vStretch
-               // is slime-only from volume preservation), so we use
-               // vBeadDamage as a stretch proxy — that keeps the
-               // stretchWidth * 1.7 contribution alive so the width
-               // ramp matches the slime version's wide wispy tears.
-               vec2 v = beadCrackVoronoi(vBeadLocal * 2.3);
-               float stretchProxy = clamp(vBeadDamage, 0.0, 0.4);
-               // Visibility saturates at the FIRST tap so the crack
-               // is drawn at full opacity right away — only the
-               // width scales with tap count, so a first tap shows a
-               // small crack, subsequent taps widen it. Without this
-               // early saturation, first tap on 속비즈 (damage ≈ 0.03
-               // after the edge-bump scale) stayed invisible.
-               float visibility = smoothstep(0.005, 0.03, vBeadDamage);
-               float damageWidth = smoothstep(0.02, 0.6, vBeadDamage) * 0.5;
-               float stretchWidth = stretchProxy * 1.7;
-               float perCell = 0.3 + v.y * 1.8;
-               float crackWidth = min((damageWidth + stretchWidth) * perCell, 0.88);
-               float edgeBand = min(0.004, crackWidth * 0.15);
-               float rawTear = (1.0 - smoothstep(
-                 crackWidth - edgeBand,
-                 crackWidth,
-                 v.x
-               )) * visibility;
-
-               // Bead damage is UNIFORM across every vertex of the
-               // instance (no per-vertex localisation), so without a
-               // press-point cone the whole bead would tear at once.
-               // Cone gate keeps the tear local to where the user
-               // is pressing, matching how slime foil's vDamage is
-               // naturally high only at pressed vertices.
-               float pressLen = length(vBeadPressDir);
-               float localMask = 0.0;
-               if (pressLen > 0.01) {
-                 vec3 pressDir = vBeadPressDir / pressLen;
-                 float cosAngle = dot(pressDir, vBeadVertexDir);
-                 float coneEdge = mix(
-                   0.94,
-                   -0.87,
-                   smoothstep(0.02, 1.0, vBeadDamage)
-                 );
-                 localMask = smoothstep(coneEdge - 0.2, coneEdge + 0.05, cosAngle);
-               }
-               crackReveal = rawTear * localMask;
-               // Stronger reveal tone for foil/tube so the exposed
-               // slime pops against the intact coating instead of
-               // reading as a slightly-lighter patch of the same
-               // colour. Combined with the shadowed edge below,
-               // gives a clear "torn open" boundary.
                revealTone = 0.9;
              }
            }
@@ -1076,58 +1340,87 @@ export class BeadsLayer {
            // coating reveals PURE WHITE regardless of the bead colour
            // — matches the slime coating's "inside is white under
            // coating" convention so the whole app reads consistently.
-           vec3 _crackReveal;
-           if (uBeadFoilFullSurface > 0.5 && uBeadCoatingIsFoil > 0.5) {
-             _crackReveal = vec3(1.0);
-           } else {
-             float _minCh = min(
-               min(diffuseColor.r, diffuseColor.g),
-               diffuseColor.b
-             );
-             if (_minCh > 0.85) {
-               _crackReveal = diffuseColor.rgb * (1.0 - revealTone * 0.75);
-             } else {
-               _crackReveal = mix(diffuseColor.rgb, vec3(1.0), revealTone);
-             }
-           }
+           // Crack reveals the ball's own picked colour faithfully — no
+           // whitewash toward vec3(1.0), no darken. Previous wet-cream
+           // reveal blended up to 90% white into the crack diffuse for
+           // foil, which combined with the diffuse boost pushed saturated
+           // ball colours (crystal / glossy plastic) to look solid white.
+           vec3 _crackReveal = _beadBaseColor;
            // Darken the crack RIM (where crackReveal ramps from 0 to
            // 1) so the boundary between intact coating and exposed
            // slime reads as a visible shadow line — foil is a
            // physical sheet, torn edges have thickness that catches
-           // less light. Only the transition band gets shadowed;
-           // the fully-torn interior keeps the bright reveal.
+           // less light. SUPPRESSED for foil / tube coatings: the
+           // slime option's own foil/tube uses a sharp hairline rim
+           // and the ball's version should match — the rim shadow
+           // read as a soft blur + spawned tiny fragmented dark
+           // islands along the tear boundary. Wax/ice still get
+           // the shadow so their chunky slabs read with depth.
            float edgeShadow = 4.0 * crackReveal * (1.0 - crackReveal);
-           _crackReveal *= (1.0 - edgeShadow * 0.55);
+           float rimAtten =
+             (uBeadCoatingIsFoil > 0.5 || uBeadCoatingIsTube > 0.5)
+               ? 0.0
+               : 0.55;
+           _crackReveal *= (1.0 - edgeShadow * rimAtten);
            diffuseColor.rgb =
              mix(diffuseColor.rgb, _crackReveal, clamp(crackReveal, 0.0, 1.0));`
         )
         .replace(
           '#include <roughnessmap_fragment>',
           `#include <roughnessmap_fragment>
-           // 속비즈 foil crack reveal — bump roughness up so the
-           // exposed white area reads as a diffuse "wet interior"
-           // rather than a mirror-metallic sheet. Without this,
-           // the crack area kept the shell's low roughness and
-           // looked like a see-through reflective patch even though
-           // diffuseColor is white.
-           if (uBeadFoilFullSurface > 0.5 &&
-               uBeadCoatingIsFoil > 0.5 &&
-               crackReveal > 0.0) {
-             roughnessFactor = mix(roughnessFactor, 0.55, crackReveal);
-           }`
+           // Coating's shell material response — wax forces matte,
+           // foil forces polished metal — is applied to the intact
+           // SHELL area only. Crack area reverts to the ball's own
+           // material (plastic / crystal) so a torn foil on a matte
+           // ball still shows matte through the tear.
+           float _bBaseR = roughnessFactor;
+           // Matte foam roughness variation — bright bubble spots drop
+           // roughness so tiny highlights read as bubble tops, shaded
+           // pockets bump roughness so cavities feel dry. Matches the
+           // slime shader's matte-material foam response.
+           if (uBeadMaterialIsMatte > 0.5) {
+             float bBright = smoothstep(0.55, 0.95, vBeadFoam);
+             float bShade  = smoothstep(0.45, 0.05, vBeadFoam);
+             _bBaseR = clamp(
+               _bBaseR + bShade * 0.15 - bBright * 0.35,
+               0.05,
+               1.0
+             );
+           }
+           float _bShellR = _bBaseR;
+           // Wax shell at 0.4 (satin matte) instead of 0.9 so a white
+           // wax coating on the ball reads as bright matte instead of
+           // washing out to mid-grey under the env map.
+           if (uBeadCoatingIsWax > 0.5) _bShellR = 0.4;
+           else if (uBeadCoatingIsTube > 0.5) _bShellR = 0.15;
+           else if (uBeadCoatingIsFoil > 0.5) _bShellR = 0.2;
+           else if (uBeadCoatingIsIce > 0.5) _bShellR = 0.05;
+           // Crack roughness clamped to a satin minimum so a crystal
+           // bead (0.02 rough) doesn't turn the tear into a mirror that
+           // hides the ball's colour behind the env reflection.
+           float _bCrackR = max(_bBaseR, 0.3);
+           roughnessFactor = mix(_bShellR, _bCrackR, crackReveal);`
         )
         .replace(
           '#include <metalnessmap_fragment>',
           `#include <metalnessmap_fragment>
-           // 속비즈 foil crack reveal — zero metalness in the torn
-           // area so the diffuse white shows through instead of
-           // being swallowed by the metallic BRDF (which would
-           // reflect the environment and look transparent).
-           if (uBeadFoilFullSurface > 0.5 &&
-               uBeadCoatingIsFoil > 0.5 &&
-               crackReveal > 0.0) {
-             metalnessFactor = mix(metalnessFactor, 0.0, crackReveal);
-           }`
+           float _bBaseM = metalnessFactor;
+           float _bShellM = _bBaseM;
+           if (uBeadCoatingIsWax > 0.5) _bShellM = 0.0;
+           else if (uBeadCoatingIsTube > 0.5) _bShellM = 0.0;
+           else if (uBeadCoatingIsFoil > 0.5) _bShellM = 0.9;
+           else if (uBeadCoatingIsIce > 0.5) _bShellM = 0.0;
+           metalnessFactor = mix(_bShellM, _bBaseM, crackReveal);`
+        )
+        .replace(
+          '#include <lights_physical_fragment>',
+          `#include <lights_physical_fragment>
+           // Drop the foil coating's mirror clearcoat inside crack
+           // areas so torn foil reveals the raw ball colour instead
+           // of a lacquered wash of it.
+           #ifdef USE_CLEARCOAT
+             material.clearcoat *= mix(1.0, 0.15, clamp(crackReveal, 0.0, 1.0));
+           #endif`
         )
     }
     mat.needsUpdate = true
@@ -1155,9 +1448,68 @@ export class BeadsLayer {
 
   private applyMaterialParams(
     mat: THREE.MeshPhysicalMaterial,
-    id: BeadMaterialId
+    id: BeadMaterialId | MaterialId
   ) {
-    const p = BEAD_MATERIAL_PARAMS[id]
+    // Inner-slime layer (useSlimeMaterials = true) resolves its material
+    // id against the slime MATERIALS palette so the ball shares the outer
+    // slime's material presets. Every other bead layer falls back to the
+    // bead-specific BEAD_MATERIAL_PARAMS table. When the id doesn't exist
+    // in the preferred palette (e.g. a legacy 'plastic' inner-slime that
+    // predates this migration), fall back to the other table so we still
+    // render something sane instead of leaving the material untouched.
+    if (this.useSlimeMaterials) {
+      const slime = MATERIALS.find((m) => m.id === id)?.params
+      if (slime) {
+        mat.roughness = slime.roughness
+        mat.metalness = slime.metalness
+        // Crystal inner-slime keeps the slime-crystal transmission so
+        // the ball reads as a glass sphere just like the slime option's
+        // crystal material — user explicitly asked for the same
+        // transparent look. All other inner-slime materials render
+        // opaque (the gradient path further forces transmission=0
+        // when multi-colour is active regardless).
+        mat.transmission = id === 'crystal' ? slime.transmission : 0
+        mat.thickness = id === 'crystal' ? slime.thickness : 0
+        mat.ior = slime.ior
+        mat.sheen = slime.sheen
+        mat.sheenRoughness = slime.sheenRoughness
+        mat.sheenColor.setHex(slime.sheenColorHex)
+        mat.iridescence = slime.iridescence
+        mat.iridescenceIOR = 1.3
+        // Glossy ball gets a mirror-smooth clearcoat lacquer on top so it
+        // reads as polished candy — sheen alone at 0.4 is subtle and the
+        // ball was reading like plain plastic without this lift.
+        mat.clearcoat = id === 'glossy' ? 1.0 : 0
+        mat.clearcoatRoughness = id === 'glossy' ? 0.05 : 0
+        mat.envMapIntensity = 1.0
+        mat.needsUpdate = true
+        return
+      }
+    }
+    const p = BEAD_MATERIAL_PARAMS[id as BeadMaterialId]
+    if (!p) {
+      // Fallback for an id valid in MATERIALS but not BEAD_MATERIAL_PARAMS
+      // (e.g. 'glossy' set on a regular bead layer via a stale config) —
+      // best-effort sample from the slime palette so the material still
+      // gets applied instead of silently no-op.
+      const slime = MATERIALS.find((m) => m.id === id)?.params
+      if (!slime) return
+      mat.roughness = slime.roughness
+      mat.metalness = slime.metalness
+      mat.transmission = slime.transmission
+      mat.thickness = slime.thickness
+      mat.ior = slime.ior
+      mat.sheen = slime.sheen
+      mat.sheenRoughness = slime.sheenRoughness
+      mat.sheenColor.setHex(slime.sheenColorHex)
+      mat.iridescence = slime.iridescence
+      mat.iridescenceIOR = 1.3
+      mat.clearcoat = 0
+      mat.clearcoatRoughness = 0
+      mat.envMapIntensity = 1.0
+      mat.needsUpdate = true
+      return
+    }
     mat.roughness = p.roughness
     mat.metalness = p.metalness
     mat.clearcoat = p.clearcoat
@@ -1187,26 +1539,51 @@ export class BeadsLayer {
     mat: THREE.MeshPhysicalMaterial,
     config: BeadsConfig
   ) {
-    if (config.coating !== 'none' && this.slimeSurfaceCache) {
-      const p = this.slimeSurfaceCache
-      mat.roughness = p.roughness
-      mat.metalness = p.metalness
-      mat.clearcoat = p.clearcoat
-      mat.clearcoatRoughness = p.clearcoatRoughness
-      mat.transmission = p.transmission
-      mat.thickness = p.thickness
-      mat.ior = p.ior
-      mat.sheen = p.sheen
-      mat.sheenRoughness = p.sheenRoughness
-      mat.sheenColor.copy(p.sheenColor)
-      mat.iridescence = p.iridescence
-      mat.iridescenceIOR = p.iridescenceIOR
-      // Slime doesn't cache envMapIntensity — use 1.0 (three.js default,
-      // matches what the slime's own material uses).
-      mat.envMapIntensity = 1.0
+    // Always use the bead's own material presets (plastic / crystal)
+    // regardless of coating — coating shouldn't change the underlying
+    // material. The coating's shell response (matte for wax, polished
+    // metal for foil) is enforced in the shader instead so crack reveals
+    // return roughness / metalness to the bead's own material values.
+    this.applyMaterialParams(mat, config.material)
+    // Regular bead layers (꽉비즈 compact / 비즈볼 chunk) with crystal
+    // material — real MeshPhysicalMaterial transmission collides with
+    // the outer slime's own transmission (three.js excludes trans-
+    // missive objects from other transmissive objects' background
+    // pass, so a transparent bead inside a transparent slime became
+    // invisible). Substitute alpha transparency: transmission = 0
+    // moves beads out of the transmission pass, transparent + opacity
+    // renders them via the standard alpha-blended pass which composes
+    // correctly over the slime. Crystal's low roughness + full
+    // clearcoat still reads as polished glass, and the picked palette
+    // colour tints through the alpha blend so each bead shows its own
+    // hue while the outer slime remains visible around them.
+    // Inner-slime crystal ball keeps real transmission (single
+    // instance, wrap-tint handles visibility differently).
+    if (
+      !this.useSlimeMaterials &&
+      config.material === 'crystal'
+    ) {
+      mat.transmission = 0
+      mat.thickness = 0
+      mat.transparent = true
+      // Strong opacity so the palette colour reads clearly.
+      mat.opacity = 0.85
+      mat.depthWrite = false
+      // depthTest OFF — three.js writes the outer slime's front-surface
+      // depth in the transmission pass, and the transparent pass's
+      // default depth-test then rejects any bead pixel behind that
+      // depth (i.e. every bead sitting inside the slime volume).
+      // Disabling depth test on chunk crystal beads lets them render
+      // over the slime pixel regardless of position, so the palette
+      // colour is visible everywhere on the bead instead of only
+      // where it pokes above the slime skin.
+      mat.depthTest = false
       mat.needsUpdate = true
     } else {
-      this.applyMaterialParams(mat, config.material)
+      mat.transparent = false
+      mat.opacity = 1
+      mat.depthWrite = true
+      mat.depthTest = true
     }
   }
 
@@ -1224,47 +1601,31 @@ export class BeadsLayer {
   ) {
     const c = COATINGS.find((x) => x.id === id)?.params
     if (!c) return
+    // Only clearcoat is applied from the coating preset — foil's mirror
+    // lacquer, wax's dry matte finish. Roughness / metalness overrides
+    // happen in the shader (roughnessmap_fragment) so they can be reverted
+    // per-fragment inside crack areas.
     mat.clearcoat = c.clearcoat
     mat.clearcoatRoughness = c.clearcoatRoughness
-    if (c.extraMetalness !== undefined) {
-      mat.metalness = Math.min(1, mat.metalness + c.extraMetalness)
-    }
-    if (c.extraRoughness !== undefined) {
-      mat.roughness = Math.min(1, mat.roughness + c.extraRoughness)
-    }
-    if (c.extraIridescence !== undefined) {
-      mat.iridescence = Math.min(1, mat.iridescence + c.extraIridescence)
-    }
-    if (c.extraSheen !== undefined) {
-      mat.sheen = c.extraSheen
-      mat.sheenRoughness = c.extraSheenRoughness ?? mat.sheenRoughness
-    }
-    if (c.forceMatteBase) {
-      mat.roughness = Math.max(mat.roughness, 0.85)
-      mat.metalness = 0
+    // Zero transmission / sheen / iridescence on any coated bead so the
+    // coating diffuse reads the SAME tone regardless of underlying bead
+    // material (crystal's 95% transmission would otherwise wash the
+    // coating out; sheen would tint it). Matches the slime's coating
+    // path — coating colour has to be deterministic across materials.
+    if (id !== 'none') {
+      mat.transmission = 0
+      mat.thickness = 0
       mat.sheen = 0
       mat.iridescence = 0
     }
-    // On the slime, forceCrystalBase makes the whole shell a
-    // transparent stained-glass crystal so the coating tints refracted
-    // light. On a bead that would make the entire chunk vanish (95%
-    // transmission with no wrap-shell behind it → invisible), so we
-    // skip the transmission override and only borrow crystal's smooth
-    // low-roughness look. Cracks + coating tint still land on top of
-    // an opaque candy body underneath, which is what a real caramel-
-    // coated bead reads like.
-    if (c.forceCrystalBase) {
-      mat.roughness = 0.05
-      mat.sheen = 0
-      mat.iridescence = 0
+    // 글레이즈 (ice) coating renders the ball as CRYSTAL — bring the
+    // transmission back on so the ball reads as clear glass through
+    // the glaze rather than an opaque tinted marble.
+    if (id === 'ice') {
+      mat.transmission = 0.9
+      mat.thickness = 0.4
+      mat.ior = 1.5
     }
-    // Coated beads are always opaque — the coating shell reads as the
-    // outer surface and the bead colour underneath is what fills the
-    // cracks. Any transmission inherited from a crystal slime base
-    // would either invisibly-pass-through the bead (foil, tube) or
-    // wash out the coating tint entirely (wax, caramel).
-    mat.transmission = 0
-    mat.thickness = 0
     mat.needsUpdate = true
   }
 
@@ -1275,12 +1636,18 @@ export class BeadsLayer {
    *  exits the crack pass entirely. */
   private updateBeadCrackUniforms(id: CoatingId) {
     const cracks =
-      id === 'wax' || id === 'ice' || id === 'foil' || id === 'tube'
+      id === 'wax' ||
+      id === 'thinwax' ||
+      id === 'ice' ||
+      id === 'foil' ||
+      id === 'tube'
     this.beadDamageEnabledUniform.value = cracks ? 1.0 : 0.0
-    this.beadIsWaxUniform.value = id === 'wax' ? 1.0 : 0.0
+    this.beadIsWaxUniform.value =
+      id === 'wax' || id === 'thinwax' ? 1.0 : 0.0
     this.beadIsIceUniform.value = id === 'ice' ? 1.0 : 0.0
     this.beadIsFoilUniform.value =
       id === 'foil' || id === 'tube' ? 1.0 : 0.0
+    this.beadIsTubeUniform.value = id === 'tube' ? 1.0 : 0.0
   }
 
   /** Ensure damage / crackLevel / wasPressed arrays are sized to fit
@@ -1317,6 +1684,31 @@ export class BeadsLayer {
    *  the per-slot instanced attributes so any lingering crack pattern
    *  from a previous configuration clears immediately, without
    *  waiting for the next press to trigger an upload. */
+  /** Aggregate crack progress across every bead's coating in 0..1.
+   *  Returns 0 when the layer isn't running a crackable coating,
+   *  matching SlimeSphere.coatingCrackProgress so the caller can
+   *  gate coating loop sounds uniformly. */
+  get coatingCrackProgress(): number {
+    const id = this.currentCoatingId
+    let cap = 0
+    if (id === 'ice') cap = 3
+    else if (
+      id === 'wax' ||
+      id === 'thinwax' ||
+      id === 'foil' ||
+      id === 'tube'
+    )
+      cap = 5
+    else return 0
+    const cl = this.beadCrackLevel
+    const n = this.lastEffectiveCount
+    if (n <= 0) return 0
+    let sum = 0
+    for (let i = 0; i < n; i++) sum += cl[i] ?? 0
+    const max = n * cap
+    return max > 0 ? sum / max : 0
+  }
+
   resetDamage() {
     this.beadDamage.fill(0)
     this.beadCrackLevel.fill(0)
@@ -1457,6 +1849,14 @@ export class BeadsLayer {
    *  holds each bead's resolved position — SlimeApp calls damage AFTER
    *  update() in the animation loop for that reason. */
   applyPressDamage(tips: readonly WeightedTip[], dt: number) {
+    // Reset the per-frame press force accumulator FIRST so any early
+    // return below zeroes it out — sound routing reads this uniform
+    // every frame, and leaving a stale value from a previous frame
+    // (e.g. when SlimeApp passes an empty tips list to gate a locked
+    // coated ball) would keep the coating hiss playing even though
+    // no damage is accumulating. Empty tips → zero press force →
+    // silent coating channel.
+    this._pressForceThisFrame = 0
     if (this.currentCoatingId === 'none') return
     if (this.config.combo !== 'chunk') return
     if (tips.length === 0) return
@@ -1505,9 +1905,13 @@ export class BeadsLayer {
     const perBeadBestForce = new Float32Array(n)
     const perBeadPress = new Float32Array(n * 3)
     // 속비즈 preset: single bead centred at slime origin. Its "direction
-    // from origin" is undefined, so the angular routing below can never
-    // match it. Skip the alignment test entirely — every tip counts as
-    // a press on the sole bead so coating cracks accumulate normally.
+    // from origin" is undefined so the angular routing below can never
+    // match it — any tip that landed on the outer slime this frame is
+    // treated as pressing the buried ball. The old radius gate required
+    // the tip to sit inside a (size + 0.15) sphere around origin, but
+    // fingertips ride the slime SURFACE (~1.0 from origin) and almost
+    // never dip into that inner sphere — the ball's coating would then
+    // never receive damage and never visibly crack.
     const singleCenteredBead =
       n === 1 &&
       this.colPos[0] === 0 &&
@@ -1558,6 +1962,11 @@ export class BeadsLayer {
         perBeadPress[bestIdx * 3 + 2] = dz / dlen
       }
     }
+    // Sum across all beads for external gating (coating sound
+    // shouldn't play if no tip landed on any bead this frame).
+    let totalForce = 0
+    for (let i = 0; i < n; i++) totalForce += perBeadForce[i]
+    this._pressForceThisFrame = totalForce
 
     for (let i = 0; i < n; i++) {
       const localForce = perBeadForce[i]
@@ -1590,29 +1999,15 @@ export class BeadsLayer {
       }
       // 속비즈 (single centred bead) receives EVERY tip's full weight
       // (routing bypasses the angular check and uses falloff = 1.0).
-      // With touch weights now up to ~11 per tip, damage saturates
-      // in a couple of frames and the coating rips wide open on a
-      // single tap. Scale accumulation down heavily for this case so
-      // one touch only nicks the coating, matching slime foil's
-      // "small tear at press site" behaviour where damage is per-
-      // vertex and each tap only accumulates on a few verts.
-      // 속비즈 dampens damage growth so the coating doesn't rip wide
-      // open in one tap, but the rising-edge bump is kept large
-      // enough that a FIRST tap immediately crosses the shader's
-      // visibility threshold (crack appears right away). Continuous
-      // growth stays modest so long-press just widens the tear
-      // rather than blowing it out.
+      // Scale accumulation down for this case so one touch only nicks
+      // the coating, matching slime foil's "small tear at press site"
+      // behaviour. Rising-edge bump kept large enough that a FIRST
+      // tap immediately crosses the shader's visibility threshold.
       const damageScale = singleCenteredBead ? 0.35 : 1.0
       const edgeBumpScale = singleCenteredBead ? 0.6 : 1.0
       if (localForce > 0) {
         const d = this.beadDamage[i] + localForce * dt * damageRate * damageScale
         this.beadDamage[i] = d < 1 ? d : 1
-        // Squish factor climbs with press force. Rate tuned so a
-        // steady press reaches SQUISH_MAX (0.45 → 45% compression,
-        // so bead never drops below ~55% of its original height)
-        // in about a third of a second. Softer cap than before —
-        // full 70% compression made pressed beads read as too small
-        // relative to unpressed neighbours.
         const squishRate = 4.0
         const squishMax = 0.45
         const s = this.beadSquish[i] + localForce * dt * squishRate
@@ -1621,10 +2016,9 @@ export class BeadsLayer {
       // Rising-edge press step — each distinct press bumps damage by
       // ~0.12 (so 6-7 quick presses saturate at 1.0), giving every
       // tap a clearly-visible crack widening even before the slow
-      // continuous rate has time to add up. Combined together this
-      // yields the "small crack → widens with each press → eventually
-      // spans the whole surface" progression instead of an on/off
-      // full-crack response after a single successful press.
+      // continuous rate has time to add up. Same treatment slime's
+      // coating uses — both taps and long-press accumulate damage
+      // naturally.
       const wasPressed = this.beadWasPressed[i] === 1
       if (!wasPressed && localForce > 0.05) {
         this.beadDamage[i] = Math.min(
@@ -1723,6 +2117,71 @@ export class BeadsLayer {
       config.count !== prevCount ||
       config.shapes.join(',') !== prevShapesKey
     this.updateBeadCrackUniforms(config.coating)
+    // Coating tint — independent from the bead colour. When a coating is
+    // active, always paint the shell (fallback to white when no colour
+    // picked so the coating is visible and cracks show against a shell
+    // instead of collapsing to raw bead colour everywhere). thinwax uses
+    // the same 0.72 translucent overlay as the outer slime's thinwax so
+    // the ball's inner colour shows through; wax paints fully opaque.
+    // Inner-slime coating tints go through the `ic:` adjustment namespace
+    // so they stay independent from outer-slime and wax-coating tunes.
+    // Regular bead layers don't expose a coating colour picker so they
+    // fall through with the same helper — no coatingColors on them
+    // means the map yields an empty array.
+    const coatingColorHexes = (config.coatingColors ?? []).map((id) =>
+      this.useSlimeMaterials
+        ? resolveInnerCoatingHex(id, this.currentColorAdjustments)
+        : resolveColorHex(id, this.currentColorAdjustments)
+    )
+    if (config.coating !== 'none') {
+      // Ball's coating tint is a single RGB (no LUT sampling on the
+      // bead shader yet), so multi-colour coating picks blend into one
+      // average tint — at least the picked palette visibly influences
+      // the coating instead of only the first colour taking effect.
+      let hex = 0xffffff
+      if (coatingColorHexes.length === 1) {
+        hex = coatingColorHexes[0]
+      } else if (coatingColorHexes.length > 1) {
+        let r = 0
+        let g = 0
+        let b = 0
+        for (const h of coatingColorHexes) {
+          r += (h >> 16) & 0xff
+          g += (h >> 8) & 0xff
+          b += h & 0xff
+        }
+        const n = coatingColorHexes.length
+        r = Math.round(r / n)
+        g = Math.round(g / n)
+        b = Math.round(b / n)
+        hex = (r << 16) | (g << 8) | b
+      }
+      this.beadCoatingTintUniform.value.setHex(hex)
+      const firstCoatingIsWhite =
+        (config.coatingColors ?? [])[0] === 'white'
+      // 씬왁스 (thinwax) always renders translucent regardless of colour
+      // (thin coat = translucent by definition); 왁스 (wax) picks the
+      // translucent shell only when the coating colour is white and
+      // otherwise paints a solid opaque shell; 글레이즈 (ice) paints a
+      // semi-transparent crystal wash regardless of colour so the
+      // ball's material shows through the glaze.
+      if (config.coating === 'thinwax') {
+        this.beadCoatingAlphaUniform.value = 0.30
+      } else if (config.coating === 'wax') {
+        this.beadCoatingAlphaUniform.value = firstCoatingIsWhite ? 0.80 : 1.0
+      } else if (config.coating === 'ice') {
+        // 글레이즈 crystal shell — hint of tint over transmission.
+        this.beadCoatingAlphaUniform.value = 0.15
+      } else {
+        this.beadCoatingAlphaUniform.value = 1.0
+      }
+    } else {
+      this.beadCoatingAlphaUniform.value = 0.0
+    }
+    // Matte-material foam pattern flag — only applies to inner-slime
+    // layers (useSlimeMaterials) picking the slime 'matte' material.
+    this.beadMaterialIsMatteUniform.value =
+      this.useSlimeMaterials && config.material === 'matte' ? 1.0 : 0.0
     // 속비즈 preset — chunk combo + 1 bead lands at slime origin (see
     // update()'s special case), which makes the localized cone in the
     // foil crack shader collapse to a small patch and read like wax.
@@ -1737,10 +2196,91 @@ export class BeadsLayer {
     // "slime jacket" would sit OUTSIDE that shell and hide both the
     // coating tint and any crack pattern beneath. Hide the wrap
     // whenever coating is active so the coated bead reads as the
-    // outermost surface. Uncoated beads keep their wrap for the
-    // "embedded in slime" look.
+    // outermost surface.
+    //
+    // Multi-colour palettes drive the per-bead gradient shader (see
+    // applyInstanceColors), but the wrap material renders as a flat
+    // colour — leaving the wrap visible would mask the gradient with
+    // a solid tint. So we also drop the wrap whenever a gradient
+    // palette is active on chunk beads (inner slime + main chunk),
+    // exposing the raw gradient-bead directly.
+    const hasGradientPalette =
+      config.colors.length >= 2 && config.combo === 'chunk'
+    // Inner-slime ball with a multi-colour gradient palette must render
+    // OPAQUE regardless of the picked material — a crystal / glossy ball
+    // (transmission > 0) would transmit most of the gradient colour
+    // through, leaving the ball nearly invisible. Force transmission = 0
+    // whenever the gradient is active on an inner-slime layer so the
+    // gradient LUT reads cleanly on an opaque bead body.
+    // Inner-slime body setup — applied consistently regardless of
+    // single vs multi colour so both cases render identically (user
+    // asked to unify single-colour rendering with the multi-colour
+    // path). Crystal keeps its transmission for the glass look and
+    // uses depth-off so the ball renders inside the outer slime; the
+    // wrap is hidden for all crystal states (see suppress block below).
+    // Non-crystal materials always render opaque with default depth.
+    if (this.useSlimeMaterials && this.beadMaterial) {
+      if (config.material === 'crystal') {
+        this.beadMaterial.transparent = false
+        this.beadMaterial.opacity = 1
+        this.beadMaterial.depthWrite = false
+        this.beadMaterial.depthTest = false
+      } else if (hasGradientPalette) {
+        this.beadMaterial.transmission = 0
+        this.beadMaterial.thickness = 0
+        this.beadMaterial.transparent = false
+        this.beadMaterial.opacity = 1
+        this.beadMaterial.depthWrite = true
+        this.beadMaterial.depthTest = true
+      } else {
+        this.beadMaterial.transparent = false
+        this.beadMaterial.opacity = 1
+        this.beadMaterial.depthWrite = true
+        this.beadMaterial.depthTest = true
+      }
+      this.beadMaterial.needsUpdate = true
+    }
+    // Inner-slime hides the wrap for OPAQUE ball materials (matte /
+    // glossy / soft / etc.) since the ball's own body renders visibly.
+    // For CRYSTAL inner-slime ball the body is transparent — inside
+    // an opaque outer slime it would be invisible without the wrap
+    // shell (three.js transmission fails to composite an inner
+    // transparent object inside an outer transparent one), so we
+    // keep the wrap on and let it tint to the ball's picked colour
+    // (see applyInstanceColors). Wrap shell = the "visible glass ball".
+    const opaqueBallMaterial =
+      this.useSlimeMaterials && config.material !== 'crystal'
+    // Wrap ("slime jacket") visibility:
+    //   Inner-slime opaque material → hide (show the ball's material)
+    //   Inner-slime + gradient palette → hide (show the gradient LUT bead)
+    //   Any coating → hide (the coating shell IS the outer surface)
+    //   Otherwise → wrap visible (compact single / multi-colour AND
+    //     chunk all get the slime-jacket look; wrap.color is set from
+    //     the slime cache above, never from the bead palette — so the
+    //     old "adjusting one bead colour tints every wrap" problem no
+    //     longer applies and the wrap can stay on multi-colour compact).
+    // Crystal inner-slime ball is exempt from the "hide wrap for
+    // gradient" rule too — the wrap is the ball's only visible surface
+    // in this case, so hiding it would make the multi-colour crystal
+    // ball invisible. It only shows the first palette colour on the
+    // wrap (wrap material lacks the gradient LUT hookup), but the ball
+    // stays visible.
+    // Inner-slime wrap suppression:
+    //   Multi-colour non-crystal → hide wrap so body's gradient / per-
+    //     instance colours read directly.
+    //   Crystal (any colour count) → hide wrap so single ↔ multi-colour
+    //     rendering stays consistent (body always renders directly with
+    //     depth-off + transmission, no wrap layered on top). User
+    //     specifically asked to unify single-colour crystal with the
+    //     multi-colour rendering path.
+    const suppressForInnerGradient =
+      (this.useSlimeMaterials && hasGradientPalette) ||
+      (this.useSlimeMaterials && config.material === 'crystal')
     for (const slot of this.slots) {
-      slot.wrapInstanced.visible = config.coating === 'none'
+      slot.wrapInstanced.visible =
+        !opaqueBallMaterial &&
+        config.coating === 'none' &&
+        !suppressForInnerGradient
     }
 
     // Reset gridMode — only the cube-grid branch below turns it back
@@ -1766,7 +2306,6 @@ export class BeadsLayer {
       const grid = buildCubeGridLayout(config.size, 1)
       effectiveCount = Math.min(MAX_BEADS, grid.positions.length / 3)
       this.gridPositions = grid.positions.slice(0, effectiveCount * 3)
-      this.gridNormals = grid.normals.slice(0, effectiveCount * 3)
       // Anchor every grid bead to its nearest mesh vertex so update()
       // can propagate slime deformation to it (delta = current − rest).
       this.gridAnchorIdx = new Uint32Array(effectiveCount)
@@ -1895,10 +2434,63 @@ export class BeadsLayer {
       this.currentColorAdjustments
     )
     const paletteColors = paletteHex.map((h) => new THREE.Color(h))
+    // Wrap-shell colour: when the user has explicitly picked a
+    // palette for THIS bead layer (not just the default pearl),
+    // tint the wrap to match so the "slime jacket" reads as the
+    // bead's own colour instead of the outer slime's colour. This
+    // is what makes inner-slime chunks show up as coloured balls
+    // even without any coating.
+    // Wrap-shell colour source:
+    //   Inner-slime layer (useSlimeMaterials): the wrap IS the ball's
+    //     own shell around a buried core, so it tints with the ball's
+    //     picked colour when one is set.
+    //   Regular bead layers: the wrap is a slime-jacket AROUND each
+    //     bead — it should always read as SLIME (not as the bead's
+    //     colour). Per the user spec, adjusting bead colours must not
+    //     tint the wrap at all — wrap stays locked on the slime cache
+    //     colour, and bead colours show only through the wrap's
+    //     transparency (crystal slime) or the beads themselves when
+    //     the wrap is hidden (compact combo, see below).
+    if (this.wrapMaterial) {
+      if (this.useSlimeMaterials && paletteColors.length > 0) {
+        if (paletteColors.length === 1) {
+          this.wrapMaterial.color.copy(paletteColors[0])
+        } else {
+          // Multi-colour inner-slime with a TRANSPARENT crystal body:
+          // the ball body's gradient LUT is invisible through the
+          // wrap, so blend palette colours into a single tint for the
+          // wrap shell. Users still see the picked palette influence
+          // the ball's colour instead of only the first pick.
+          let r = 0
+          let g = 0
+          let b = 0
+          for (const c of paletteColors) {
+            r += c.r
+            g += c.g
+            b += c.b
+          }
+          const n = paletteColors.length
+          this.wrapMaterial.color.setRGB(r / n, g / n, b / n)
+        }
+      } else if (this.slimeSurfaceCache) {
+        this.wrapMaterial.color.copy(this.slimeSurfaceCache.color)
+      }
+    }
+    // Per-bead gradient ONLY when user explicitly toggled it on —
+    // except for single-centered inner-slime ball, where multi-colour
+    // ALWAYS enables the gradient LUT so the palette shows top-to-
+    // bottom on the ball automatically. sphereGradient (compact)
+    // still requires the toggle.
+    const isSingleCenteredInnerBall =
+      this.useSlimeMaterials &&
+      config.combo === 'chunk' &&
+      effectiveCount === 1
     const perBeadShader =
-      paletteColors.length >= 2 && config.combo === 'chunk'
+      paletteColors.length >= 2 &&
+      config.combo === 'chunk' &&
+      (!!config.gradient || isSingleCenteredInnerBall)
     const sphereGradient =
-      paletteColors.length >= 2 && !perBeadShader
+      paletteColors.length >= 2 && !perBeadShader && !!config.gradient
     if (perBeadShader) {
       this.rebuildBeadGradientTexture(paletteHex)
       this.gradientUseUniform.value = 1
@@ -1913,30 +2505,46 @@ export class BeadsLayer {
       if (perBeadShader) {
         this._color.setRGB(1, 1, 1)
       } else if (sphereGradient) {
+        // gridMode (cube slime + cube beads) uses the bead's world Y
+        // POSITION on the cube — the face NORMAL collapsed side-face
+        // beads to yDir=0 (identical mid-gradient colour). Positions
+        // vary from -1..+1 across the cube's vertical extent.
         const yDir = this.gridMode
-          ? this.gridNormals[i * 3 + 1]
+          ? this.gridPositions[i * 3 + 1]
           : this.fillMode
             ? this.fillDirs[i * 3 + 1]
             : unitDirs[this.vertexIndices[i] * 3 + 1]
         const t = Math.max(0, Math.min(1, (yDir + 1) * 0.5))
-        if (config.gradient) {
-          // Smooth gradient — lerp between adjacent palette entries
-          // based on the bead's Y position. Continuous top-to-bottom
-          // fade across the whole layer.
-          const scaled = t * (paletteColors.length - 1)
-          const lo = Math.floor(scaled)
-          const hi = Math.min(lo + 1, paletteColors.length - 1)
-          const frac = scaled - lo
-          this._color.copy(paletteColors[lo]).lerp(paletteColors[hi], frac)
+        // Smooth gradient — lerp between adjacent palette entries by
+        // bead's Y position. sphereGradient is now only reached when
+        // config.gradient is on, so this always renders as smooth.
+        const scaled = t * (paletteColors.length - 1)
+        const lo = Math.floor(scaled)
+        const hi = Math.min(lo + 1, paletteColors.length - 1)
+        const frac = scaled - lo
+        this._color.copy(paletteColors[lo]).lerp(paletteColors[hi], frac)
+      } else if (paletteColors.length > 1) {
+        // Multi-colour WITHOUT gradient toggle. For a single-instance
+        // layer (single-centred inner-slime), plain index-cycle would
+        // just pick paletteColors[0] and the picked palette would be
+        // invisible on the ball — tags show every colour but the ball
+        // shows only one. Blend the palette into an average tint so
+        // the palette selection visibly influences the ball colour
+        // even without the gradient toggle. Multi-instance layers
+        // (chunk / compact) still cycle so each bead reads distinctly.
+        if (effectiveCount === 1) {
+          let br = 0
+          let bg = 0
+          let bb = 0
+          for (const c of paletteColors) {
+            br += c.r
+            bg += c.g
+            bb += c.b
+          }
+          const n = paletteColors.length
+          this._color.setRGB(br / n, bg / n, bb / n)
         } else {
-          // Discrete N-band split (2 colours → half + half, 3 → thirds,
-          // etc.) — each bead picks the ONE palette colour whose Y-band
-          // it falls into. Crisp region divisions, no interpolation.
-          const bandIdx = Math.min(
-            paletteColors.length - 1,
-            Math.floor(t * paletteColors.length)
-          )
-          this._color.copy(paletteColors[bandIdx])
+          this._color.copy(paletteColors[i % paletteColors.length])
         }
       } else {
         this._color.copy(paletteColors[0])
@@ -2238,23 +2846,28 @@ export class BeadsLayer {
 
         this.colScale[i3] = size
         this.colScale[i3 + 1] = size
-        this.colScale[i3 + 2] = size
+        // Fill (꽉비즈) 납작함 — Z axis is aligned with slime outward
+        // in phase 3, so shrinking Z flattens the bead into a coin
+        // against the slime surface. Formula mirrors 추가비즈 flatness
+        // (size * (1 - 0.85 * flatness)); UI caps flatness at 0.55.
+        const compactFlatness = Math.max(
+          0,
+          Math.min(0.55, this.config.flatness ?? 0)
+        )
+        this.colScale[i3 + 2] = size * (1 - 0.85 * compactFlatness)
       }
 
       // Phase 2 — Fibonacci-neighbor collision resolution. Skipped for
-      // the compact combo: user wants those small packed beads to just
-      // ride the slime surface without shoving each other, so pressure
-      // dents deform bead positions the same way the slime around them
-      // deforms (no bead-bead repulsion). Chunk combo keeps the pass
-      // so big beads still separate on contact.
-      // Compact combo normally skips collision so its packed sphere beads
-      // ride the slime without shoving each other. But flat shapes
-      // (torus, star, heart) OVERLAP visibly at Fibonacci-packed density
-      // — their in-plane silhouette is 1.1–1.4× the sphere baseline. So
-      // we DO run collision for compact whenever a non-sphere shape is
-      // in the mix; sphere-only compact keeps its original no-push feel.
-      const hasFlatShape = this.slots.some((s) => s.shape !== 'sphere')
-      const runCollision = this.config.combo !== 'compact' || hasFlatShape
+      // the compact combo entirely — packed compact beads (any shape)
+      // ride the slime surface without shoving each other so press
+      // dents deform bead positions the same way as the slime beneath.
+      // The iterative collision pass on non-sphere shapes was creating
+      // a visible "beads pushing each other" jitter under press; users
+      // prefer the smooth sphere-like glide over collision-perfect
+      // spacing (mild overlap is acceptable on the flat shapes since
+      // they're packed at a distance where interpenetration is minimal).
+      // Chunk combo still runs collision so big beads separate cleanly.
+      const runCollision = this.config.combo !== 'compact'
       const fibOffsets = [1, 2, 3, 5, 8, 13, 21, 34]
       // Per-slot in-plane collision radii — flat shapes (torus / star)
       // need a wider bubble than the base sphere, so a torus bead's
@@ -2485,12 +3098,10 @@ export class BeadsLayer {
       }
       // Special case — 속비즈 preset (chunk combo with exactly 1 bead)
       // anchors the single bead at the slime's ORIGIN so it sits fully
-      // embedded in the middle of the volume instead of on the surface.
-      // The default surface-sink path would leave the bead's outer edge
-      // near the slime silhouette, and the taffy-wrap shader would then
-      // bulge the whole slime around it (see setBeads gate in
-      // SlimeApp for the matching taffy disable).
-      if (n === 1 && isChunk) {
+      // embedded in the middle of the volume. Skipped for layers with
+      // `alwaysSurface: true` (inner slime), where the ball sits on
+      // the surface and the outer slime taffy-wraps around it.
+      if (n === 1 && isChunk && !this.alwaysSurface) {
         posX = 0
         posY = 0
         posZ = 0
@@ -2522,6 +3133,19 @@ export class BeadsLayer {
         this.colPos[0] === 0 &&
         this.colPos[1] === 0 &&
         this.colPos[2] === 0
+      // Inner-slime cases where the wrap is suppressed (multi-colour
+      // OR any crystal): inflate the body up by the wrap scale
+      // multiplier so the ball's apparent size matches the wrap-
+      // visible cases, preserving size consistency across colour /
+      // material toggles.
+      const wrapSuppressedHere =
+        this.useSlimeMaterials &&
+        isChunk &&
+        this.config.combo === 'chunk' &&
+        this.config.coating === 'none' &&
+        (this.config.colors.length >= 2 ||
+          this.config.material === 'crystal')
+      const inflateForNoWrap = wrapSuppressedHere ? 1.09 : 1
       if (
         isChunk &&
         !isSingleCenteredBead &&
@@ -2532,13 +3156,13 @@ export class BeadsLayer {
         // least 55% of its original height, so it still reads as a
         // recognisable bead rather than a thin disc.
         const flat = Math.max(0.55, 1 - this.beadSquish[i])
-        this.colScale[i3] = size
-        this.colScale[i3 + 1] = size
-        this.colScale[i3 + 2] = size * flat
+        this.colScale[i3] = size * inflateForNoWrap
+        this.colScale[i3 + 1] = size * inflateForNoWrap
+        this.colScale[i3 + 2] = size * inflateForNoWrap * flat
       } else {
-        this.colScale[i3] = size
-        this.colScale[i3 + 1] = size
-        this.colScale[i3 + 2] = size
+        this.colScale[i3] = size * inflateForNoWrap
+        this.colScale[i3 + 1] = size * inflateForNoWrap
+        this.colScale[i3 + 2] = size * inflateForNoWrap
       }
     }
     // Phase 2 — bead-bead collision relaxation. O(n²) per iteration,
@@ -2683,7 +3307,6 @@ export class BeadsLayer {
     this.fillDirs = new Float32Array(0)
     this.fillRestMag = new Float32Array(0)
     this.gridPositions = new Float32Array(0)
-    this.gridNormals = new Float32Array(0)
     this.gridAnchorIdx = new Uint32Array(0)
     this.gridRestAnchor = new Float32Array(0)
     this.gridMode = false
