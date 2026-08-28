@@ -534,6 +534,45 @@
   outline: none;
 }
 
+/* Collection carousel-mode close (×) — pinned top-right of the
+   viewport. Sits above the 3D scene so tapping it doesn't hit the
+   previewed slime, and exits collection mode restoring the pre-
+   entry WIP snapshot. Uses the same flat pill styling as the
+   browse-mode close button for visual consistency. */
+/* Collection carousel-mode close (×) — pinned top-right of the
+   viewport. Sits above the 3D scene so tapping it doesn't hit the
+   previewed slime, and exits collection mode restoring the pre-
+   entry WIP snapshot. */
+.collectionCloseBtn {
+  position: absolute;
+  top: max(34px, calc(env(safe-area-inset-top) + 18px));
+  right: max(16px, env(safe-area-inset-right));
+  z-index: 5;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  border: none;
+  outline: none;
+  background: var(--bg-toggle);
+  color: var(--color-text);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  pointer-events: auto;
+  backdrop-filter: blur(10px);
+}
+
+.collectionCloseBtn:hover,
+.collectionCloseBtn:focus-visible {
+  background: var(--bg-toggle-hover);
+  outline: none;
+}
+
 /* ── Collection modal ───────────────────────────────────── */
 
 .collectionEmpty {
@@ -798,25 +837,28 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Central reset stretches to fill the row so its own pill touches
-   the flanking hand + collection buttons on both sides. */
-.topButtonRow > button.sideBtn:nth-child(2) {
+/* Press-reset stretches to fill the row (occupies the 3rd slot in
+   the top button row: hand • auto-press • press-reset • collection)
+   so its wide pill flanks the surrounding narrow buttons — matches
+   the pre-auto-press layout where the reset was the visible centre
+   element. Auto-press sits at slot 2 with the default sideBtn width. */
+.topButtonRow > button.sideBtn:nth-child(3) {
   flex: 1;
   width: auto;
 }
 
-/* Reset (centre button) — quick tap flash: darker fill while
-   pressed, springs back to the default toggle colour on release
-   with no lingering hover state. */
-.topButtonRow > button.sideBtn:nth-child(2),
-.topButtonRow > button.sideBtn:nth-child(2):hover,
-.topButtonRow > button.sideBtn:nth-child(2):focus,
-.topButtonRow > button.sideBtn:nth-child(2):focus-visible {
+/* Press-reset button — quick tap flash: darker fill while pressed,
+   springs back to the default toggle colour on release with no
+   lingering hover state. */
+.topButtonRow > button.sideBtn:nth-child(3),
+.topButtonRow > button.sideBtn:nth-child(3):hover,
+.topButtonRow > button.sideBtn:nth-child(3):focus,
+.topButtonRow > button.sideBtn:nth-child(3):focus-visible {
   background: var(--bg-toggle);
   color: var(--color-text);
   outline: none;
 }
-.topButtonRow > button.sideBtn:nth-child(2):active {
+.topButtonRow > button.sideBtn:nth-child(3):active {
   background: var(--bg-toggle-hover);
 }
 
@@ -837,21 +879,68 @@
    and the bottom bar. Aggregates chips from every category so the
    user sees the whole customisation state at a glance regardless
    of which primary category is currently open. */
+/* Wrapper row that holds the fixed reset button + the horizontally
+   scrollable tag strip. Split into two children so the reset button
+   is a stable left anchor (no sticky/backdrop tricks needed) and the
+   scrolling strip can carry its own edge-fade mask independently. */
+.unifiedTagWrap {
+  pointer-events: auto;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  align-self: flex-start;
+  width: 100%;
+  padding: 2px 4px;
+  min-width: 0;
+}
+
 .unifiedTagRow {
   pointer-events: auto;
   display: flex;
   gap: 6px;
-  flex-wrap: wrap;
+  /* Single-line strip that scrolls horizontally when the tag count
+     overflows the row width — matches the primary chip row's
+     scroll-instead-of-wrap behaviour so the panel height never
+     inflates as options accumulate. */
+  flex-wrap: nowrap;
   justify-content: flex-start;
-  align-self: flex-start;
-  width: 100%;
-  /* Left padding matches the panel's inner left padding (4px) so the
-     first tag lines up with the first chip in .options below it. */
-  padding: 2px 4px;
-  /* Render above the CustomizePanel inside .controlsInner (column flex).
-     Negative order pulls this element to the top of the stack while
-     leaving the DOM order unchanged. */
-  order: -1;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-x;
+  /* Edge-fade mask — same pattern as .primaryChips in CustomizePanel:
+     tags near the scroll extremes soft-fade into transparency so the
+     user sees an obvious "more to scroll" hint. When the row is
+     scrolled all the way to the start / end, JS flips the matching
+     data-at attribute and the fade on that side drops out so the
+     first / last tag reads fully crisp. */
+  --tags-fade-left: transparent 0, black 4%;
+  --tags-fade-right: black 92%, transparent 100%;
+  -webkit-mask-image: linear-gradient(
+    to right,
+    var(--tags-fade-left),
+    var(--tags-fade-right)
+  );
+  mask-image: linear-gradient(
+    to right,
+    var(--tags-fade-left),
+    var(--tags-fade-right)
+  );
+}
+
+.unifiedTagRow[data-at-start='true'] {
+  --tags-fade-left: black 0, black 0;
+}
+
+.unifiedTagRow[data-at-end='true'] {
+  --tags-fade-right: black 100%, black 100%;
+}
+
+.unifiedTagRow::-webkit-scrollbar {
+  display: none;
 }
 
 .unifiedTag {
@@ -1099,14 +1188,24 @@
   cursor: not-allowed;
 }
 
-.collectionCarouselEmpty {
-  pointer-events: auto;
-  width: min(520px, 100%);
-  padding: 40px 12px;
+/* Full-screen centered empty state shown when the user opens the
+   collection carousel but has no saved slimes. Replaces the small
+   under-carousel text with a viewport-centered message so an empty
+   collection reads as "nothing here" instead of a stray label above
+   an equally empty bottom panel. */
+.collectionEmptyOverlay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 12px 20px;
   color: var(--color-text-muted);
   text-align: center;
-  font-size: 13px;
+  font-size: 15px;
   font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 3;
 }
 
 /* Inline collection carousel that replaces the CustomizePanel while
@@ -1114,6 +1213,32 @@
    50% offset that puts the currently-selected card in the middle
    of the viewport; neighbours peek on either side. Smooth CSS
    transform animation makes the swipe feel continuous. */
+/* Action bar rendered ABOVE the collection carousel — hosts both
+   normal-mode actions (압박리셋 / 수정하기 / 공유) and delete-mode
+   actions (취소 / 삭제 / 전체선택). Centered horizontally with
+   small gaps between the chips; tight vertical padding so the bar
+   sits close to the carousel sheet below it. */
+.collectionCarouselAboveBar {
+  pointer-events: auto;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 12px;
+}
+
+/* Below-carousel normal-mode action bar — 압박리셋 + 수정하기 +
+   공유. Sits on the dark page background just under the black
+   carousel sheet so the swipeable cards stay unobstructed. */
+.collectionCarouselBelowBar {
+  pointer-events: auto;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+}
+
 .collectionCarousel {
   pointer-events: auto;
   position: relative;
@@ -1123,11 +1248,18 @@
   width: calc(100% + 36px);
   margin-left: -18px;
   margin-right: -18px;
-  height: 240px;
+  /* Height reduced from 240 to 175 — cards are 138 tall + 14 px top
+     inset = 152 needed; extra 23 px gives cards breathing room without
+     a big empty band at the bottom of the sheet. */
+  height: 175px;
   overflow: hidden;
   border-radius: 20px;
   background: var(--bg-page-middle);
-  margin-bottom: -18px;
+  /* Sheet sits at .controls's natural bottom now — earlier -32 px
+     pull pushed the carousel below the safe-area, clipping the
+     rounded bottom corners. 0 keeps it inside the visible viewport
+     and effectively lifts the whole sheet up by ~32 px. */
+  margin-bottom: 0;
   animation: carouselIn 260ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -1173,8 +1305,11 @@
 .collectionCarouselCard {
   position: relative;
   flex-shrink: 0;
-  width: 150px;
-  height: 170px;
+  /* Shrunk from 150×170 to 118×138 so a phone-width viewport fits
+     2.5 cards horizontally (previously only 2 fully visible) —
+     nudges the user to swipe and discover more saved slimes. */
+  width: 118px;
+  height: 138px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1221,8 +1356,8 @@
 }
 
 .collectionCarouselThumb {
-  width: 130px;
-  height: 130px;
+  width: 102px;
+  height: 102px;
   border-radius: 0;
   overflow: hidden;
   background: transparent;
@@ -1238,6 +1373,13 @@
   -webkit-user-drag: none;
 }
 
+/* Compact-fill (꽉비즈) thumbnails — earlier transform: scale(0.72)
+   caused the packed silhouette to render at ~40 % of the card and
+   appear clipped / off-centred. The capture path already scales the
+   compact-bead shell to fit the 200 px thumbnail (see
+   captureCanonicalThumbnail's effectiveOuter math), so no extra CSS
+   shrink is needed here — let the img render at natural size. */
+
 .collectionCarouselName {
   font-size: 11px;
   font-weight: 700;
@@ -1246,7 +1388,7 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 140px;
+  max-width: 110px;
 }
 
 /* Action buttons pinned to the far right of the carousel viewport,
@@ -1255,7 +1397,7 @@
   pointer-events: auto;
   position: absolute;
   right: 12px;
-  bottom: 6px;
+  bottom: 22px;
   display: flex;
   gap: 6px;
   z-index: 2;
@@ -1268,7 +1410,7 @@
   pointer-events: auto;
   position: absolute;
   left: 12px;
-  bottom: 6px;
+  bottom: 22px;
   z-index: 2;
 }
 
@@ -1306,6 +1448,14 @@
   font-weight: 700;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
+  /* Flex + line-height:1 vertically centres SVG icons inside the pill.
+     Without it the SVG sits on the text baseline and reads as slightly
+     shifted UP relative to the pill's centre — noticeable on icon-only
+     buttons (reset / share) next to the text "수정하기". */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
 }
 
 .collectionCarouselAction[data-danger='true'] {

@@ -18,6 +18,7 @@ export type ColorId =
   | 'silver'
   | 'coral'
   | 'aqua'
+  | 'black'
 
 /** Per-color HSL delta the user has dialled in via the adjustment
  *  sliders. Keyed on ColorId — each entry [dh, dl] where dh shifts
@@ -34,7 +35,6 @@ export const COLORS: readonly {
   hex: number
 }[] = [
   { id: 'white', label: '화이트', hex: 0xffffff },
-  { id: 'pearl', label: '진주', hex: 0xfff8f4 },
   { id: 'pink', label: '핑크', hex: 0xff9ac9 },
   { id: 'peach', label: '피치', hex: 0xffb591 },
   { id: 'lemon', label: '레몬', hex: 0xffe25e },
@@ -45,7 +45,8 @@ export const COLORS: readonly {
   { id: 'gold', label: '골드', hex: 0xffcf5e },
   { id: 'silver', label: '실버', hex: 0xd6dbe1 },
   { id: 'coral', label: '코랄', hex: 0xff7d7d },
-  { id: 'aqua', label: '아쿠아', hex: 0x5ee3d8 }
+  { id: 'aqua', label: '아쿠아', hex: 0x5ee3d8 },
+  { id: 'black', label: '블랙', hex: 0x2a2a35 }
 ]
 
 /** Resolve a ColorId to its numeric hex, optionally applying any
@@ -331,22 +332,22 @@ export const MATERIALS: readonly {
     }
   },
   {
-    // 아이스 — polished OPAQUE crystal. Same mirror-smooth surface as
-    // 크리스탈 but transmission is fully off so the body reads as solid
-    // ice rather than clear glass. Slight cool iridescence sells the
-    // frosted look at grazing angles.
+    // 아이스 — fully transparent glass. Mirror-smooth surface with
+    // maximum transmission and NO sheen / iridescence, so the body
+    // reads as pure clear glass without any tinted highlights or
+    // shading — light passes cleanly through with no rim colour.
     id: 'ice',
     label: '아이스',
     params: {
-      roughness: 0.08,
+      roughness: 0.04,
       metalness: 0,
-      transmission: 0,
-      thickness: 0,
+      transmission: 0.95,
+      thickness: 0.4,
       ior: 1.5,
-      sheen: 0.1,
-      sheenRoughness: 0.3,
-      sheenColorHex: 0xccddff,
-      iridescence: 0.2
+      sheen: 0,
+      sheenRoughness: 0.5,
+      sheenColorHex: 0xffffff,
+      iridescence: 0
     }
   }
 ]
@@ -502,6 +503,127 @@ export const COATINGS: readonly {
     }
   }
 ]
+
+/* ─── Slime Text (표면 데칼) ───────────────────────────── */
+
+/** Font presets used for the on-slime text decal. Values map to CSS
+ *  font-families the canvas 2D context understands; the shader itself
+ *  only sees the resulting CanvasTexture so switching fonts is a pure
+ *  texture re-render. Weights lean bold so silhouette reads clearly at
+ *  the smaller sizes the slime warp reduces text to. */
+export type SlimeTextFontId = 'sans' | 'serif' | 'brush' | 'display'
+
+export const SLIME_TEXT_FONTS: readonly {
+  id: SlimeTextFontId
+  label: string
+  family: string
+  weight: string
+}[] = [
+  {
+    id: 'sans',
+    label: '고딕',
+    family: '"Noto Sans KR", "Malgun Gothic", system-ui, sans-serif',
+    weight: '900'
+  },
+  {
+    id: 'serif',
+    label: '명조',
+    family: '"Noto Serif KR", "Batang", serif',
+    weight: '700'
+  },
+  {
+    id: 'brush',
+    label: '손글씨',
+    family: '"Nanum Pen Script", "Gaegu", cursive',
+    weight: '700'
+  },
+  {
+    id: 'display',
+    label: '진한',
+    family: '"Impact", "Black Han Sans", system-ui, sans-serif',
+    weight: '900'
+  }
+]
+
+/** Which face of the slime the text is anchored to. 'front' is the
+ *  camera-facing +Z hemisphere used by spheres; the six ±axis entries
+ *  are only meaningful on cube-shaped slimes (each names a face by its
+ *  outward normal in the mesh's local frame). */
+export type SlimeTextFace =
+  | 'front'
+  | '+x'
+  | '-x'
+  | '+y'
+  | '-y'
+  | '+z'
+  | '-z'
+
+/** One decal instance — up to SLIME_TEXT_SLOT_MAX of these stack on
+ *  a surface. Each item has its own content / font / size / colour /
+ *  face so users can spread text across cube faces or overlay two
+ *  labels on a sphere. */
+export interface SlimeTextItem {
+  content: string
+  fontId: SlimeTextFontId
+  size: number
+  color: ColorId
+  face: SlimeTextFace
+}
+
+/** Per-surface text group — an ordered list of items + shared
+ *  aboveCoating toggle. `aboveCoating` = true renders text ON TOP of
+ *  a coating (crisp on opaque foil / wax); false stamps it UNDER so
+ *  a translucent coat tints the text. Ignored when coating === 'none'. */
+export interface SlimeTextGroup {
+  items: SlimeTextItem[]
+  aboveCoating: boolean
+}
+
+/** Max text decals per surface. 3 is enough to spread across cube
+ *  faces without overlap, and caps shader uniform array size + the
+ *  per-frame texture upload cost. */
+export const SLIME_TEXT_SLOT_MAX = 3
+
+export const SLIME_TEXT_ITEM_DEFAULT: SlimeTextItem = {
+  content: '',
+  fontId: 'sans',
+  size: 1.0,
+  color: 'black',
+  face: 'front'
+}
+
+export const SLIME_TEXT_GROUP_DEFAULT: SlimeTextGroup = {
+  items: [],
+  aboveCoating: false
+}
+
+/** Legacy alias — the single-item type used before the multi-slot
+ *  refactor. Kept so any snapshot / prop path that still refers to
+ *  SlimeTextConfig compiles against the new item shape. */
+export type SlimeTextConfig = SlimeTextItem
+
+/** Map a text face id to the outward unit-normal in the slime mesh's
+ *  local frame. Used by the shader to build the projection tangent
+ *  frame, and by the cube raycast to pick the closest face from a hit. */
+export function slimeTextFaceAxis(
+  face: SlimeTextFace
+): readonly [number, number, number] {
+  switch (face) {
+    case 'front':
+    case '+z':
+      return [0, 0, 1]
+    case '-z':
+      return [0, 0, -1]
+    case '+x':
+      return [1, 0, 0]
+    case '-x':
+      return [-1, 0, 0]
+    case '+y':
+      return [0, 1, 0]
+    case '-y':
+      return [0, -1, 0]
+  }
+}
 
 /* ─── Shapes ─────────────────────────────────────────── */
 
@@ -1071,9 +1193,9 @@ export const SPRINKLE_SUB_CATEGORIES: Record<
 > = {
   paper: [
     { id: 'kind', label: '종류' },
+    { id: 'size', label: '크기' },
     { id: 'count', label: '양' },
     { id: 'color', label: '색상' },
-    { id: 'size', label: '크기' },
     { id: 'shape', label: '모양' },
     { id: 'material', label: '재질' }
   ],

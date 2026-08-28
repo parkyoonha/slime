@@ -698,8 +698,10 @@ export class SprinklesLayer {
 
     const halfWidth = size
     const halfHeight = size
-    // Paper sprinkles are near-flat foil (depth ≈ 0.02 × width) — as thin
-    // as the extrude bevel allows. Plastic spangles are noticeably thicker
+    // Paper sprinkles carry a tiny bit of thickness (depth ≈ 0.05 ×
+    // width) so the pieces catch a faint edge highlight rather than
+    // reading as pure decal-flat — previously bumped down to 0.02 which
+    // felt too paper-flat. Plastic spangles stay noticeably thicker
     // (2.5 × width) so they read as chunky moulded beads instead of
     // paper-thin confetti. Powder grains are 3D faceted octahedra, so
     // depth must equal width — otherwise the grain gets squashed into a
@@ -709,7 +711,7 @@ export class SprinklesLayer {
       ? size
       : isPlastic
         ? size * 2.5
-        : size * 0.02
+        : size * 0.05
     // Base lift = 0 so sprinkles ride flush with the mesh. `beadLift[i]` adds
     // a per-instance outward offset where a bead is underneath, so sprinkles
     // sit on top of beads (slime → beads → sprinkles) instead of poking into

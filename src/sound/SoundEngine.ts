@@ -25,24 +25,35 @@ export class SoundEngine {
    *  keep re-triggering as long as the caller reports elevated pressure). */
   private namedTimers: Record<string, ReturnType<typeof setTimeout> | null> = {
     wax: null,
+    thinwax: null,
     foil: null,
     beads: null,
     paper: null,
     powder: null,
     matte: null,
     metal: null,
-    emoji: null
+    emoji: null,
+    slimeTap: null
   }
   private namedTargetLevels: Record<string, number> = {
     wax: 0,
+    thinwax: 0,
     foil: 0,
     beads: 0,
     paper: 0,
     powder: 0,
     matte: 0,
     metal: 0,
-    emoji: 0
+    emoji: 0,
+    slimeTap: 0
   }
+  /** Per-slot GAIN multiplier for looping samples. Multiplies the
+   *  intensity passed to `setLoopingSampleLevel` before feeding the
+   *  gain node, so a quiet source recording can be boosted per-channel
+   *  without affecting other channels or the master gain. Values >1
+   *  raise the ceiling above the intensity clamp; the gain node itself
+   *  has no upper bound. Missing entries default to 1.0. */
+  private loopGainMultipliers: Record<string, number> = {}
   /** Per-slot LOOPING sources for continuous ambient sounds (beads,
    *  paper). Unlike the setNamedLevel scheduler which fires discrete
    *  short pops, `setLoopingSampleLevel` keeps a single AudioBufferSourceNode
@@ -54,13 +65,15 @@ export class SoundEngine {
     { src: AudioBufferSourceNode; gain: GainNode } | null
   > = {
     wax: null,
+    thinwax: null,
     foil: null,
     beads: null,
     paper: null,
     powder: null,
     matte: null,
     metal: null,
-    emoji: null
+    emoji: null,
+    slimeTap: null
   }
 
   /** Slime squish sample pool. `setSquishLevel` is a no-op until at least
@@ -77,13 +90,15 @@ export class SoundEngine {
    *  independently of the global playCrack limiter. */
   private namedSamples: Record<string, AudioBuffer | null> = {
     wax: null,
+    thinwax: null,
     foil: null,
     beads: null,
     paper: null,
     powder: null,
     matte: null,
     metal: null,
-    emoji: null
+    emoji: null,
+    slimeTap: null
   }
   /** Optional per-slot [startSec, endSec] source-range constraint. When
    *  set, random window offsets are clamped to this range so only the
@@ -94,13 +109,15 @@ export class SoundEngine {
     readonly [number, number] | null
   > = {
     wax: null,
+    thinwax: null,
     foil: null,
     beads: null,
     paper: null,
     powder: null,
     matte: null,
     metal: null,
-    emoji: null
+    emoji: null,
+    slimeTap: null
   }
 
   private volume = 0.9
@@ -310,7 +327,22 @@ export class SoundEngine {
    * Below the threshold, the source fades out and stops. Use for
    * beads / sprinkle sounds; keep setNamedLevel for crack pops.
    */
-  setLoopingSampleLevel(name: string, intensity: number, fadeTime = 0.008) {
+  setLoopingSampleLevel(
+    name: string,
+    intensity: number,
+    fadeTime = 0.008,
+    /**
+     * Optional buffer offset (seconds) to seek to when STARTING a new
+     * voice. When omitted, defaults to `loopStart` (i.e. skip any
+     * pre-loop "attack" region in the file). Set to 0 to play the
+     * whole file from the top — the section BEFORE loopStart plays
+     * ONCE as an attack, then the buffer natural-loops between
+     * loopStart and loopEnd for as long as gain > threshold. Ignored
+     * when the voice for `name` is already active (gain is just
+     * updated in place on subsequent calls).
+     */
+    startOffsetOverride?: number
+  ) {
     if (!this.enabled) return
     const ctx = this.ensureCtx()
     if (!ctx || !this.masterGain) return
@@ -318,6 +350,8 @@ export class SoundEngine {
     if (!buf) return
 
     const level = Math.max(0, Math.min(1, intensity))
+    const gainMult = this.loopGainMultipliers[name] ?? 1
+    const effectiveLevel = level * gainMult
     const active = this.loopSources[name] ?? null
     const now = ctx.currentTime
 
@@ -346,33 +380,78 @@ export class SoundEngine {
       return
     }
 
-    if (!active) {
+    // An explicit startOffsetOverride means the caller wants playback
+    // to *begin* at that offset — if a voice is already active the
+    // offset is meaningless (playback continues from its current
+    // position), so tear the active voice down and fall through to
+    // the "create fresh" branch. Ensures a reset-armed wax attack
+    // always plays even when the previous press's voice was still
+    // alive or fading out. Tear-down is near-instant (0-gain in 2 ms,
+    // stop in 5 ms) so the old sustain can't overlap the fresh
+    // attack transient long enough to mask it.
+    if (active && startOffsetOverride !== undefined) {
+      const oldSrc = active.src
+      const oldGain = active.gain
+      oldGain.gain.cancelScheduledValues(now)
+      oldGain.gain.setValueAtTime(0, now)
+      try {
+        oldSrc.stop(now + 0.005)
+      } catch {
+        // already stopped
+      }
+      oldSrc.onended = () => {
+        oldSrc.disconnect()
+        oldGain.disconnect()
+      }
+      this.loopSources[name] = null
+    }
+
+    const stillActive = this.loopSources[name]
+    if (!stillActive) {
       const src = ctx.createBufferSource()
       src.buffer = buf
       src.loop = true
       const range = this.namedSourceRanges[name]
-      const startSec = range
+      const loopStartSec = range
         ? Math.max(0, Math.min(buf.duration, range[0]))
         : 0
       if (range) {
-        src.loopStart = startSec
+        src.loopStart = loopStartSec
         src.loopEnd = Math.max(
-          startSec,
+          loopStartSec,
           Math.min(buf.duration, range[1])
         )
       }
+      // Where the voice actually begins reading the buffer. Defaults
+      // to loopStart (jump straight into the sustain region) unless
+      // the caller wants the pre-loop attack region played first.
+      const startSec =
+        startOffsetOverride !== undefined
+          ? Math.max(0, Math.min(buf.duration, startOffsetOverride))
+          : loopStartSec
       const gain = ctx.createGain()
       gain.gain.setValueAtTime(0.0001, now)
-      gain.gain.linearRampToValueAtTime(level, now + fadeTime)
+      gain.gain.linearRampToValueAtTime(effectiveLevel, now + fadeTime)
       src.connect(gain)
       gain.connect(this.masterGain)
       src.start(now, startSec)
       this.loopSources[name] = { src, gain }
     } else {
-      active.gain.gain.cancelScheduledValues(now)
-      active.gain.gain.setValueAtTime(active.gain.gain.value, now)
-      active.gain.gain.linearRampToValueAtTime(level, now + fadeTime)
+      stillActive.gain.gain.cancelScheduledValues(now)
+      stillActive.gain.gain.setValueAtTime(stillActive.gain.gain.value, now)
+      stillActive.gain.gain.linearRampToValueAtTime(
+        effectiveLevel,
+        now + fadeTime
+      )
     }
+  }
+
+  /** Set a per-channel gain multiplier for `setLoopingSampleLevel`.
+   *  Use this to boost a quiet source recording without affecting the
+   *  intensity input (which stays 0..1 driven by press pressure) or
+   *  other channels. Default is 1.0 for any channel not set. */
+  setLoopingSampleGain(name: string, gain: number) {
+    this.loopGainMultipliers[name] = Math.max(0, gain)
   }
 
   /**
@@ -515,6 +594,43 @@ export class SoundEngine {
     gain.connect(this.masterGain)
     src.start(now, offsetSec)
     src.stop(now + playSec + 0.02)
+    src.onended = () => {
+      src.disconnect()
+      gain.disconnect()
+    }
+  }
+
+  /**
+   * Fire-and-forget one-shot playback of a named sample. Plays from
+   * the configured range start (or 0 if no range) to the end of the
+   * buffer, without looping. Cheap: one voice, constant gain, no
+   * tracking. Use when a coating channel needs to fire exactly once
+   * (e.g. thinwax during auto-press mode) alongside the normal loop
+   * channel being muted.
+   */
+  playNamedSampleFull(name: string, intensity: number = 1) {
+    if (!this.enabled) return
+    const ctx = this.ensureCtx()
+    if (!ctx || !this.masterGain) return
+    const buf = this.namedSamples[name]
+    if (!buf) return
+
+    const range = this.namedSourceRanges[name]
+    const startSec = range
+      ? Math.max(0, Math.min(buf.duration, range[0]))
+      : 0
+
+    const src = ctx.createBufferSource()
+    src.buffer = buf
+    // Explicit false — we want a natural end, not a loop.
+    src.loop = false
+
+    const gain = ctx.createGain()
+    gain.gain.value = Math.max(0.1, Math.min(1.5, intensity))
+
+    src.connect(gain)
+    gain.connect(this.masterGain)
+    src.start(ctx.currentTime, startSec)
     src.onended = () => {
       src.disconnect()
       gain.disconnect()

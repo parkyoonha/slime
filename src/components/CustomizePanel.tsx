@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   BEAD_COLORS,
   BEAD_COMBOS,
@@ -22,6 +22,9 @@ import {
   EMOJI_BEADS_LIMITS,
   MATERIALS,
   SHAPES,
+  SLIME_TEXT_FONTS,
+  SLIME_TEXT_ITEM_DEFAULT,
+  SLIME_TEXT_SLOT_MAX,
   SPRINKLE_COLORS,
   SPRINKLE_MATERIALS,
   SPRINKLE_MATERIALS_BY_TYPE,
@@ -42,6 +45,9 @@ import {
   type EmojiBeadsConfig,
   type MaterialId,
   type ShapeId,
+  type SlimeTextFace,
+  type SlimeTextGroup,
+  type SlimeTextItem,
   SPANGLE_KINDS,
   type SprinkleColorId,
   type SprinkleTypeId,
@@ -93,14 +99,31 @@ const CATEGORIES: readonly { id: CategoryId; label: string }[] = [
   { id: 'custom-beads', label: '추가비즈' }
 ]
 
-type SlimeSub = 'color' | 'material' | 'coating' | 'shape' | 'crunch'
+type SlimeSub =
+  | 'color'
+  | 'material'
+  | 'coating'
+  | 'shape'
+  | 'text'
 const SLIME_SUBS: readonly { id: SlimeSub; label: string }[] = [
-  { id: 'color', label: '색상' },
   { id: 'material', label: '재질' },
-  { id: 'coating', label: '코팅' },
   { id: 'shape', label: '모양' },
-  { id: 'crunch', label: '크런치' }
+  { id: 'coating', label: '코팅' },
+  { id: 'color', label: '색상' },
+  { id: 'text', label: 'T' }
 ]
+
+/** Human-readable face labels for the cube-face text-position hint.
+ *  Sphere always sits at 'front' (never surfaces this label). */
+const SLIME_TEXT_FACE_LABEL: Record<string, string> = {
+  front: '앞면',
+  '+z': '앞면',
+  '-z': '뒷면',
+  '+x': '오른쪽',
+  '-x': '왼쪽',
+  '+y': '윗면',
+  '-y': '아랫면'
+}
 
 /** Per-combo bead sub-categories. Compact drops "count" (always fill),
  *  chunk keeps count but never shows fill (always count-based). 'none'
@@ -114,16 +137,20 @@ const BEAD_SUB_CATEGORIES_BY_COMBO: Record<
     { id: 'color', label: '색상' },
     { id: 'size', label: '크기' },
     { id: 'shape', label: '모양' },
-    { id: 'material', label: '재질' },
     { id: 'flatness', label: '납작함' }
   ],
   chunk: [
-    { id: 'color', label: '색상' },
-    { id: 'count', label: '양' },
+    // Shared by 비즈볼 (chunk) AND 슬라임볼 (inner-slime). 비즈볼
+    // filters out 'coating' at render time, so this array's order
+    // — size, count, material, coating, color, shape — reads as:
+    //   슬라임볼 → 크기 > 양 > 재질 > 코팅 > 색상 > 모양
+    //   비즈볼   → 크기 > 양 > 재질 > 색상 > 모양 (coating removed)
     { id: 'size', label: '크기' },
-    { id: 'shape', label: '모양' },
+    { id: 'count', label: '양' },
     { id: 'material', label: '재질' },
-    { id: 'coating', label: '코팅' }
+    { id: 'coating', label: '코팅' },
+    { id: 'color', label: '색상' },
+    { id: 'shape', label: '모양' }
   ]
 }
 
@@ -147,10 +174,6 @@ interface Props {
   onMaterial: (v: MaterialId) => void
   onCoating: (v: CoatingId) => void
   onShape: (v: ShapeId) => void
-  /** 크런치 — hidden grain bumps that pop out on the slime surface where
-   *  the user is pressing. Simple boolean toggle. */
-  crunchOn: boolean
-  onCrunchOn: (v: boolean) => void
   onBeads: (v: BeadsConfig) => void
   onSprinkles: (v: SprinklesConfig) => void
   onEmojiBeads: (v: EmojiBeadsConfig) => void
@@ -185,6 +208,26 @@ interface Props {
   customBeadsPhotoOn: boolean
   onPickCustomBeadsPhoto: (file: File) => void
   onClearCustomBeadsPhoto: () => void
+  /** 텍스트 데칼 group — up to SLIME_TEXT_SLOT_MAX items + a shared
+   *  aboveCoating flag. Sphere pins every item to 'front' (camera-
+   *  facing per-frame); cube exposes six ±axis faces via clicks on
+   *  the slime while an item is being edited. */
+  slimeText: SlimeTextGroup
+  onSlimeText: (v: SlimeTextGroup) => void
+  /** Fires when the 텍스트 input gains / loses focus — SlimeApp uses
+   *  this to nudge the slime downward + shrink it while the keyboard
+   *  is likely up so the sphere silhouette isn't cropped by the top
+   *  of the viewport. */
+  onTextInputFocusChange?: (focused: boolean) => void
+  /** Fires whenever the user switches which text-item slot is being
+   *  edited (or -1 when the panel is idle). SlimeApp uses this so the
+   *  cube-face raycast knows which item's face to update on click. */
+  onActiveTextItemChange?: (idx: number) => void
+  /** Fires whenever the user switches between slime sub-tabs (색상 /
+   *  텍스트 / …). Emits `null` when the slime category itself is
+   *  closed. SlimeApp uses this to gate the cube-face click raycast to
+   *  only fire while the text sub is actually visible. */
+  onActiveSlimeSubChange?: (sub: string | null) => void
   /** Fires whenever the user opens/closes a primary category. Lets
    *  SlimeApp decide which per-category chrome (e.g. the 슬라임 안 toggle
    *  in the unified tag row) is currently applicable — a plain string
@@ -399,8 +442,8 @@ function CategoryIcon({ id }: { id: CategoryId }) {
     strokeWidth: 1.6,
     strokeLinecap: 'round' as const,
     strokeLinejoin: 'round' as const,
-    width: 22,
-    height: 22
+    width: 26,
+    height: 26
   }
   if (id === 'slime') {
     return (
@@ -410,87 +453,129 @@ function CategoryIcon({ id }: { id: CategoryId }) {
     )
   }
   if (id === 'inner-slime') {
+    // Outer ring stays as an outline (matching the plain 슬라임 icon),
+    // ONLY the inner ball fills solid so the icon reads as "a smaller
+    // ball tucked inside a slime shell".
     return (
       <svg {...svgProps}>
         <circle cx="12" cy="12" r="9" />
-        <circle cx="12" cy="12" r="4" />
+        <circle cx="12" cy="12" r="4" fill="currentColor" stroke="none" />
       </svg>
     )
   }
   if (id === 'compact') {
+    // Ring at distance 6 with radius-2 dots pushes the outer cluster
+    // extent to ~8 units — matching the 슬라임 icon's r=8 circle so
+    // the packed beads read at the same visual size as the plain
+    // slime chip alongside it. Dots filled solid (currentColor) so
+    // the cluster reads as densely packed rather than hollow rings.
     const dots: JSX.Element[] = []
-    dots.push(<circle key="c" cx={12} cy={12} r={1.9} />)
+    dots.push(
+      <circle key="c" cx={12} cy={12} r={2} fill="currentColor" stroke="none" />
+    )
     for (let i = 0; i < 6; i++) {
       const a = (i * Math.PI) / 3
       dots.push(
         <circle
           key={i}
-          cx={+(12 + 4 * Math.cos(a)).toFixed(2)}
-          cy={+(12 + 4 * Math.sin(a)).toFixed(2)}
-          r={1.9}
+          cx={+(12 + 6 * Math.cos(a)).toFixed(2)}
+          cy={+(12 + 6 * Math.sin(a)).toFixed(2)}
+          r={2}
+          fill="currentColor"
+          stroke="none"
         />
       )
     }
     return <svg {...svgProps}>{dots}</svg>
   }
   if (id === 'chunk') {
+    // Outer ring outlined (matches 슬라임/슬라임볼 boundary treatment),
+    // 2 inner beads solid-filled and bumped a touch bigger so they
+    // read as chunky beads rather than pin-sized dots.
     return (
       <svg {...svgProps}>
         <circle cx="12" cy="12" r="9" />
-        <circle cx="9" cy="9" r="2.2" />
-        <circle cx="15" cy="15" r="2.2" />
+        <circle cx="9" cy="9" r="2.6" fill="currentColor" stroke="none" />
+        <circle cx="15" cy="15" r="2.6" fill="currentColor" stroke="none" />
       </svg>
     )
   }
   if (id === 'paper') {
-    const lines: JSX.Element[] = []
-    const N = 11
-    for (let i = 0; i < N; i++) {
-      const a = (i * 2 * Math.PI) / N
-      const cx = 12 + 7 * Math.cos(a)
-      const cy = 12 + 7 * Math.sin(a)
-      lines.push(
-        <line
-          key={i}
-          x1={+(cx - 1.2).toFixed(2)}
-          y1={+(cy - 1.2).toFixed(2)}
-          x2={+(cx + 1.2).toFixed(2)}
-          y2={+(cy + 1.2).toFixed(2)}
-        />
-      )
+    // Sparser sparkle: 1 centre + 6 (r=5.5) = 7 slashes (down from
+    // 13 → roughly halved). Slightly thicker (0.7 → 0.95) so each
+    // remaining mark carries more visual weight now that they're
+    // more spread out.
+    const items: readonly { r: number; count: number }[] = [
+      { r: 0, count: 1 },
+      { r: 5.5, count: 6 }
+    ]
+    const rects: JSX.Element[] = []
+    let key = 0
+    for (const { r, count } of items) {
+      for (let i = 0; i < count; i++) {
+        const a = count === 1 ? 0 : (i * 2 * Math.PI) / count
+        const cx = +(12 + r * Math.cos(a)).toFixed(2)
+        const cy = +(12 + r * Math.sin(a)).toFixed(2)
+        rects.push(
+          <rect
+            key={key++}
+            x={+(cx - 1.6).toFixed(2)}
+            y={+(cy - 0.475).toFixed(2)}
+            width={3.2}
+            height={0.95}
+            rx={0.4}
+            fill="currentColor"
+            stroke="none"
+            transform={`rotate(45 ${cx} ${cy})`}
+          />
+        )
+      }
     }
-    return <svg {...svgProps}>{lines}</svg>
+    return <svg {...svgProps}>{rects}</svg>
   }
   if (id === 'powder') {
+    // Concentric rings — uniform spacing (~2.5 both radially and
+    // circumferentially): 1 centre + 6 (r=2.5) + 12 (r=5) + 18
+    // (r=7.5) = 37 filled dots. Filled (fill="currentColor",
+    // no stroke) so each grain reads as a solid speck instead of
+    // a hollow ring outline.
+    const items: readonly { r: number; count: number }[] = [
+      { r: 0, count: 1 },
+      { r: 2.5, count: 6 },
+      { r: 5, count: 12 },
+      { r: 7.5, count: 18 }
+    ]
     const dots: JSX.Element[] = []
-    const N = 11
-    for (let i = 0; i < N; i++) {
-      const a = (i * 2 * Math.PI) / N
-      dots.push(
-        <circle
-          key={i}
-          cx={+(12 + 7 * Math.cos(a)).toFixed(2)}
-          cy={+(12 + 7 * Math.sin(a)).toFixed(2)}
-          r={0.9}
-        />
-      )
+    let key = 0
+    for (const { r, count } of items) {
+      for (let i = 0; i < count; i++) {
+        const a = count === 1 ? 0 : (i * 2 * Math.PI) / count
+        dots.push(
+          <circle
+            key={key++}
+            cx={+(12 + r * Math.cos(a)).toFixed(2)}
+            cy={+(12 + r * Math.sin(a)).toFixed(2)}
+            r={0.55}
+            fill="currentColor"
+            stroke="none"
+          />
+        )
+      }
     }
     return <svg {...svgProps}>{dots}</svg>
   }
   if (id === 'ink') {
-    const N = 60
-    const parts: string[] = []
-    for (let i = 0; i < N; i++) {
-      const t = (i * 2 * Math.PI) / N
-      const r = 7 + 1.3 * Math.sin(5 * t)
-      const x = 12 + r * Math.cos(t)
-      const y = 12 + r * Math.sin(t)
-      parts.push(`${i === 0 ? 'M' : 'L'}${x.toFixed(2)} ${y.toFixed(2)}`)
-    }
-    parts.push('Z')
+    // Diagonal squiggle with VARIABLE amplitude — outer humps stay
+    // shallow (amp 4) while the middle two humps swing deep (amp 8)
+    // so after the -45° rotation those middle peaks land on the
+    // imaginary r=8 rim instead of hugging the centreline. Explicit
+    // Q commands (not T) let each hump pick its own amplitude.
     return (
       <svg {...svgProps}>
-        <path d={parts.join(' ')} />
+        <path
+          d="M4 12 Q6 8 8 12 Q10 20 12 12 Q14 4 16 12 Q18 16 20 12"
+          transform="rotate(-45 12 12)"
+        />
       </svg>
     )
   }
@@ -518,11 +603,14 @@ function CategoryIcon({ id }: { id: CategoryId }) {
     )
   }
   if (id === 'custom-beads') {
+    // Circle enlarged to r=6 so the bead reads at a size comparable
+    // to the other outlined-boundary icons; "+" nudged left to keep
+    // it clear of the widened circle.
     return (
       <svg {...svgProps}>
-        <line x1="6" y1="8" x2="6" y2="16" />
-        <line x1="2" y1="12" x2="10" y2="12" />
-        <circle cx="17" cy="12" r="4" />
+        <line x1="4.5" y1="8" x2="4.5" y2="16" />
+        <line x1="0.5" y1="12" x2="8.5" y2="12" />
+        <circle cx="16" cy="12" r="6" />
       </svg>
     )
   }
@@ -532,11 +620,18 @@ function CategoryIcon({ id }: { id: CategoryId }) {
 function PrimaryChipsRow({
   category,
   openCategory,
-  closeCategory
+  closeCategory,
+  scrollLeftRef
 }: {
   category: CategoryId | null
   openCategory: (id: CategoryId) => void
   closeCategory: () => void
+  /** Persistent scroll offset owned by the parent — restored on
+   *  every mount so the horizontally-scrolled chip strip doesn't
+   *  snap back to 0 whenever a category change tears the sub-panel
+   *  down and remounts this component. Kept as a ref (not state)
+   *  since the value never needs to trigger a re-render. */
+  scrollLeftRef: React.MutableRefObject<number>
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
   const [atStart, setAtStart] = useState(true)
@@ -545,8 +640,14 @@ function PrimaryChipsRow({
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
+    // Restore previous scroll position first (before wiring up the
+    // listener so the restoration itself doesn't overwrite the ref).
+    if (scrollLeftRef.current > 0) {
+      el.scrollLeft = scrollLeftRef.current
+    }
     const update = () => {
       const max = el.scrollWidth - el.clientWidth
+      scrollLeftRef.current = el.scrollLeft
       setAtStart(el.scrollLeft <= 1)
       setAtEnd(el.scrollLeft >= max - 1)
     }
@@ -558,7 +659,7 @@ function PrimaryChipsRow({
       el.removeEventListener('scroll', update)
       ro.disconnect()
     }
-  }, [])
+  }, [scrollLeftRef])
 
   return (
     <div
@@ -607,8 +708,6 @@ export default function CustomizePanel({
   onMaterial,
   onCoating,
   onShape,
-  crunchOn,
-  onCrunchOn,
   onBeads,
   onSprinkles,
   onEmojiBeads,
@@ -627,10 +726,21 @@ export default function CustomizePanel({
   customBeadsPhotoOn,
   onPickCustomBeadsPhoto,
   onClearCustomBeadsPhoto,
+  slimeText,
+  onSlimeText,
+  onTextInputFocusChange,
+  onActiveTextItemChange,
+  onActiveSlimeSubChange,
   onActivePanelChange,
   onRegisterOpenCategory
 }: Props) {
   const [category, setCategory] = useState<CategoryId | null>(null)
+  // Persistent horizontal scroll offset for the primary chip strip.
+  // Each category switch tears the sub-panel down and remounts
+  // PrimaryChipsRow with it — without this shared ref the row's
+  // scrollLeft would reset to 0 every time, snapping the strip back
+  // to the leading chips whenever the user picked one near the end.
+  const primaryChipsScrollLeftRef = useRef(0)
   useEffect(() => {
     // Mirror the panel's active category out to the parent so the unified
     // tag row can render per-category chrome (currently only the 슬라임 안
@@ -645,6 +755,71 @@ export default function CustomizePanel({
   // Per-category active sub-category. Each category remembers the last
   // sub-cat the user was on so re-entering the category feels continuous.
   const [slimeSub, setSlimeSub] = useState<SlimeSub>('color')
+  useEffect(() => {
+    // Only report a slime sub while the slime category is actually open.
+    // Any other category collapsing to root also collapses the sub so the
+    // parent's cube-face raycast gate doesn't fire on stale state.
+    onActiveSlimeSubChange?.(category === 'slime' ? slimeSub : null)
+  }, [category, slimeSub, onActiveSlimeSubChange])
+
+  // Single object holds BOTH the "which item's chips are showing"
+  // (activeIdx) and "which item's content input is open" (contentIdx)
+  // indices — combining them as one state guarantees they update in
+  // a SINGLE render, avoiding a torn intermediate where one changed
+  // and the other didn't. -1 = idle for either.
+  const [textEdit, setTextEdit] = useState<{
+    activeIdx: number
+    contentIdx: number
+  }>({ activeIdx: -1, contentIdx: -1 })
+  const activeTextIdx = textEdit.activeIdx
+  const contentEditingIdx = textEdit.contentIdx
+  useEffect(() => {
+    onActiveTextItemChange?.(activeTextIdx)
+  }, [activeTextIdx, onActiveTextItemChange])
+  // Clear both slots whenever the user leaves the text sub-tab so
+  // stale indices don't hijack cube-face clicks or leave orphan chips
+  // after navigating away.
+  useEffect(() => {
+    if (category !== 'slime' || slimeSub !== 'text') {
+      setTextEdit({ activeIdx: -1, contentIdx: -1 })
+    }
+  }, [category, slimeSub])
+  // Signal from commitAndAddNew that we just appended a new item and
+  // want the input+chips focused on it. Consumed by the layout-effect
+  // below AS SOON AS the parent's slimeText prop propagates, so the
+  // input row is guaranteed to appear on the same tap that fired the
+  // add — no "click twice" perception even when React couldn't batch
+  // parent+local updates into a single render (Capacitor webview).
+  const pendingAddIdxRef = useRef<number | null>(null)
+  // Runs synchronously after the parent's items prop updates but BEFORE
+  // browser paint, so the user never sees a transient frame where the
+  // + button hasn't yet swapped to the input row. Also handles the
+  // bounds clamp for shrinking items (deletion from unified tag row).
+  useLayoutEffect(() => {
+    setTextEdit((s) => {
+      const len = slimeText.items.length
+      let nextActive = s.activeIdx >= len ? -1 : s.activeIdx
+      let nextContent = s.contentIdx >= len ? -1 : s.contentIdx
+      if (pendingAddIdxRef.current !== null) {
+        const target = pendingAddIdxRef.current
+        pendingAddIdxRef.current = null
+        if (target >= 0 && target < len) {
+          nextActive = target
+          nextContent = target
+        }
+      }
+      if (nextActive === s.activeIdx && nextContent === s.contentIdx)
+        return s
+      return { activeIdx: nextActive, contentIdx: nextContent }
+    })
+  }, [slimeText.items])
+  // Auto-focus the input on the frame after content editing opens.
+  const textInputRef = useRef<HTMLInputElement | null>(null)
+  useEffect(() => {
+    if (contentEditingIdx < 0) return
+    const el = textInputRef.current
+    if (el) el.focus()
+  }, [contentEditingIdx])
   const [beadsSub, setBeadsSub] = useState<string>('color')
   // Sub-cat inside a sprinkle type — defaults to 'count' so drilling into
   // paper / powder / ink lands the user on the amount slider first (the
@@ -667,8 +842,14 @@ export default function CustomizePanel({
   // that extreme. Runs on every render because .options divs mount
   // and unmount as the user drills between categories.
   useEffect(() => {
+    // Same edge-fade detection now covers both `.options` (chip rows)
+    // AND `.tabs` (sub-category strips) so the sub-tab mask fade also
+    // clears on the extremes — six-tab strips like 슬라임 (with 텍스트)
+    // otherwise permanently dim their first / last labels.
     const rows = Array.from(
-      document.querySelectorAll<HTMLDivElement>('.' + styles.options)
+      document.querySelectorAll<HTMLDivElement>(
+        '.' + styles.options + ', .' + styles.tabs
+      )
     )
     const cleanups: (() => void)[] = []
     rows.forEach((row) => {
@@ -718,13 +899,23 @@ export default function CustomizePanel({
 
   const openCategory = (c: CategoryId) => {
     setCategory(c)
-    // Default sub-cat picks the first meaningful control per
-    // category: 비즈(compact) has no 양 slider (it's fill-only), so
-    // it opens on 색상. All the other beads / sprinkles categories
-    // default to 양. Slime opens on 색상.
-    setBeadsSub(c === 'compact' ? 'color' : 'count')
+    // Default sub-cat matches the FIRST tab in each category's tab
+    // strip so the panel opens on a "primary" control every time:
+    //   슬라임 → 재질 (material)
+    //   꽉비즈(compact) → 색상 (color, fill-only, no 양)
+    //   비즈볼(chunk) + 슬라임볼(inner-slime) → 크기 (size)
+    //   추가비즈(custom-beads) → 양 (count)
+    //   스팽글(paper) → 종류 (kind) — set further down
+    //   가루/잉크 → 양 (count)
+    setBeadsSub(
+      c === 'compact'
+        ? 'color'
+        : c === 'chunk' || c === 'inner-slime'
+          ? 'size'
+          : 'count'
+    )
     setSprinkleSub('count')
-    setSlimeSub('color')
+    setSlimeSub('material')
     // Photo tray always starts collapsed when entering a new
     // category — otherwise the user could open it in slime, jump
     // to compact, and see a stale + slot row above.
@@ -887,8 +1078,67 @@ export default function CustomizePanel({
       category={category}
       openCategory={openCategory}
       closeCategory={() => setCategory(null)}
+      scrollLeftRef={primaryChipsScrollLeftRef}
     />
   )
+
+  // "슬라임 안" toggle — active/handler resolved per-category from
+  // the four embed-capable leaves (compact / paper / theme /
+  // custom-beads). Null for every other category, so the injected
+  // button JSX below just renders nothing when not applicable.
+  const insideToggle: { active: boolean; onToggle: () => void } | null =
+    category === 'compact'
+      ? {
+          active: !!beads.inside,
+          onToggle: () =>
+            onBeads({ ...beads, inside: !beads.inside })
+        }
+      : category === 'paper'
+        ? {
+            active: !!sprinkles.paper.inside,
+            onToggle: () =>
+              onSprinkles({
+                ...sprinkles,
+                paper: {
+                  ...sprinkles.paper,
+                  inside: !sprinkles.paper.inside
+                }
+              })
+          }
+        : category === 'theme'
+          ? {
+              active: !!emojiBeads.inside,
+              onToggle: () =>
+                onEmojiBeads({
+                  ...emojiBeads,
+                  inside: !emojiBeads.inside
+                })
+            }
+          : category === 'custom-beads'
+            ? {
+                active: !!customBeads.inside,
+                onToggle: () =>
+                  onCustomBeads({
+                    ...customBeads,
+                    inside: !customBeads.inside
+                  })
+              }
+            : null
+
+  const insideToggleBtn = insideToggle ? (
+    <div className={styles.insideToggleRow}>
+      <button
+        type="button"
+        className={styles.insideToggleBtn}
+        data-active={insideToggle.active}
+        onClick={insideToggle.onToggle}
+        aria-pressed={insideToggle.active}
+        title="슬라임 안"
+      >
+        슬라임 안
+      </button>
+    </div>
+  ) : null
 
   /* ── Root view: just the chip row (all chips dimmed to 50%). */
   if (category === null) {
@@ -951,6 +1201,7 @@ export default function CustomizePanel({
     }
     return (
       <div className={styles.panel} data-hud>
+        {insideToggleBtn}
         {primaryChipsRow}
         <input
           ref={pickerInputRef}
@@ -1238,20 +1489,273 @@ export default function CustomizePanel({
             ))}
           </div>
         )}
-        {slimeSub === 'crunch' && (
-          <div className={styles.options}>
-            <button
-              className={styles.chip}
-              data-active={crunchOn}
-              type="button"
-              onClick={() => onCrunchOn(!crunchOn)}
-            >
-              <span className={styles.chipLabel}>
-                {crunchOn ? '크런치 켬' : '크런치 끔'}
-              </span>
-            </button>
-          </div>
-        )}
+        {slimeSub === 'text' && (() => {
+          const items = slimeText.items
+          const canAdd = items.length < SLIME_TEXT_SLOT_MAX
+          // Show-input / show-chips decisions key off LOCAL indices
+          // ONLY (not on `items[idx]` presence). Otherwise a race
+          // where the parent's slimeText prop hasn't propagated yet
+          // makes `items[contentEditingIdx]` undefined and typing
+          // falls back to null → the + button flashes again for one
+          // render, requiring the user to tap it TWICE to actually
+          // see the input. Fallback items are the DEFAULT so the
+          // input renders with an empty value until the real item
+          // arrives on the next render.
+          const isTyping = contentEditingIdx >= 0
+          const isActive = activeTextIdx >= 0
+          const typing = isTyping
+            ? items[contentEditingIdx] ?? SLIME_TEXT_ITEM_DEFAULT
+            : null
+          const active = isActive
+            ? items[activeTextIdx] ?? SLIME_TEXT_ITEM_DEFAULT
+            : null
+          const patchItem = (idx: number, patch: Partial<SlimeTextItem>) => {
+            onSlimeText({
+              ...slimeText,
+              items: slimeText.items.map((it, i) =>
+                i === idx ? { ...it, ...patch } : it
+              )
+            })
+          }
+          // For cube shape: prefer a face that no other item is on so
+          // the new text lands where the user can immediately see it
+          // instead of overlapping an existing decal. Order picks +Z
+          // (front) first, then rotates through side faces before the
+          // back, so on cube 3 texts naturally spread across the
+          // camera-visible faces first.
+          const pickEmptyFace = (): SlimeTextFace => {
+            if (shape !== 'cube') return 'front'
+            const used = new Set(items.map((it) => it.face))
+            const order: SlimeTextFace[] = [
+              '+z',
+              '+x',
+              '-x',
+              '+y',
+              '-y',
+              '-z'
+            ]
+            for (const f of order) if (!used.has(f)) return f
+            return '+z'
+          }
+          // Commit + start new. Drops the current active item if it's
+          // empty (so the row doesn't accumulate blank pills), then
+          // appends a fresh default item + points BOTH indices at it.
+          // Input is ALWAYS rendered — no separate "+ 텍스트 추가"
+          // standalone button. When contentEditingIdx < 0 the input
+          // is "virgin" (empty value, placeholder invites new text);
+          // the first keystroke creates a fresh item and switches into
+          // regular edit mode. Removes the two-tap perception where
+          // the standalone + button had to be pressed before the
+          // input appeared.
+          return (
+            <div className={styles.textSubPanel}>
+              <div className={styles.textPillsRow}>
+                <div className={styles.textInputRow}>
+                  <input
+                    ref={textInputRef}
+                    className={styles.textInput}
+                    type="text"
+                    value={typing?.content ?? ''}
+                    maxLength={12}
+                    placeholder={typing ? '텍스트 입력' : '+ 텍스트 추가'}
+                    disabled={!typing && !canAdd}
+                    onChange={(e) => {
+                      const val = e.target.value
+                      if (contentEditingIdx >= 0) {
+                        patchItem(contentEditingIdx, { content: val })
+                        return
+                      }
+                      // Virgin input — first keystroke spawns a fresh
+                      // item carrying that character, so the user's
+                      // typing isn't lost between the create + focus
+                      // handoff.
+                      if (!canAdd) return
+                      const newItem: SlimeTextItem = {
+                        ...SLIME_TEXT_ITEM_DEFAULT,
+                        face: pickEmptyFace(),
+                        content: val
+                      }
+                      const nextItems = [...slimeText.items, newItem]
+                      const newIdx = nextItems.length - 1
+                      pendingAddIdxRef.current = newIdx
+                      onSlimeText({ ...slimeText, items: nextItems })
+                      setTextEdit({ activeIdx: newIdx, contentIdx: newIdx })
+                    }}
+                    onFocus={() => onTextInputFocusChange?.(true)}
+                    onBlur={() => onTextInputFocusChange?.(false)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        ;(e.target as HTMLInputElement).blur()
+                      }
+                    }}
+                    data-hud="true"
+                  />
+                  <button
+                    type="button"
+                    className={styles.textConfirmBtn}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onTouchStart={(e) => e.preventDefault()}
+                    onClick={() => {
+                      textInputRef.current?.blur()
+                      if (contentEditingIdx < 0) return
+                      // Empty content prunes the slot AND clears
+                      // activeTextIdx. Non-empty keeps active so the
+                      // chips remain visible for post-typing tweaks.
+                      if (!typing || !typing.content.trim()) {
+                        onSlimeText({
+                          ...slimeText,
+                          items: slimeText.items.filter(
+                            (_, i) => i !== contentEditingIdx
+                          )
+                        })
+                        setTextEdit({ activeIdx: -1, contentIdx: -1 })
+                      } else {
+                        setTextEdit((s) => ({
+                          ...s,
+                          contentIdx: -1
+                        }))
+                      }
+                    }}
+                    data-hud="true"
+                  >
+                    확인
+                  </button>
+                </div>
+                {items.map((item, i) => {
+                  // While typing, hide the pill of the item whose
+                  // content is in the input (it's already visible
+                  // as the input). Other pills always show.
+                  if (i === contentEditingIdx) return null
+                  return (
+                    <button
+                      type="button"
+                      key={i}
+                      className={styles.textPill}
+                      data-active={activeTextIdx === i}
+                      onClick={() => {
+                        // Activate item for chip tweaks + also open
+                        // content editing so the user can retype /
+                        // adjust the pill's text. The auto-focus
+                        // effect raises the keyboard. Deletion is
+                        // handled via the input's 확인 button
+                        // (empty content prunes the slot) or the
+                        // unified tag row above the panel.
+                        setTextEdit({
+                          activeIdx: i,
+                          contentIdx: i
+                        })
+                      }}
+                    >
+                      {item.content || '(빈 텍스트)'}
+                    </button>
+                  )
+                })}
+              </div>
+              {active && (
+                <>
+                  <div className={styles.options}>
+                    {SLIME_TEXT_FONTS.map((f) => (
+                      <button
+                        key={f.id}
+                        className={styles.chip}
+                        data-active={active.fontId === f.id}
+                        type="button"
+                        onClick={() =>
+                          patchItem(activeTextIdx, { fontId: f.id })
+                        }
+                      >
+                        <span
+                          className={styles.chipLabel}
+                          style={{
+                            fontFamily: f.family,
+                            fontWeight: Number(f.weight)
+                          }}
+                        >
+                          {f.label}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                  <div className={styles.sliderRow} data-hud="true">
+                    <span className={styles.sliderLabelPrefix}>크기</span>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={1.6}
+                      step={0.05}
+                      value={active.size}
+                      onChange={(e) =>
+                        patchItem(activeTextIdx, {
+                          size: Number(e.target.value)
+                        })
+                      }
+                      className={styles.slider}
+                    />
+                    <span className={styles.sliderValue}>
+                      {active.size.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className={styles.options}>
+                    {COLORS.map((c) => {
+                      const isActive = active.color === c.id
+                      return (
+                        <button
+                          key={c.id}
+                          className={styles.chip}
+                          data-active={isActive}
+                          type="button"
+                          onClick={() =>
+                            patchItem(activeTextIdx, { color: c.id })
+                          }
+                          aria-label={c.label}
+                          aria-pressed={isActive}
+                        >
+                          <span
+                            className={styles.swatch}
+                            style={{
+                              background: hexToCss(
+                                resolveColorHex(c.id, colorAdjustments)
+                              )
+                            }}
+                          />
+                          <span className={styles.chipLabel}>{c.label}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                  {coating !== 'none' && (
+                    <div className={styles.options}>
+                      <button
+                        type="button"
+                        className={styles.chip}
+                        data-active={slimeText.aboveCoating}
+                        onClick={() =>
+                          onSlimeText({
+                            ...slimeText,
+                            aboveCoating: !slimeText.aboveCoating
+                          })
+                        }
+                      >
+                        <span className={styles.chipLabel}>
+                          {slimeText.aboveCoating
+                            ? '코팅 위에 표시'
+                            : '코팅 아래에 표시'}
+                        </span>
+                      </button>
+                    </div>
+                  )}
+                  {shape === 'cube' && (
+                    <div className={styles.textFaceHint}>
+                      슬라임의 면을 눌러 텍스트 위치를 바꿔요 · 현재:{' '}
+                      {SLIME_TEXT_FACE_LABEL[active.face]}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )
+        })()}
       </div>
     )
   }
@@ -1343,6 +1847,7 @@ export default function CustomizePanel({
     const showHeaderCamera = true
     return (
       <div className={styles.panel} data-hud>
+        {insideToggleBtn}
         {primaryChipsRow}
         <input
           ref={pickerInputRef}
@@ -2422,11 +2927,11 @@ export default function CustomizePanel({
         which mirrors the emoji bead pipeline. */
   if (category === 'custom-beads') {
     const CUSTOM_SUBS = [
-      { id: 'color', label: '색상' },
       { id: 'count', label: '양' },
       { id: 'size', label: '크기' },
       { id: 'shape', label: '모양' },
-      { id: 'flatness', label: '납작함' }
+      { id: 'color', label: '색상' },
+      { id: 'flatness', label: '두께' }
     ] as const
     // Sphere excluded from custom-beads shape choices — the orthographic
     // photo projection collapses onto a sphere's tiny cap, and the
@@ -2434,7 +2939,7 @@ export default function CustomizePanel({
     const CUSTOM_BEAD_SHAPES = BEAD_SHAPES.filter((s) => s.id !== 'sphere')
     const activeSub = CUSTOM_SUBS.some((s) => s.id === beadsSub)
       ? beadsSub
-      : 'color'
+      : 'count'
     const beadTags: SelectionTag[] = []
     customBeads.colors.forEach((cid) => {
       beadTags.push({
@@ -2462,6 +2967,7 @@ export default function CustomizePanel({
     })
     return (
       <div className={styles.panel} data-hud>
+        {insideToggleBtn}
         {primaryChipsRow}
         <input
           ref={pickerInputRef}
@@ -2684,7 +3190,7 @@ export default function CustomizePanel({
                 })
               }
               className={styles.slider}
-              aria-label="추가비즈 납작함"
+              aria-label="추가비즈 두께"
             />
             <span className={styles.sliderValue}>
               {Math.round(Math.min(customBeads.flatness, 0.58) * 100)}%
@@ -2728,6 +3234,7 @@ export default function CustomizePanel({
     }))
     return (
       <div className={styles.panel} data-hud>
+        {insideToggleBtn}
         {primaryChipsRow}
         <Header title={catLabel} onBack={goBack} tags={emojiTags} />
         <div className={styles.options}>

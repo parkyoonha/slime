@@ -162,6 +162,12 @@ export class SlimeSphere {
    *  flat matte surface — matches the reference capture. Ignored under
    *  crack-drawing coatings (foil/wax/ice paint the whole shell). */
   private readonly materialIsMatteUniform = { value: 0.0 }
+  /** Shader uniform: 1 when the 아이스 material is active. Gates a
+   *  fragment-shader normal-perturbation mixin that samples a noise
+   *  gradient in rest space and offsets the surface normal so the
+   *  transparent glass body reads with a fine "자글자글" wrinkled /
+   *  crinkled texture instead of a perfectly smooth mirror. */
+  private readonly materialIsIceUniform = { value: 0.0 }
   /** Shader uniform: 1 when 크런치 is on. Enables a vertex-shader mixin
    *  that samples a Fibonacci-like hash at each vertex's rest position
    *  and adds a small outward bump displacement proportional to the
@@ -227,6 +233,55 @@ export class SlimeSphere {
   }
   private readonly photoRadiusUniform = { value: 0.9 }
   private photoTexture: THREE.Texture | null = null
+  // 텍스트 데칼 uniforms — up to TEXT_SLOT_COUNT independent decals,
+  // each with its own texture + face axis. Same rest-space projection
+  // pattern as the photo sticker; the fragment shader walks the slot
+  // array and blends any slot with uTextUse[i] > 0.5 onto the
+  // diffuse. `aboveCoating` toggles whether the composition happens
+  // BEFORE (buried under coating) or AFTER (crisp over coating) the
+  // slime's coating tint block.
+  private static readonly TEXT_SLOT_COUNT = 3
+  // Fallback 1×1 transparent texture — sampler2D uniforms MUST have a
+  // bound texture even when the shader gates them behind `uTextUse`,
+  // otherwise the whole material silently fails to draw on some GPUs
+  // and the slime disappears. Shared static instance so all 3 slots
+  // default to the same texture unit.
+  private static readonly TEXT_FALLBACK_TEX: THREE.DataTexture = (() => {
+    const t = new THREE.DataTexture(
+      new Uint8Array([0, 0, 0, 0]),
+      1,
+      1,
+      THREE.RGBAFormat
+    )
+    t.needsUpdate = true
+    return t
+  })()
+  // Each slot has its OWN dedicated uniform triple (use / map / axis).
+  // Deliberately NOT using uniform arrays / sampler arrays because
+  // driver support varies wildly (WebGL 1 forbids dynamic sampler
+  // indexing, some WebGL 2 drivers still choke when the loop body
+  // contains uniform-controlled branches). Three separate uniforms is
+  // uglier but portable to every GPU we care about.
+  private readonly textUse0 = { value: 0.0 }
+  private readonly textUse1 = { value: 0.0 }
+  private readonly textUse2 = { value: 0.0 }
+  private readonly textMap0: { value: THREE.Texture } = {
+    value: SlimeSphere.TEXT_FALLBACK_TEX
+  }
+  private readonly textMap1: { value: THREE.Texture } = {
+    value: SlimeSphere.TEXT_FALLBACK_TEX
+  }
+  private readonly textMap2: { value: THREE.Texture } = {
+    value: SlimeSphere.TEXT_FALLBACK_TEX
+  }
+  private readonly textAxis0 = { value: new THREE.Vector3(0, 0, 1) }
+  private readonly textAxis1 = { value: new THREE.Vector3(0, 0, 1) }
+  private readonly textAxis2 = { value: new THREE.Vector3(0, 0, 1) }
+  private readonly textRadiusUniform = { value: 0.42 }
+  private readonly textAboveCoatingUniform = { value: 0.0 }
+  private textTextures: (THREE.Texture | null)[] = Array(
+    SlimeSphere.TEXT_SLOT_COUNT
+  ).fill(null)
   /** Per-vertex nearest-bead unit direction stored as an attribute. */
   private beadDirAttr!: THREE.BufferAttribute
   private accumulatedForce = 0
@@ -262,7 +317,7 @@ export class SlimeSphere {
    *  further out. */
   private static readonly SHELL_RADII = {
     thinwax: 1.005,
-    wax: 1.015
+    wax: 1.02
   } as const
   /** Live shell radius used by _updateShellGeometry each frame. */
   private shellRadius = SlimeSphere.SHELL_OUTER
@@ -385,6 +440,7 @@ export class SlimeSphere {
       this.damageIsWaxUniform,
       this.damageIsTubeUniform,
       this.materialIsMatteUniform,
+      this.materialIsIceUniform,
       this.coatingTintUniform,
       this.inkColorUniform,
       this.inkAmountUniform,
@@ -398,6 +454,17 @@ export class SlimeSphere {
       this.photoUseUniform,
       this.photoMapUniform,
       this.photoRadiusUniform,
+      this.textUse0,
+      this.textUse1,
+      this.textUse2,
+      this.textMap0,
+      this.textMap1,
+      this.textMap2,
+      this.textAxis0,
+      this.textAxis1,
+      this.textAxis2,
+      this.textRadiusUniform,
+      this.textAboveCoatingUniform,
       this.waxThicknessAlphaUniform,
       this.crunchOnUniform
     )
@@ -446,6 +513,7 @@ export class SlimeSphere {
       this.shellDamageIsWaxUniform,
       this.shellDamageIsTubeUniform,
       this.materialIsMatteUniform,
+      this.materialIsIceUniform,
       this.coatingTintUniform,
       this.inkColorUniform,
       this.inkAmountUniform,
@@ -459,6 +527,17 @@ export class SlimeSphere {
       this.photoUseUniform,
       this.photoMapUniform,
       this.photoRadiusUniform,
+      this.textUse0,
+      this.textUse1,
+      this.textUse2,
+      this.textMap0,
+      this.textMap1,
+      this.textMap2,
+      this.textAxis0,
+      this.textAxis1,
+      this.textAxis2,
+      this.textRadiusUniform,
+      this.textAboveCoatingUniform,
       this.shellWaxThicknessAlphaUniform,
       this.crunchOnUniform,
       this.shellModeUniform
@@ -740,6 +819,7 @@ export class SlimeSphere {
   setMaterial(id: MaterialId) {
     this.currentMaterialId = id
     this.materialIsMatteUniform.value = id === 'matte' ? 1.0 : 0.0
+    this.materialIsIceUniform.value = id === 'ice' ? 1.0 : 0.0
     this._applyLook()
     // Re-run colour resolution so the soft-material shadow-tint (see
     // setColors) is applied or removed as the material changes into or
@@ -953,6 +1033,70 @@ export class SlimeSphere {
     this.photoUseUniform.value = texture ? 1.0 : 0.0
     this.photoRadiusUniform.value = Math.max(0.05, Math.min(1.0, radius))
   }
+
+  /** Swap the text decal texture for a given slot without touching the
+   *  face axis. Passing null rebinds the shared fallback texture so
+   *  the sampler never goes unbound (see TEXT_FALLBACK_TEX). Dispose
+   *  only if the incoming texture differs from the one held so canvas
+   *  reuse via needsUpdate keeps its GPU handle alive. */
+  setTextDecal(slot: number, texture: THREE.Texture | null) {
+    if (slot < 0 || slot >= SlimeSphere.TEXT_SLOT_COUNT) return
+    const prev = this.textTextures[slot]
+    if (prev && prev !== texture) prev.dispose()
+    this.textTextures[slot] = texture
+    const bound = texture ?? SlimeSphere.TEXT_FALLBACK_TEX
+    const useValue = texture ? 1.0 : 0.0
+    if (slot === 0) {
+      this.textMap0.value = bound
+      this.textUse0.value = useValue
+    } else if (slot === 1) {
+      this.textMap1.value = bound
+      this.textUse1.value = useValue
+    } else {
+      this.textMap2.value = bound
+      this.textUse2.value = useValue
+    }
+  }
+
+  /** Cheap axis-only update for a single slot — used by the sphere
+   *  camera-facing path and by cube face selection. */
+  setTextAxis(
+    slot: number,
+    axisX: number,
+    axisY: number,
+    axisZ: number
+  ) {
+    if (slot < 0 || slot >= SlimeSphere.TEXT_SLOT_COUNT) return
+    const len = Math.hypot(axisX, axisY, axisZ) || 1
+    const nx = axisX / len
+    const ny = axisY / len
+    const nz = axisZ / len
+    if (slot === 0) this.textAxis0.value.set(nx, ny, nz)
+    else if (slot === 1) this.textAxis1.value.set(nx, ny, nz)
+    else this.textAxis2.value.set(nx, ny, nz)
+  }
+
+  /** Toggle whether text renders ABOVE the coating (crisp on top of
+   *  foil / wax / ice) vs BELOW (buried, gets tinted by translucent
+   *  coats). Shared across all slots for this surface. */
+  setTextAboveCoating(above: boolean) {
+    this.textAboveCoatingUniform.value = above ? 1.0 : 0.0
+  }
+
+  /** True when ANY slot currently has an uploaded texture — cheap
+   *  gate the render loop uses to skip per-frame axis math when
+   *  there's nothing to place. */
+  hasTextDecal(): boolean {
+    return (
+      this.textUse0.value > 0.5 ||
+      this.textUse1.value > 0.5 ||
+      this.textUse2.value > 0.5
+    )
+  }
+
+  /** Max text slots supported by the shader — exported so React
+   *  side can size its state / iterations to match. */
+  static readonly textSlotCount = SlimeSphere.TEXT_SLOT_COUNT
 
   /** Set per-vertex nearest-bead directions and bead radius so the slime
    *  vertex shader can taffy-stretch outward toward every bead. Pass
@@ -1857,6 +2001,7 @@ function installDamageShader(
   isWaxUniform: { value: number },
   isTubeUniform: { value: number },
   isMatteUniform: { value: number },
+  isIceMatUniform: { value: number },
   coatingTintUniform: { value: THREE.Color },
   inkColorUniform: { value: THREE.Color },
   inkAmountUniform: { value: number },
@@ -1870,6 +2015,17 @@ function installDamageShader(
   photoUseUniform: { value: number },
   photoMapUniform: { value: THREE.Texture | null },
   photoRadiusUniform: { value: number },
+  textUse0: { value: number },
+  textUse1: { value: number },
+  textUse2: { value: number },
+  textMap0: { value: THREE.Texture },
+  textMap1: { value: THREE.Texture },
+  textMap2: { value: THREE.Texture },
+  textAxis0: { value: THREE.Vector3 },
+  textAxis1: { value: THREE.Vector3 },
+  textAxis2: { value: THREE.Vector3 },
+  textRadiusUniform: { value: number },
+  textAboveCoatingUniform: { value: number },
   waxThicknessAlphaUniform: { value: number },
   crunchOnUniform: { value: number },
   /** When 1, the material is a WAX-BEAD SHELL mesh (not the slime
@@ -1885,6 +2041,7 @@ function installDamageShader(
     shader.uniforms.uCoatingIsWax = isWaxUniform
     shader.uniforms.uCoatingIsTube = isTubeUniform
     shader.uniforms.uMaterialIsMatte = isMatteUniform
+    shader.uniforms.uMaterialIsIce = isIceMatUniform
     shader.uniforms.uCoatingTint = coatingTintUniform
     shader.uniforms.uInkColor = inkColorUniform
     shader.uniforms.uInkAmount = inkAmountUniform
@@ -1900,6 +2057,17 @@ function installDamageShader(
     shader.uniforms.uPhotoUse = photoUseUniform
     shader.uniforms.uPhotoMap = photoMapUniform
     shader.uniforms.uPhotoRadius = photoRadiusUniform
+    shader.uniforms.uTextUse0 = textUse0
+    shader.uniforms.uTextUse1 = textUse1
+    shader.uniforms.uTextUse2 = textUse2
+    shader.uniforms.uTextMap0 = textMap0
+    shader.uniforms.uTextMap1 = textMap1
+    shader.uniforms.uTextMap2 = textMap2
+    shader.uniforms.uTextAxis0 = textAxis0
+    shader.uniforms.uTextAxis1 = textAxis1
+    shader.uniforms.uTextAxis2 = textAxis2
+    shader.uniforms.uTextRadius = textRadiusUniform
+    shader.uniforms.uTextAboveCoating = textAboveCoatingUniform
     shader.uniforms.uShellMode = shellModeUniform
 
     shader.vertexShader =
@@ -1979,6 +2147,7 @@ function installDamageShader(
        uniform float uCoatingIsWax;
        uniform float uCoatingIsTube;
        uniform float uMaterialIsMatte;
+       uniform float uMaterialIsIce;
        uniform float uWaxThicknessAlpha;
        uniform float uShellMode;
        uniform vec3 uCoatingTint;
@@ -1992,6 +2161,17 @@ function installDamageShader(
        uniform float uPhotoUse;
        uniform sampler2D uPhotoMap;
        uniform float uPhotoRadius;
+       uniform float uTextUse0;
+       uniform float uTextUse1;
+       uniform float uTextUse2;
+       uniform sampler2D uTextMap0;
+       uniform sampler2D uTextMap1;
+       uniform sampler2D uTextMap2;
+       uniform vec3 uTextAxis0;
+       uniform vec3 uTextAxis1;
+       uniform vec3 uTextAxis2;
+       uniform float uTextRadius;
+       uniform float uTextAboveCoating;
        varying float vDamage;
        varying float vCrackLevel;
        varying vec3 vRest;
@@ -2143,6 +2323,67 @@ function installDamageShader(
                diffuseColor.rgb = mix(diffuseColor.rgb, photoRGB, photoAlpha);
              }
            }
+           // 텍스트 데칼 — three independent slots. When aboveCoating
+           // is 0 the mix happens HERE (pre-coating) so a translucent
+           // coat tints the text; when 1 the mix is DEFERRED until
+           // after the coating block below and this branch becomes a
+           // no-op. Each slot is unrolled with a CONSTANT sampler
+           // index because WebGL 1 GLSL only permits sampler-array
+           // indexing by constant-index-expressions, and some drivers
+           // still reject dynamic indexing even on WebGL 2 when the
+           // loop body contains a continue statement. Inlining is
+           // uglier but safe on every GPU.
+           if (uTextAboveCoating < 0.5) {
+             vec3 rnT = vRest / uGradientRadius;
+             if (uTextUse0 > 0.5) {
+               vec3 tN = uTextAxis0;
+               vec3 tU = abs(tN.y) > 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+               vec3 tT = normalize(cross(tU, tN));
+               vec3 tB = normalize(cross(tN, tT));
+               float u = dot(rnT, tT) * 0.5 + 0.5;
+               float v = dot(rnT, tB) * 0.5 + 0.5;
+               float d = dot(rnT, tN);
+               float r = length(vec2(u, v) - 0.5);
+               float a = (1.0 - smoothstep(uTextRadius - 0.05, uTextRadius, r))
+                       * smoothstep(-0.05, 0.30, d);
+               if (a > 0.001) {
+                 vec4 s = texture2D(uTextMap0, vec2(u, v));
+                 diffuseColor.rgb = mix(diffuseColor.rgb, s.rgb, s.a * a);
+               }
+             }
+             if (uTextUse1 > 0.5) {
+               vec3 tN = uTextAxis1;
+               vec3 tU = abs(tN.y) > 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+               vec3 tT = normalize(cross(tU, tN));
+               vec3 tB = normalize(cross(tN, tT));
+               float u = dot(rnT, tT) * 0.5 + 0.5;
+               float v = dot(rnT, tB) * 0.5 + 0.5;
+               float d = dot(rnT, tN);
+               float r = length(vec2(u, v) - 0.5);
+               float a = (1.0 - smoothstep(uTextRadius - 0.05, uTextRadius, r))
+                       * smoothstep(-0.05, 0.30, d);
+               if (a > 0.001) {
+                 vec4 s = texture2D(uTextMap1, vec2(u, v));
+                 diffuseColor.rgb = mix(diffuseColor.rgb, s.rgb, s.a * a);
+               }
+             }
+             if (uTextUse2 > 0.5) {
+               vec3 tN = uTextAxis2;
+               vec3 tU = abs(tN.y) > 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+               vec3 tT = normalize(cross(tU, tN));
+               vec3 tB = normalize(cross(tN, tT));
+               float u = dot(rnT, tT) * 0.5 + 0.5;
+               float v = dot(rnT, tB) * 0.5 + 0.5;
+               float d = dot(rnT, tN);
+               float r = length(vec2(u, v) - 0.5);
+               float a = (1.0 - smoothstep(uTextRadius - 0.05, uTextRadius, r))
+                       * smoothstep(-0.05, 0.30, d);
+               if (a > 0.001) {
+                 vec4 s = texture2D(uTextMap2, vec2(u, v));
+                 diffuseColor.rgb = mix(diffuseColor.rgb, s.rgb, s.a * a);
+               }
+             }
+           }
            // Matte foam pattern — mottles the base slime colour with fine
            // brightness variation so the surface reads as aerated bath
            // foam. Applied BEFORE the coating overlay and the
@@ -2153,18 +2394,37 @@ function installDamageShader(
            if (uMaterialIsMatte > 0.5) {
              float fbm = foamFbm(vRest * 22.0);
              float fine = foamNoise(vRest * 55.0);
-             vFoam = clamp(fbm * 0.75 + fine * 0.35, 0.0, 1.0);
-             float bright = smoothstep(0.4, 0.9, vFoam);
-             float shade  = smoothstep(0.6, 0.1, vFoam);
+             vFoam = clamp(fbm * 0.72 + fine * 0.32, 0.0, 1.0);
+             float bright = smoothstep(0.48, 0.82, vFoam);
+             float shade  = smoothstep(0.58, 0.18, vFoam);
+             // 점박이 색상 — softened contrast so the foam spots read
+             // as PALE mottling rather than deep dark patches. Bright
+             // spots stay close to the base tone; shaded pockets darken
+             // only mildly. Bumping the multipliers toward 1.0 (from
+             // 0.3 / 0.2) and reducing the mix strengths halves the
+             // effective darkening at peak values.
              diffuseColor.rgb = mix(
                diffuseColor.rgb,
-               diffuseColor.rgb * 0.3,
-               bright * 0.95
+               diffuseColor.rgb * 0.65,
+               bright * 0.55
              );
              diffuseColor.rgb = mix(
                diffuseColor.rgb,
+               diffuseColor.rgb * 0.55,
+               shade * 0.6
+             );
+             // Rare deep-dark speckles — a coarser rest-space noise
+             // picks a small subset (~top 20%) of positions where the
+             // foam pocket darkens hard instead of softly, so the
+             // mostly-pale mottling still shows occasional dark specks
+             // for visual variety. Gated by BOTH the rarity hash AND
+             // the existing shade mask so dark spots only appear at
+             // actual foam depressions, not at random on the surface.
+             float _rareDark = smoothstep(0.2, 0.7, foamNoise(vRest * 8.0));
+             diffuseColor.rgb = mix(
+               diffuseColor.rgb,
                diffuseColor.rgb * 0.2,
-               shade
+               shade * _rareDark
              );
            }
            // Snapshot the slime's own diffuse (including foam pattern +
@@ -2214,6 +2474,62 @@ function installDamageShader(
                mixAlpha = 1.0;
              }
              diffuseColor.rgb = mix(diffuseColor.rgb, coatingRGB, mixAlpha);
+           }
+
+           // 텍스트 데칼 (above-coating pass) — mirror of the pre-coat
+           // branch, runs AFTER the coating overlay so foil / wax /
+           // ice / tube cannot cover the text. Unrolled the same way
+           // for the same driver-portability reason.
+           if (uTextAboveCoating > 0.5) {
+             vec3 rnTA = vRest / uGradientRadius;
+             if (uTextUse0 > 0.5) {
+               vec3 tN = uTextAxis0;
+               vec3 tU = abs(tN.y) > 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+               vec3 tT = normalize(cross(tU, tN));
+               vec3 tB = normalize(cross(tN, tT));
+               float u = dot(rnTA, tT) * 0.5 + 0.5;
+               float v = dot(rnTA, tB) * 0.5 + 0.5;
+               float d = dot(rnTA, tN);
+               float r = length(vec2(u, v) - 0.5);
+               float a = (1.0 - smoothstep(uTextRadius - 0.05, uTextRadius, r))
+                       * smoothstep(-0.05, 0.30, d);
+               if (a > 0.001) {
+                 vec4 s = texture2D(uTextMap0, vec2(u, v));
+                 diffuseColor.rgb = mix(diffuseColor.rgb, s.rgb, s.a * a);
+               }
+             }
+             if (uTextUse1 > 0.5) {
+               vec3 tN = uTextAxis1;
+               vec3 tU = abs(tN.y) > 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+               vec3 tT = normalize(cross(tU, tN));
+               vec3 tB = normalize(cross(tN, tT));
+               float u = dot(rnTA, tT) * 0.5 + 0.5;
+               float v = dot(rnTA, tB) * 0.5 + 0.5;
+               float d = dot(rnTA, tN);
+               float r = length(vec2(u, v) - 0.5);
+               float a = (1.0 - smoothstep(uTextRadius - 0.05, uTextRadius, r))
+                       * smoothstep(-0.05, 0.30, d);
+               if (a > 0.001) {
+                 vec4 s = texture2D(uTextMap1, vec2(u, v));
+                 diffuseColor.rgb = mix(diffuseColor.rgb, s.rgb, s.a * a);
+               }
+             }
+             if (uTextUse2 > 0.5) {
+               vec3 tN = uTextAxis2;
+               vec3 tU = abs(tN.y) > 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(0.0, 1.0, 0.0);
+               vec3 tT = normalize(cross(tU, tN));
+               vec3 tB = normalize(cross(tN, tT));
+               float u = dot(rnTA, tT) * 0.5 + 0.5;
+               float v = dot(rnTA, tB) * 0.5 + 0.5;
+               float d = dot(rnTA, tN);
+               float r = length(vec2(u, v) - 0.5);
+               float a = (1.0 - smoothstep(uTextRadius - 0.05, uTextRadius, r))
+                       * smoothstep(-0.05, 0.30, d);
+               if (a > 0.001) {
+                 vec4 s = texture2D(uTextMap2, vec2(u, v));
+                 diffuseColor.rgb = mix(diffuseColor.rgb, s.rgb, s.a * a);
+               }
+             }
            }
 
            float crackReveal = 0.0;
@@ -2488,6 +2804,34 @@ function installDamageShader(
            }
 
            `
+        )
+        .replace(
+          '#include <normal_fragment_maps>',
+          `#include <normal_fragment_maps>
+           // 아이스 / 폼 재질 — perturb the surface normal with a rest-
+           // space noise gradient so the surface reads as fine wrinkled
+           // / crinkled "자글자글" texture instead of a perfectly smooth
+           // shape. Applied to BOTH the transparent glass 아이스 body
+           // (where it visibly distorts refraction) and the matte 폼
+           // body (where it adds micro-relief that reads through the
+           // existing foam bubble pattern without changing its matte
+           // finish or spot mottling). Sampled in vRest so the pattern
+           // stays anchored to the body across deformation. Reuses the
+           // foam noise helpers already defined above.
+           if (uMaterialIsIce > 0.5 || uMaterialIsMatte > 0.5) {
+             vec3 _icePos = vRest * 42.0;
+             float _iceEps = 0.55;
+             float _iceN = foamNoise(_icePos);
+             float _iceNx = foamNoise(_icePos + vec3(_iceEps, 0.0, 0.0));
+             float _iceNy = foamNoise(_icePos + vec3(0.0, _iceEps, 0.0));
+             float _iceNz = foamNoise(_icePos + vec3(0.0, 0.0, _iceEps));
+             vec3 _iceGrad = vec3(
+               _iceNx - _iceN,
+               _iceNy - _iceN,
+               _iceNz - _iceN
+             );
+             normal = normalize(normal + _iceGrad * 1.8);
+           }`
         )
         .replace(
           '#include <roughnessmap_fragment>',

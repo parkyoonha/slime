@@ -829,18 +829,24 @@ export class BeadsLayer {
            if (uWrapMaterialIsMatte > 0.5) {
              float fbm = wrapFoamFbm(vWrapLocal * 22.0);
              float fine = wrapFoamNoise(vWrapLocal * 55.0);
-             float foam = clamp(fbm * 0.75 + fine * 0.35, 0.0, 1.0);
-             float bright = smoothstep(0.4, 0.9, foam);
-             float shade  = smoothstep(0.6, 0.1, foam);
+             float foam = clamp(fbm * 0.72 + fine * 0.32, 0.0, 1.0);
+             float bright = smoothstep(0.48, 0.82, foam);
+             float shade  = smoothstep(0.58, 0.18, foam);
              diffuseColor.rgb = mix(
                diffuseColor.rgb,
-               diffuseColor.rgb * 0.3,
-               bright * 0.95
+               diffuseColor.rgb * 0.65,
+               bright * 0.55
              );
              diffuseColor.rgb = mix(
                diffuseColor.rgb,
+               diffuseColor.rgb * 0.55,
+               shade * 0.6
+             );
+             float _wRareDark = smoothstep(0.2, 0.7, wrapFoamNoise(vWrapLocal * 8.0));
+             diffuseColor.rgb = mix(
+               diffuseColor.rgb,
                diffuseColor.rgb * 0.2,
-               shade
+               shade * _wRareDark
              );
            }`
         )
@@ -1180,18 +1186,24 @@ export class BeadsLayer {
            if (uBeadMaterialIsMatte > 0.5) {
              float bfbm = beadFoamFbm(vBeadLocal * 22.0);
              float bfine = beadFoamNoise(vBeadLocal * 55.0);
-             vBeadFoam = clamp(bfbm * 0.75 + bfine * 0.35, 0.0, 1.0);
-             float bBright = smoothstep(0.4, 0.9, vBeadFoam);
-             float bShade  = smoothstep(0.6, 0.1, vBeadFoam);
+             vBeadFoam = clamp(bfbm * 0.72 + bfine * 0.32, 0.0, 1.0);
+             float bBright = smoothstep(0.48, 0.82, vBeadFoam);
+             float bShade  = smoothstep(0.58, 0.18, vBeadFoam);
              diffuseColor.rgb = mix(
                diffuseColor.rgb,
-               diffuseColor.rgb * 0.3,
-               bBright * 0.95
+               diffuseColor.rgb * 0.65,
+               bBright * 0.55
              );
              diffuseColor.rgb = mix(
                diffuseColor.rgb,
+               diffuseColor.rgb * 0.55,
+               bShade * 0.6
+             );
+             float _bRareDark = smoothstep(0.2, 0.7, beadFoamNoise(vBeadLocal * 8.0));
+             diffuseColor.rgb = mix(
+               diffuseColor.rgb,
                diffuseColor.rgb * 0.2,
-               bShade
+               bShade * _bRareDark
              );
            }
            // Snapshot the bead's own diffuse (post per-instance colour
@@ -1462,14 +1474,15 @@ export class BeadsLayer {
       if (slime) {
         mat.roughness = slime.roughness
         mat.metalness = slime.metalness
-        // Crystal inner-slime keeps the slime-crystal transmission so
-        // the ball reads as a glass sphere just like the slime option's
-        // crystal material — user explicitly asked for the same
-        // transparent look. All other inner-slime materials render
-        // opaque (the gradient path further forces transmission=0
-        // when multi-colour is active regardless).
-        mat.transmission = id === 'crystal' ? slime.transmission : 0
-        mat.thickness = id === 'crystal' ? slime.thickness : 0
+        // Crystal and ice inner-slime keep the slime material's own
+        // transmission so the ball reads as a glass sphere just like
+        // the slime option's crystal / 아이스 material. All other
+        // inner-slime materials render opaque (the gradient path
+        // further forces transmission=0 when multi-colour is active
+        // regardless).
+        const _transparentGlass = id === 'crystal' || id === 'ice'
+        mat.transmission = _transparentGlass ? slime.transmission : 0
+        mat.thickness = _transparentGlass ? slime.thickness : 0
         mat.ior = slime.ior
         mat.sheen = slime.sheen
         mat.sheenRoughness = slime.sheenRoughness
@@ -2220,7 +2233,7 @@ export class BeadsLayer {
     // wrap is hidden for all crystal states (see suppress block below).
     // Non-crystal materials always render opaque with default depth.
     if (this.useSlimeMaterials && this.beadMaterial) {
-      if (config.material === 'crystal') {
+      if (config.material === 'crystal' || config.material === 'ice') {
         this.beadMaterial.transparent = false
         this.beadMaterial.opacity = 1
         this.beadMaterial.depthWrite = false
@@ -2242,14 +2255,16 @@ export class BeadsLayer {
     }
     // Inner-slime hides the wrap for OPAQUE ball materials (matte /
     // glossy / soft / etc.) since the ball's own body renders visibly.
-    // For CRYSTAL inner-slime ball the body is transparent — inside
-    // an opaque outer slime it would be invisible without the wrap
-    // shell (three.js transmission fails to composite an inner
+    // For CRYSTAL and 아이스 inner-slime balls the body is transparent —
+    // inside an opaque outer slime it would be invisible without the
+    // wrap shell (three.js transmission fails to composite an inner
     // transparent object inside an outer transparent one), so we
     // keep the wrap on and let it tint to the ball's picked colour
     // (see applyInstanceColors). Wrap shell = the "visible glass ball".
     const opaqueBallMaterial =
-      this.useSlimeMaterials && config.material !== 'crystal'
+      this.useSlimeMaterials &&
+      config.material !== 'crystal' &&
+      config.material !== 'ice'
     // Wrap ("slime jacket") visibility:
     //   Inner-slime opaque material → hide (show the ball's material)
     //   Inner-slime + gradient palette → hide (show the gradient LUT bead)
@@ -2275,7 +2290,8 @@ export class BeadsLayer {
     //     multi-colour rendering path.
     const suppressForInnerGradient =
       (this.useSlimeMaterials && hasGradientPalette) ||
-      (this.useSlimeMaterials && config.material === 'crystal')
+      (this.useSlimeMaterials && config.material === 'crystal') ||
+      (this.useSlimeMaterials && config.material === 'ice')
     for (const slot of this.slots) {
       slot.wrapInstanced.visible =
         !opaqueBallMaterial &&
