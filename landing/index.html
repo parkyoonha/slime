@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>soundslime — 손끝으로 힐링하는 3D 슬라임</title>
+  <meta name="description" content="숨 한 번 쉬고, 조물조물. 진짜 같은 3D 슬라임과 함께하는 5분 힐링 앱." />
+  <meta name="theme-color" content="#f7d5e1" />
+
+  <meta property="og:title" content="soundslime" />
+  <meta property="og:description" content="손끝으로 힐링하는 3D 슬라임 앱." />
+  <meta property="og:type" content="website" />
+
+  <style>
+    :root {
+      --bg: #fafafa;
+      --bg-alt: #ffffff;
+      --card: #ffffff;
+      --fg: #1a1a1a;
+      --fg-muted: #6b6b6b;
+      --border: #ececec;
+      --accent: #f28fb2;
+      --accent-soft: #ffe1eb;
+      --pill: #f4f4f5;
+      --shadow: 0 2px 24px rgba(0,0,0,0.04);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d0d0f;
+        --bg-alt: #131317;
+        --card: #17171b;
+        --fg: #f4f4f5;
+        --fg-muted: #a1a1aa;
+        --border: #27272a;
+        --accent: #ff9bc0;
+        --accent-soft: #3a1a24;
+        --pill: #1e1e22;
+        --shadow: 0 2px 24px rgba(0,0,0,0.5);
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body {
+      background: var(--bg);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+      line-height: 1.65;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Header ───────────────────────────────── */
+    header {
+      position: sticky; top: 0; z-index: 10;
+      background: rgba(250,250,250,0.85);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
+    }
+    @media (prefers-color-scheme: dark) {
+      header { background: rgba(13,13,15,0.85); }
+    }
+    .nav {
+      max-width: 1100px; margin: 0 auto;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 20px;
+    }
+    .logo {
+      font-size: 18px; font-weight: 800; letter-spacing: -0.01em;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .logo-mark {
+      width: 32px; height: 32px; border-radius: 12px;
+      background: linear-gradient(135deg, #ffb8d0 0%, #ff88a8 100%);
+      display: inline-flex; align-items: center; justify-content: center;
+      color: white; font-size: 14px; font-weight: 800;
+    }
+    nav ul { list-style: none; display: flex; gap: 20px; }
+    nav a { color: var(--fg-muted); text-decoration: none; font-size: 14px; font-weight: 500; transition: color 120ms; }
+    nav a:hover { color: var(--fg); }
+    @media (max-width: 640px) { nav ul { display: none; } }
+
+    /* ── Hero ─────────────────────────────────── */
+    .hero {
+      max-width: 1100px; margin: 0 auto;
+      padding: 96px 20px 64px;
+      text-align: center;
+    }
+    .pill {
+      display: inline-block; padding: 6px 14px;
+      background: var(--accent-soft); color: var(--accent);
+      border-radius: 999px; font-size: 12px; font-weight: 700;
+      letter-spacing: 0.04em; margin-bottom: 24px;
+    }
+    .hero h1 {
+      font-size: clamp(36px, 7vw, 60px);
+      font-weight: 800; letter-spacing: -0.02em;
+      line-height: 1.15; margin-bottom: 20px;
+    }
+    .hero p.lead {
+      font-size: 17px; color: var(--fg-muted);
+      max-width: 560px; margin: 0 auto 40px;
+      line-height: 1.7;
+    }
+    .cta {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 14px 28px;
+      background: var(--fg); color: var(--bg);
+      border-radius: 999px; text-decoration: none;
+      font-weight: 700; font-size: 15px;
+      transition: transform 120ms, opacity 120ms;
+    }
+    .cta:hover { transform: translateY(-1px); opacity: 0.9; }
+    .cta-note { display: block; color: var(--fg-muted); font-size: 13px; margin-top: 12px; }
+
+    .visual {
+      margin-top: 64px;
+      display: flex; justify-content: center;
+    }
+    .blob {
+      width: min(340px, 70vw); aspect-ratio: 1;
+      background: radial-gradient(circle at 35% 30%, #ffd6e4 0%, #ff9ec0 45%, #e07ba0 100%);
+      border-radius: 50%;
+      box-shadow:
+        0 30px 80px rgba(255, 158, 192, 0.35),
+        inset 0 -20px 60px rgba(0,0,0,0.15),
+        inset 20px 20px 60px rgba(255,255,255,0.4);
+      position: relative;
+      animation: wobble 6s ease-in-out infinite;
+    }
+    .blob::after {
+      content: ''; position: absolute;
+      top: 18%; left: 22%;
+      width: 30%; height: 22%;
+      background: rgba(255,255,255,0.4);
+      border-radius: 50%; filter: blur(10px);
+    }
+    @keyframes wobble {
+      0%, 100% { transform: scale(1) rotate(0deg); border-radius: 50%; }
+      33% { transform: scale(1.02) rotate(2deg); border-radius: 48% 52% 46% 54% / 52% 48% 54% 46%; }
+      66% { transform: scale(0.98) rotate(-2deg); border-radius: 54% 46% 52% 48% / 46% 54% 48% 52%; }
+    }
+
+    /* ── Sections ─────────────────────────────── */
+    section {
+      max-width: 1100px; margin: 0 auto;
+      padding: 80px 20px;
+    }
+    .section-title {
+      text-align: center; margin-bottom: 56px;
+    }
+    .section-title h2 {
+      font-size: clamp(28px, 5vw, 40px); font-weight: 800;
+      letter-spacing: -0.01em; margin-bottom: 12px;
+    }
+    .section-title p {
+      color: var(--fg-muted); font-size: 15px;
+    }
+
+    /* ── Features grid ────────────────────────── */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 20px;
+    }
+    .feature {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 28px 24px;
+      box-shadow: var(--shadow);
+      transition: transform 180ms, box-shadow 180ms;
+    }
+    .feature:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.08);
+    }
+    .feature-icon {
+      width: 44px; height: 44px; border-radius: 12px;
+      background: var(--accent-soft);
+      display: inline-flex; align-items: center; justify-content: center;
+      font-size: 22px; margin-bottom: 16px;
+    }
+    .feature h3 {
+      font-size: 17px; font-weight: 700; margin-bottom: 8px;
+      letter-spacing: -0.005em;
+    }
+    .feature p {
+      color: var(--fg-muted); font-size: 14px; line-height: 1.6;
+    }
+
+    /* ── Pricing ──────────────────────────────── */
+    #pricing { background: var(--bg-alt); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+    .plans {
+      display: grid; gap: 20px;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      max-width: 720px; margin: 0 auto;
+    }
+    .plan {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 32px 28px;
+      text-align: center;
+      position: relative;
+    }
+    .plan.featured { border-color: var(--accent); }
+    .plan-badge {
+      position: absolute; top: -12px; left: 50%;
+      transform: translateX(-50%);
+      background: var(--accent); color: white;
+      padding: 4px 14px; border-radius: 999px;
+      font-size: 11px; font-weight: 800; letter-spacing: 0.04em;
+    }
+    .plan h3 { font-size: 15px; color: var(--fg-muted); margin-bottom: 6px; font-weight: 600; }
+    .plan .price { font-size: 34px; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 4px; }
+    .plan .price-unit { color: var(--fg-muted); font-size: 14px; margin-bottom: 20px; }
+    .plan ul { list-style: none; text-align: left; margin: 20px 0 0; }
+    .plan li { padding: 8px 0; font-size: 14px; color: var(--fg); }
+    .plan li::before { content: '✓ '; color: var(--accent); font-weight: 800; margin-right: 4px; }
+
+    /* ── Footer ───────────────────────────────── */
+    footer {
+      background: var(--bg-alt);
+      border-top: 1px solid var(--border);
+      padding: 48px 20px;
+    }
+    .footer-inner {
+      max-width: 1100px; margin: 0 auto;
+      display: flex; justify-content: space-between; gap: 32px; flex-wrap: wrap;
+    }
+    .footer-col h4 {
+      font-size: 13px; color: var(--fg-muted);
+      text-transform: uppercase; letter-spacing: 0.05em;
+      margin-bottom: 12px; font-weight: 700;
+    }
+    .footer-col a, .footer-col p {
+      display: block; color: var(--fg); text-decoration: none;
+      font-size: 14px; margin-bottom: 6px;
+    }
+    .footer-col a:hover { color: var(--accent); }
+    .footer-legal {
+      max-width: 1100px; margin: 32px auto 0;
+      padding-top: 24px; border-top: 1px solid var(--border);
+      color: var(--fg-muted); font-size: 12px; text-align: center;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="nav">
+      <div class="logo">
+        <span class="logo-mark">💠</span>
+        <span>soundslime</span>
+      </div>
+      <nav>
+        <ul>
+          <li><a href="#features">기능</a></li>
+          <li><a href="#pricing">가격</a></li>
+          <li><a href="#contact">문의</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <section class="hero">
+    <span class="pill">HEALING · SLIME · 힐링</span>
+    <h1>숨 한 번 쉬고,<br />조물조물 soundslime.</h1>
+    <p class="lead">
+      바쁜 하루 사이에 필요한 건 대단한 힐링이 아니라,<br />
+      손끝으로 조물조물, 눈으로 멍때리는 5분이에요.
+    </p>
+    <a href="#pricing" class="cta">시작하기 →</a>
+    <span class="cta-note">Android 앱 · 곧 iOS 예정</span>
+
+    <div class="visual" aria-hidden="true">
+      <div class="blob"></div>
+    </div>
+  </section>
+
+  <section id="features">
+    <div class="section-title">
+      <h2>진짜 같은 3D 슬라임</h2>
+      <p>손끝에 닿는 감각과 소리, 나만의 조합으로 완성하는 힐링 경험.</p>
+    </div>
+
+    <div class="features">
+      <div class="feature">
+        <div class="feature-icon" aria-hidden="true">👆</div>
+        <h3>진짜 같은 감촉</h3>
+        <p>자연스럽게 눌리고 다시 부풀어 오르는 3D 물리 시뮬레이션. 톡톡·눅눅·바삭한 사운드까지.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" aria-hidden="true">🎨</div>
+        <h3>무한 커스터마이징</h3>
+        <p>색·재질·모양·코팅을 자유롭게 조합. 비즈, 스프링클, 이모지, 글자까지 넣어 나만의 슬라임을 완성.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" aria-hidden="true">💾</div>
+        <h3>컬렉션 저장</h3>
+        <p>마음에 든 조합은 컬렉션에 저장. 언제든 다시 꺼내서 이어서 만지고 편집.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" aria-hidden="true">😌</div>
+        <h3>슬라임멍 모드</h3>
+        <p>자동으로 눌러주는 압박 모드. 손도 쉬고 눈으로만 감상. 아무것도 안 해도 되는 시간.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" aria-hidden="true">✋</div>
+        <h3>손 인식 (선택)</h3>
+        <p>카메라로 허공에서 슬라임 조작 가능. 이미지는 기기 안에서만 처리 · 서버 전송 없음.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-icon" aria-hidden="true">🔊</div>
+        <h3>세밀한 사운드</h3>
+        <p>재질별 다른 촉감 사운드. 이어폰 끼고 만지면 진짜 슬라임 만지는 감각.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="pricing">
+    <div class="section-title">
+      <h2>부담 없는 시작, 필요할 때 프리미엄</h2>
+      <p>하루 5회는 무료 · 무제한 사용은 프리미엄으로.</p>
+    </div>
+
+    <div class="plans">
+      <div class="plan">
+        <h3>Free</h3>
+        <div class="price">₩0</div>
+        <div class="price-unit">평생 무료</div>
+        <ul>
+          <li>하루 5회 슬라임 세션</li>
+          <li>기본 프리셋 이용</li>
+          <li>컬렉션 저장 (제한적)</li>
+        </ul>
+      </div>
+      <div class="plan featured">
+        <div class="plan-badge">추천</div>
+        <h3>Premium</h3>
+        <div class="price">₩4,900</div>
+        <div class="price-unit">/ 월 · 언제든 해지</div>
+        <ul>
+          <li>무제한 슬라임 만지기</li>
+          <li>컬렉션 무제한 저장 · 동기화</li>
+          <li>슬라임멍 세션 3분 → 20분</li>
+          <li>광고 없음</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer id="contact">
+    <div class="footer-inner">
+      <div class="footer-col">
+        <div class="logo" style="margin-bottom: 12px;">
+          <span class="logo-mark">💠</span>
+          <span>soundslime</span>
+        </div>
+        <p style="color: var(--fg-muted); max-width: 280px; margin-top: 4px;">
+          손끝으로 힐링하는 3D 슬라임 앱.
+        </p>
+      </div>
+
+      <div class="footer-col">
+        <h4>Product</h4>
+        <a href="#features">기능</a>
+        <a href="#pricing">가격</a>
+      </div>
+
+      <div class="footer-col">
+        <h4>Legal</h4>
+        <a href="https://parkyoonha.github.io/slimong-policy/">개인정보처리방침</a>
+        <a href="mailto:grttihat@gmail.com">문의</a>
+      </div>
+
+      <div class="footer-col">
+        <h4>Contact</h4>
+        <p>grttihat@gmail.com</p>
+      </div>
+    </div>
+
+    <div class="footer-legal">
+      © 2026 soundslime. All rights reserved.
+    </div>
+  </footer>
+
+</body>
+</html>

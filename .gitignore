@@ -6,6 +6,11 @@ dist-ssr
 .DS_Store
 *.log
 
+# Env
+.env
+.env.local
+.env.*.local
+
 # Capacitor
 ios/App/App/public
 android/app/src/main/assets/public
@@ -19,4 +24,9 @@ android/.idea
 android/captures
 android/gradle-app.setting
 android/.cxx
+
+# Release signing — NEVER commit
+android/keystore.properties
+android/app/*.keystore
+android/app/*.jks
 

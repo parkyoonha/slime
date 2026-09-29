@@ -468,6 +468,44 @@ export class BeadsLayer {
     return out
   }
 
+  /** Per-bead outer collision radius (already multiplied by config.size),
+   *  matching the shape each bead was placed on. Sprinkles / powder use
+   *  this to project their contact point onto the actual bead envelope
+   *  instead of assuming every bead is a sphere — torus (1.4× size) and
+   *  star (1.1× size) beads would otherwise leave gaps between the
+   *  attached sprinkle and the visible outer edge. Length matches
+   *  getBeadRestPositions()'s bead count. */
+  getBeadShapeRadii(): Float32Array {
+    const size = this.config.size
+    if (this.gridMode) {
+      const n = this.gridPositions.length / 3
+      const out = new Float32Array(n)
+      // Grid mode always renders cubes on cube faces — use the cube
+      // radius uniformly (grid layout doesn't mix shapes).
+      const r = shapeCollisionRadius('cube') * size
+      out.fill(r)
+      return out
+    }
+    if (this.config.fill) {
+      const n = this.fillDirs.length / 3
+      const out = new Float32Array(n)
+      const slotCount = this.slots.length || 1
+      for (let i = 0; i < n; i++) {
+        const shape = this.slots[i % slotCount]?.shape ?? 'sphere'
+        out[i] = shapeCollisionRadius(shape) * size
+      }
+      return out
+    }
+    const n = this.vertexIndices.length
+    const out = new Float32Array(n)
+    const slotCount = this.slots.length || 1
+    for (let i = 0; i < n; i++) {
+      const shape = this.slots[i % slotCount]?.shape ?? 'sphere'
+      out[i] = shapeCollisionRadius(shape) * size
+    }
+    return out
+  }
+
   /** Rebuild the per-shape rendering slots to match the current config.
    *  Reuses the bead + wrap material across shapes (their look is uniform
    *  regardless of shape) so material changes stay a single hot-path

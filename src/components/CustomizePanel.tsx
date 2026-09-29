@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   BEAD_COLORS,
   BEAD_COMBOS,
@@ -22,15 +22,14 @@ import {
   EMOJI_BEADS_LIMITS,
   MATERIALS,
   SHAPES,
-  SLIME_TEXT_FONTS,
-  SLIME_TEXT_ITEM_DEFAULT,
-  SLIME_TEXT_SLOT_MAX,
+  SLIME_TEXT_DEFAULT,
   SPRINKLE_COLORS,
   SPRINKLE_MATERIALS,
   SPRINKLE_MATERIALS_BY_TYPE,
   SPRINKLE_SHAPES,
   SPRINKLE_SUB_CATEGORIES,
   SPRINKLE_TYPES,
+  SPRINKLES_DEFAULT,
   SPRINKLES_LIMITS,
   THEMES,
   beadChunkMaxCount,
@@ -45,9 +44,7 @@ import {
   type EmojiBeadsConfig,
   type MaterialId,
   type ShapeId,
-  type SlimeTextFace,
-  type SlimeTextGroup,
-  type SlimeTextItem,
+  type SlimeText,
   SPANGLE_KINDS,
   type SprinkleColorId,
   type SprinkleTypeId,
@@ -113,18 +110,6 @@ const SLIME_SUBS: readonly { id: SlimeSub; label: string }[] = [
   { id: 'text', label: 'T' }
 ]
 
-/** Human-readable face labels for the cube-face text-position hint.
- *  Sphere always sits at 'front' (never surfaces this label). */
-const SLIME_TEXT_FACE_LABEL: Record<string, string> = {
-  front: '앞면',
-  '+z': '앞면',
-  '-z': '뒷면',
-  '+x': '오른쪽',
-  '-x': '왼쪽',
-  '+y': '윗면',
-  '-y': '아랫면'
-}
-
 /** Per-combo bead sub-categories. Compact drops "count" (always fill),
  *  chunk keeps count but never shows fill (always count-based). 'none'
  *  has no sub-cats — the combo picker doesn't navigate into it. */
@@ -188,7 +173,6 @@ interface Props {
    *  the picker UI can show thumbnails vs empty). */
   photoBeadSlots: readonly (boolean)[]
   onPickPhotoBead: (index: number, file: File) => void
-  onClearPhotoBead: (index: number) => void
   /** Per-colour HSL deltas from the adjustment sliders. Keyed on
    *  preset ColorId so tweaks stay attached to their base colour
    *  across sessions and across surfaces (slime + beads share). */
@@ -209,20 +193,15 @@ interface Props {
   onPickCustomBeadsPhoto: (file: File) => void
   onClearCustomBeadsPhoto: () => void
   /** 텍스트 데칼 group — up to SLIME_TEXT_SLOT_MAX items + a shared
-   *  aboveCoating flag. Sphere pins every item to 'front' (camera-
-   *  facing per-frame); cube exposes six ±axis faces via clicks on
-   *  the slime while an item is being edited. */
-  slimeText: SlimeTextGroup
-  onSlimeText: (v: SlimeTextGroup) => void
-  /** Fires when the 텍스트 input gains / loses focus — SlimeApp uses
-   *  this to nudge the slime downward + shrink it while the keyboard
-   *  is likely up so the sphere silhouette isn't cropped by the top
-   *  of the viewport. */
-  onTextInputFocusChange?: (focused: boolean) => void
-  /** Fires whenever the user switches which text-item slot is being
-   *  edited (or -1 when the panel is idle). SlimeApp uses this so the
-   *  cube-face raycast knows which item's face to update on click. */
-  onActiveTextItemChange?: (idx: number) => void
+   *  Single text label per slime; renders on the camera-facing
+   *  hemisphere with auto-above-coating when a coating is active. */
+  slimeText: SlimeText
+  onSlimeText: (v: SlimeText) => void
+  /** Immediate text-tint push — invoked from the color-chip click
+   *  handler in the text panel so the shader uniform updates on the
+   *  same tick as the click, without waiting for the SlimeText state
+   *  round-trip through React. */
+  onTextColorImmediate?: (hex: number) => void
   /** Fires whenever the user switches between slime sub-tabs (색상 /
    *  텍스트 / …). Emits `null` when the slime category itself is
    *  closed. SlimeApp uses this to gate the cube-face click raycast to
@@ -238,7 +217,9 @@ interface Props {
    *  the panel that owns the tag without lifting category state up.
    *  Passing `null` closes whatever category is currently open — used by
    *  the reset button so nuking every option also collapses the panel. */
-  onRegisterOpenCategory?: (fn: (id: string | null) => void) => void
+  onRegisterOpenCategory?: (
+    fn: (id: string | null, subId?: string) => void
+  ) => void
 }
 
 function hexToCss(h: number): string {
@@ -332,6 +313,12 @@ function GradientIcon() {
  *  Visually always a dashed circle with a camera glyph; the outline
  *  flips to solid blue when at least one photo is applied so users
  *  see the on-state at a glance. */
+
+/** Camera chip used in the sub-tab row of the slime and 추가비즈
+ *  panels. Clicking it opens the OS photo picker directly — no
+ *  intermediate tray / + button. The active state paints solid blue
+ *  when a photo is currently applied so users see the on-state at a
+ *  glance. */
 function CameraTriggerChip({
   ariaLabel,
   active,
@@ -351,43 +338,6 @@ function CameraTriggerChip({
       aria-pressed={active}
     >
       <CameraIcon />
-    </button>
-  )
-}
-
-/** "+" placeholder rendered inside a photo sub-options row. Clicking
- *  fires the actual openPhotoPicker for a specific slot. Disabled
- *  state means the caller's slot pool is full. */
-function AddPhotoSlotChip({
-  ariaLabel,
-  disabled,
-  onClick
-}: {
-  ariaLabel: string
-  disabled?: boolean
-  onClick: () => void
-}) {
-  return (
-    <button
-      type="button"
-      className={styles.addPhotoChip}
-      disabled={disabled}
-      onClick={onClick}
-      aria-label={ariaLabel}
-    >
-      <svg
-        width="14"
-        height="14"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <line x1="12" y1="5" x2="12" y2="19" />
-        <line x1="5" y1="12" x2="19" y2="12" />
-      </svg>
     </button>
   )
 }
@@ -716,7 +666,6 @@ export default function CustomizePanel({
   onClearSticker,
   photoBeadSlots,
   onPickPhotoBead,
-  onClearPhotoBead,
   colorAdjustments,
   onColorAdjustment,
   innerSlime,
@@ -728,8 +677,7 @@ export default function CustomizePanel({
   onClearCustomBeadsPhoto,
   slimeText,
   onSlimeText,
-  onTextInputFocusChange,
-  onActiveTextItemChange,
+  onTextColorImmediate,
   onActiveSlimeSubChange,
   onActivePanelChange,
   onRegisterOpenCategory
@@ -747,11 +695,6 @@ export default function CustomizePanel({
     // toggle for the four embed-capable leaves).
     onActivePanelChange?.(category)
   }, [category, onActivePanelChange])
-  // Whether the photo sub-options row (containing "+" slot buttons)
-  // is currently unfolded under the sub-cat tab strip. Toggled by
-  // the leading camera chip. Auto-closed on category switch so a
-  // stale photo tray doesn't linger into an unrelated panel.
-  const [photoTrayOpen, setPhotoTrayOpen] = useState(false)
   // Per-category active sub-category. Each category remembers the last
   // sub-cat the user was on so re-entering the category feels continuous.
   const [slimeSub, setSlimeSub] = useState<SlimeSub>('color')
@@ -762,64 +705,6 @@ export default function CustomizePanel({
     onActiveSlimeSubChange?.(category === 'slime' ? slimeSub : null)
   }, [category, slimeSub, onActiveSlimeSubChange])
 
-  // Single object holds BOTH the "which item's chips are showing"
-  // (activeIdx) and "which item's content input is open" (contentIdx)
-  // indices — combining them as one state guarantees they update in
-  // a SINGLE render, avoiding a torn intermediate where one changed
-  // and the other didn't. -1 = idle for either.
-  const [textEdit, setTextEdit] = useState<{
-    activeIdx: number
-    contentIdx: number
-  }>({ activeIdx: -1, contentIdx: -1 })
-  const activeTextIdx = textEdit.activeIdx
-  const contentEditingIdx = textEdit.contentIdx
-  useEffect(() => {
-    onActiveTextItemChange?.(activeTextIdx)
-  }, [activeTextIdx, onActiveTextItemChange])
-  // Clear both slots whenever the user leaves the text sub-tab so
-  // stale indices don't hijack cube-face clicks or leave orphan chips
-  // after navigating away.
-  useEffect(() => {
-    if (category !== 'slime' || slimeSub !== 'text') {
-      setTextEdit({ activeIdx: -1, contentIdx: -1 })
-    }
-  }, [category, slimeSub])
-  // Signal from commitAndAddNew that we just appended a new item and
-  // want the input+chips focused on it. Consumed by the layout-effect
-  // below AS SOON AS the parent's slimeText prop propagates, so the
-  // input row is guaranteed to appear on the same tap that fired the
-  // add — no "click twice" perception even when React couldn't batch
-  // parent+local updates into a single render (Capacitor webview).
-  const pendingAddIdxRef = useRef<number | null>(null)
-  // Runs synchronously after the parent's items prop updates but BEFORE
-  // browser paint, so the user never sees a transient frame where the
-  // + button hasn't yet swapped to the input row. Also handles the
-  // bounds clamp for shrinking items (deletion from unified tag row).
-  useLayoutEffect(() => {
-    setTextEdit((s) => {
-      const len = slimeText.items.length
-      let nextActive = s.activeIdx >= len ? -1 : s.activeIdx
-      let nextContent = s.contentIdx >= len ? -1 : s.contentIdx
-      if (pendingAddIdxRef.current !== null) {
-        const target = pendingAddIdxRef.current
-        pendingAddIdxRef.current = null
-        if (target >= 0 && target < len) {
-          nextActive = target
-          nextContent = target
-        }
-      }
-      if (nextActive === s.activeIdx && nextContent === s.contentIdx)
-        return s
-      return { activeIdx: nextActive, contentIdx: nextContent }
-    })
-  }, [slimeText.items])
-  // Auto-focus the input on the frame after content editing opens.
-  const textInputRef = useRef<HTMLInputElement | null>(null)
-  useEffect(() => {
-    if (contentEditingIdx < 0) return
-    const el = textInputRef.current
-    if (el) el.focus()
-  }, [contentEditingIdx])
   const [beadsSub, setBeadsSub] = useState<string>('color')
   // Sub-cat inside a sprinkle type — defaults to 'count' so drilling into
   // paper / powder / ink lands the user on the amount slider first (the
@@ -887,17 +772,8 @@ export default function CustomizePanel({
     pickerInputRef.current?.click()
   }
 
-  /** First empty photo bead slot index, or -1 when all slots are taken.
-   *  Used by the header camera button to append the next photo without
-   *  a slot picker. */
-  const nextPhotoBeadSlot = () => {
-    for (let i = 0; i < photoBeadSlots.length; i++) {
-      if (!photoBeadSlots[i]) return i
-    }
-    return -1
-  }
 
-  const openCategory = (c: CategoryId) => {
+  const openCategory = (c: CategoryId, subId?: string) => {
     setCategory(c)
     // Default sub-cat matches the FIRST tab in each category's tab
     // strip so the panel opens on a "primary" control every time:
@@ -916,10 +792,6 @@ export default function CustomizePanel({
     )
     setSprinkleSub('count')
     setSlimeSub('material')
-    // Photo tray always starts collapsed when entering a new
-    // category — otherwise the user could open it in slime, jump
-    // to compact, and see a stale + slot row above.
-    setPhotoTrayOpen(false)
     // Compact / chunk are single-combo categories now — entering
     // either sets the beads combo to that flavour with its defaults
     // if it wasn't already active. This preserves user tweaks when
@@ -928,7 +800,22 @@ export default function CustomizePanel({
     if (c === 'compact' && beads.combo !== 'compact') {
       const cfg = BEAD_COMBOS.find((x) => x.id === 'compact')
       if (cfg) {
-        onBeads({ ...beads, combo: 'compact', ...cfg.defaults, coating: 'none' })
+        // Seed bead palette from the slime's own colours on first
+        // activation so 꽉비즈 reads as the same colour as the slime
+        // it's covering instead of defaulting to plain white. Only
+        // fills the empty case — a user who's already picked bead
+        // colours (before switching combos) keeps their picks.
+        const seedColors =
+          beads.colors.length > 0
+            ? beads.colors
+            : (colors as ColorId[])
+        onBeads({
+          ...beads,
+          combo: 'compact',
+          ...cfg.defaults,
+          coating: 'none',
+          colors: seedColors
+        })
       }
     }
     if (c === 'chunk' && beads.combo !== 'chunk') {
@@ -1005,6 +892,19 @@ export default function CustomizePanel({
     }
     if (c === 'ink') {
       setSprinkleSub('count')
+      // Seed ink at MAX amount on first entry so the marble effect is
+      // immediately visible — user only needs to pick colours to swap
+      // the white default swirl for their palette. Preserves any prior
+      // user tweak.
+      if (sprinkles.ink.count === 0) {
+        onSprinkles({
+          ...sprinkles,
+          ink: {
+            ...sprinkles.ink,
+            count: SPRINKLES_LIMITS.inkCountMax
+          }
+        })
+      }
     }
     // 커스텀비즈 lands on the 양(count) sub-cat first, and if there
     // aren't any beads yet, seeds count=2 so the user sees beads on
@@ -1020,6 +920,25 @@ export default function CustomizePanel({
     // a previous session — the user only sees hue / lightness after
     // clicking a specific colour chip on this visit.
     setActiveAdjustColor(null)
+    // Deep-link override — when a tag click passes an explicit sub-cat
+    // id (e.g. clicking a "슬라임 색상" tag lands on 색상 instead of
+    // the primary's default 재질), route it to the matching setter.
+    // Routed AFTER the defaults above so the caller wins. Sprinkles /
+    // custom-beads share the sprinkle+beads sub setters respectively.
+    if (subId) {
+      if (c === 'slime') {
+        setSlimeSub(subId as SlimeSub)
+      } else if (
+        c === 'compact' ||
+        c === 'chunk' ||
+        c === 'inner-slime' ||
+        c === 'custom-beads'
+      ) {
+        setBeadsSub(subId)
+      } else if (c === 'paper' || c === 'powder' || c === 'ink') {
+        setSprinkleSub(subId)
+      }
+    }
   }
 
   // Expose openCategory to the parent via a ref-of-latest so tag clicks
@@ -1029,11 +948,11 @@ export default function CustomizePanel({
   const openCategoryLatestRef = useRef(openCategory)
   openCategoryLatestRef.current = openCategory
   useEffect(() => {
-    onRegisterOpenCategory?.((id) => {
+    onRegisterOpenCategory?.((id, subId) => {
       if (id === null) {
         setCategory(null)
       } else {
-        openCategoryLatestRef.current(id as CategoryId)
+        openCategoryLatestRef.current(id as CategoryId, subId)
       }
     })
   }, [onRegisterOpenCategory])
@@ -1236,9 +1155,9 @@ export default function CustomizePanel({
         />
         <div className={styles.tabs}>
           <CameraTriggerChip
-            ariaLabel="사진 슬라임 옵션"
+            ariaLabel={stickerOn ? '사진 스티커 교체' : '사진 슬라임'}
             active={stickerOn}
-            onClick={() => setPhotoTrayOpen((v) => !v)}
+            onClick={() => openPhotoPicker({ kind: 'sticker' })}
           />
           {SLIME_SUBS.map((s) => (
             <button
@@ -1255,24 +1174,6 @@ export default function CustomizePanel({
             </button>
           ))}
         </div>
-        {photoTrayOpen && (
-          <div className={styles.photoTray}>
-            <AddPhotoSlotChip
-              ariaLabel={stickerOn ? '사진 스티커 교체' : '사진 스티커 추가'}
-              onClick={() => openPhotoPicker({ kind: 'sticker' })}
-            />
-            {stickerOn && (
-              <button
-                type="button"
-                className={styles.photoTrayThumb}
-                onClick={onClearSticker}
-                aria-label="사진 스티커 제거"
-              >
-                ×
-              </button>
-            )}
-          </div>
-        )}
         {slimeSub === 'color' && (
           <>
             <div className={styles.options}>
@@ -1489,273 +1390,95 @@ export default function CustomizePanel({
             ))}
           </div>
         )}
-        {slimeSub === 'text' && (() => {
-          const items = slimeText.items
-          const canAdd = items.length < SLIME_TEXT_SLOT_MAX
-          // Show-input / show-chips decisions key off LOCAL indices
-          // ONLY (not on `items[idx]` presence). Otherwise a race
-          // where the parent's slimeText prop hasn't propagated yet
-          // makes `items[contentEditingIdx]` undefined and typing
-          // falls back to null → the + button flashes again for one
-          // render, requiring the user to tap it TWICE to actually
-          // see the input. Fallback items are the DEFAULT so the
-          // input renders with an empty value until the real item
-          // arrives on the next render.
-          const isTyping = contentEditingIdx >= 0
-          const isActive = activeTextIdx >= 0
-          const typing = isTyping
-            ? items[contentEditingIdx] ?? SLIME_TEXT_ITEM_DEFAULT
-            : null
-          const active = isActive
-            ? items[activeTextIdx] ?? SLIME_TEXT_ITEM_DEFAULT
-            : null
-          const patchItem = (idx: number, patch: Partial<SlimeTextItem>) => {
-            onSlimeText({
-              ...slimeText,
-              items: slimeText.items.map((it, i) =>
-                i === idx ? { ...it, ...patch } : it
-              )
-            })
-          }
-          // For cube shape: prefer a face that no other item is on so
-          // the new text lands where the user can immediately see it
-          // instead of overlapping an existing decal. Order picks +Z
-          // (front) first, then rotates through side faces before the
-          // back, so on cube 3 texts naturally spread across the
-          // camera-visible faces first.
-          const pickEmptyFace = (): SlimeTextFace => {
-            if (shape !== 'cube') return 'front'
-            const used = new Set(items.map((it) => it.face))
-            const order: SlimeTextFace[] = [
-              '+z',
-              '+x',
-              '-x',
-              '+y',
-              '-y',
-              '-z'
-            ]
-            for (const f of order) if (!used.has(f)) return f
-            return '+z'
-          }
-          // Commit + start new. Drops the current active item if it's
-          // empty (so the row doesn't accumulate blank pills), then
-          // appends a fresh default item + points BOTH indices at it.
-          // Input is ALWAYS rendered — no separate "+ 텍스트 추가"
-          // standalone button. When contentEditingIdx < 0 the input
-          // is "virgin" (empty value, placeholder invites new text);
-          // the first keystroke creates a fresh item and switches into
-          // regular edit mode. Removes the two-tap perception where
-          // the standalone + button had to be pressed before the
-          // input appeared.
-          return (
-            <div className={styles.textSubPanel}>
-              <div className={styles.textPillsRow}>
-                <div className={styles.textInputRow}>
-                  <input
-                    ref={textInputRef}
-                    className={styles.textInput}
-                    type="text"
-                    value={typing?.content ?? ''}
-                    maxLength={12}
-                    placeholder={typing ? '텍스트 입력' : '+ 텍스트 추가'}
-                    disabled={!typing && !canAdd}
-                    onChange={(e) => {
-                      const val = e.target.value
-                      if (contentEditingIdx >= 0) {
-                        patchItem(contentEditingIdx, { content: val })
-                        return
-                      }
-                      // Virgin input — first keystroke spawns a fresh
-                      // item carrying that character, so the user's
-                      // typing isn't lost between the create + focus
-                      // handoff.
-                      if (!canAdd) return
-                      const newItem: SlimeTextItem = {
-                        ...SLIME_TEXT_ITEM_DEFAULT,
-                        face: pickEmptyFace(),
-                        content: val
-                      }
-                      const nextItems = [...slimeText.items, newItem]
-                      const newIdx = nextItems.length - 1
-                      pendingAddIdxRef.current = newIdx
-                      onSlimeText({ ...slimeText, items: nextItems })
-                      setTextEdit({ activeIdx: newIdx, contentIdx: newIdx })
-                    }}
-                    onFocus={() => onTextInputFocusChange?.(true)}
-                    onBlur={() => onTextInputFocusChange?.(false)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault()
-                        ;(e.target as HTMLInputElement).blur()
-                      }
-                    }}
-                    data-hud="true"
-                  />
-                  <button
-                    type="button"
-                    className={styles.textConfirmBtn}
-                    onMouseDown={(e) => e.preventDefault()}
-                    onTouchStart={(e) => e.preventDefault()}
-                    onClick={() => {
-                      textInputRef.current?.blur()
-                      if (contentEditingIdx < 0) return
-                      // Empty content prunes the slot AND clears
-                      // activeTextIdx. Non-empty keeps active so the
-                      // chips remain visible for post-typing tweaks.
-                      if (!typing || !typing.content.trim()) {
-                        onSlimeText({
-                          ...slimeText,
-                          items: slimeText.items.filter(
-                            (_, i) => i !== contentEditingIdx
-                          )
-                        })
-                        setTextEdit({ activeIdx: -1, contentIdx: -1 })
-                      } else {
-                        setTextEdit((s) => ({
-                          ...s,
-                          contentIdx: -1
-                        }))
-                      }
-                    }}
-                    data-hud="true"
-                  >
-                    확인
-                  </button>
-                </div>
-                {items.map((item, i) => {
-                  // While typing, hide the pill of the item whose
-                  // content is in the input (it's already visible
-                  // as the input). Other pills always show.
-                  if (i === contentEditingIdx) return null
-                  return (
-                    <button
-                      type="button"
-                      key={i}
-                      className={styles.textPill}
-                      data-active={activeTextIdx === i}
-                      onClick={() => {
-                        // Activate item for chip tweaks + also open
-                        // content editing so the user can retype /
-                        // adjust the pill's text. The auto-focus
-                        // effect raises the keyboard. Deletion is
-                        // handled via the input's 확인 button
-                        // (empty content prunes the slot) or the
-                        // unified tag row above the panel.
-                        setTextEdit({
-                          activeIdx: i,
-                          contentIdx: i
-                        })
-                      }}
-                    >
-                      {item.content || '(빈 텍스트)'}
-                    </button>
-                  )
-                })}
-              </div>
-              {active && (
-                <>
-                  <div className={styles.options}>
-                    {SLIME_TEXT_FONTS.map((f) => (
-                      <button
-                        key={f.id}
-                        className={styles.chip}
-                        data-active={active.fontId === f.id}
-                        type="button"
-                        onClick={() =>
-                          patchItem(activeTextIdx, { fontId: f.id })
-                        }
-                      >
-                        <span
-                          className={styles.chipLabel}
-                          style={{
-                            fontFamily: f.family,
-                            fontWeight: Number(f.weight)
-                          }}
-                        >
-                          {f.label}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                  <div className={styles.sliderRow} data-hud="true">
-                    <span className={styles.sliderLabelPrefix}>크기</span>
-                    <input
-                      type="range"
-                      min={0.5}
-                      max={1.6}
-                      step={0.05}
-                      value={active.size}
-                      onChange={(e) =>
-                        patchItem(activeTextIdx, {
-                          size: Number(e.target.value)
-                        })
-                      }
-                      className={styles.slider}
-                    />
-                    <span className={styles.sliderValue}>
-                      {active.size.toFixed(2)}
-                    </span>
-                  </div>
-                  <div className={styles.options}>
-                    {COLORS.map((c) => {
-                      const isActive = active.color === c.id
-                      return (
-                        <button
-                          key={c.id}
-                          className={styles.chip}
-                          data-active={isActive}
-                          type="button"
-                          onClick={() =>
-                            patchItem(activeTextIdx, { color: c.id })
-                          }
-                          aria-label={c.label}
-                          aria-pressed={isActive}
-                        >
-                          <span
-                            className={styles.swatch}
-                            style={{
-                              background: hexToCss(
-                                resolveColorHex(c.id, colorAdjustments)
-                              )
-                            }}
-                          />
-                          <span className={styles.chipLabel}>{c.label}</span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                  {coating !== 'none' && (
-                    <div className={styles.options}>
-                      <button
-                        type="button"
-                        className={styles.chip}
-                        data-active={slimeText.aboveCoating}
-                        onClick={() =>
-                          onSlimeText({
-                            ...slimeText,
-                            aboveCoating: !slimeText.aboveCoating
-                          })
-                        }
-                      >
-                        <span className={styles.chipLabel}>
-                          {slimeText.aboveCoating
-                            ? '코팅 위에 표시'
-                            : '코팅 아래에 표시'}
-                        </span>
-                      </button>
-                    </div>
-                  )}
-                  {shape === 'cube' && (
-                    <div className={styles.textFaceHint}>
-                      슬라임의 면을 눌러 텍스트 위치를 바꿔요 · 현재:{' '}
-                      {SLIME_TEXT_FACE_LABEL[active.face]}
-                    </div>
-                  )}
-                </>
+        {slimeSub === 'text' && (
+          <div className={styles.simpleTextPanel} data-hud>
+            {/* Text input row. No focus-within CSS trickery here — the
+                previous panel hid sibling controls with :focus-within
+                which sometimes latched on Android WebView and made
+                the color chips below unclickable. Kept intentionally
+                flat: [input] [확인] on one row, then size slider, then
+                color chips underneath. */}
+            <div className={styles.simpleTextInputRow}>
+              <input
+                className={styles.simpleTextInput}
+                type="text"
+                value={slimeText.content}
+                maxLength={12}
+                placeholder="텍스트 입력"
+                onChange={(e) =>
+                  onSlimeText({ ...slimeText, content: e.target.value })
+                }
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    ;(e.target as HTMLInputElement).blur()
+                  }
+                }}
+              />
+              {slimeText.content && (
+                <button
+                  type="button"
+                  className={styles.simpleTextClearBtn}
+                  onClick={() => onSlimeText(SLIME_TEXT_DEFAULT)}
+                  aria-label="텍스트 지우기"
+                >
+                  ×
+                </button>
               )}
             </div>
-          )
-        })()}
+            <div className={styles.sliderRow}>
+              <span className={styles.sliderLabelPrefix}>크기</span>
+              <input
+                type="range"
+                min={0.5}
+                max={1.6}
+                step={0.05}
+                value={slimeText.size}
+                onChange={(e) =>
+                  onSlimeText({
+                    ...slimeText,
+                    size: Number(e.target.value)
+                  })
+                }
+                className={styles.slider}
+              />
+              <span className={styles.sliderValue}>
+                {slimeText.size.toFixed(2)}
+              </span>
+            </div>
+            <div className={styles.options}>
+              {COLORS.map((c) => {
+                const isActive = slimeText.color === c.id
+                return (
+                  <button
+                    key={c.id}
+                    className={styles.chip}
+                    data-active={isActive}
+                    type="button"
+                    onClick={() => {
+                      onSlimeText({ ...slimeText, color: c.id })
+                      onTextColorImmediate?.(
+                        resolveColorHex(c.id, colorAdjustments)
+                      )
+                    }}
+                    aria-label={c.label}
+                    aria-pressed={isActive}
+                  >
+                    <span
+                      className={styles.swatch}
+                      style={{
+                        background: hexToCss(
+                          resolveColorHex(c.id, colorAdjustments)
+                        )
+                      }}
+                    />
+                    <span className={styles.chipLabel}>{c.label}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        )}
       </div>
     )
   }
@@ -1826,25 +1549,6 @@ export default function CustomizePanel({
         }
       }
     }
-    // 사진 비즈 tags — occupied slots surface as "사진 1", "사진 2" chips
-    // in both combos' headers. Individual per-bead photos are added
-    // via the header camera (chunk) or the leading camera chip in
-    // the color panel (compact); either way they land in the same
-    // shared photo pool.
-    photoBeadSlots.forEach((occupied, i) => {
-      if (!occupied) return
-      beadTags.push({
-        key: `pb-${i}`,
-        label: `사진 ${i + 1}`,
-        onRemove: () => onClearPhotoBead(i)
-      })
-    })
-    const emptySlot = nextPhotoBeadSlot()
-    // Header camera (사진 인쇄) shows on both 미니비즈 and 빅비즈 now.
-    // The colour-chip row leading camera is reserved for the extract
-    // action (색상 추출), which lands in beads.colors instead of on
-    // the photo atlas.
-    const showHeaderCamera = true
     return (
       <div className={styles.panel} data-hud>
         {insideToggleBtn}
@@ -1866,55 +1570,8 @@ export default function CustomizePanel({
             else onPickPhotoBead(target.index, f)
           }}
         />
-        <Header
-          title={catTitle}
-          onBack={goBack}
-          tags={beadTags}
-          rightAction={
-            showHeaderCamera
-              ? {
-                  ariaLabel:
-                    emptySlot >= 0
-                      ? '사진 비즈 추가'
-                      : '사진 비즈 슬롯 가득 참',
-                  active: photoBeadSlots.some(Boolean),
-                  onClick: () => {
-                    if (emptySlot < 0) return
-                    // Compact combo: sphere / torus can't hold a
-                    // printed photo (curved surface). Swap them for
-                    // the disc so the incoming photo lands on flat
-                    // caps. Chunk combo has no such restriction.
-                    if (activeCombo === 'compact') {
-                      const filtered = beads.shapes.filter(
-                        (s) => s !== 'sphere' && s !== 'torus'
-                      )
-                      const nextShapes: BeadShapeId[] =
-                        filtered.length > 0 ? filtered : ['disc']
-                      if (
-                        nextShapes.length !== beads.shapes.length ||
-                        nextShapes.some(
-                          (s, i) => s !== beads.shapes[i]
-                        )
-                      ) {
-                        onBeads({ ...beads, shapes: nextShapes })
-                      }
-                    }
-                    openPhotoPicker({
-                      kind: 'photoBead',
-                      index: emptySlot
-                    })
-                  },
-                  icon: <CameraIcon />
-                }
-              : undefined
-          }
-        />
+        <Header title={catTitle} onBack={goBack} tags={beadTags} />
         <div className={styles.tabs}>
-          <CameraTriggerChip
-            ariaLabel="사진 비즈 옵션"
-            active={photoBeadSlots.some(Boolean)}
-            onClick={() => setPhotoTrayOpen((v) => !v)}
-          />
           {subs.map((s) => (
             <button
               key={s.id}
@@ -1930,52 +1587,15 @@ export default function CustomizePanel({
             </button>
           ))}
         </div>
-        {photoTrayOpen && (
-          <div className={styles.photoTray}>
-            {photoBeadSlots.map((occupied, i) =>
-              occupied ? (
-                <button
-                  key={`pb-${i}`}
-                  type="button"
-                  className={styles.photoTrayThumb}
-                  onClick={() => onClearPhotoBead(i)}
-                  aria-label={`사진 ${i + 1} 제거`}
-                >
-                  ×
-                </button>
-              ) : null
-            )}
-            {emptySlot >= 0 && (
-              <AddPhotoSlotChip
-                ariaLabel="사진 비즈 추가"
-                onClick={() => {
-                  if (activeCombo === 'chunk') {
-                    const filtered = beads.shapes.filter(
-                      (s) => s !== 'sphere' && s !== 'torus'
-                    )
-                    const nextShapes: BeadShapeId[] =
-                      filtered.length > 0 ? filtered : ['disc']
-                    if (
-                      nextShapes.length !== beads.shapes.length ||
-                      nextShapes.some((s, i) => s !== beads.shapes[i])
-                    ) {
-                      onBeads({ ...beads, shapes: nextShapes })
-                    }
-                  }
-                  openPhotoPicker({ kind: 'photoBead', index: emptySlot })
-                }}
-              />
-            )}
-          </div>
-        )}
         {activeSub === 'color' && (
           <>
-            <div className={styles.options}>
+            <div className={styles.optionsRow}>
               {/* 그라데이션 토글 — compact / chunk 양쪽에서 노출. OFF일
                   때 다수색은 첫 색 하나만 적용, ON일 때 상하 그라데이션
                   (compact = 슬라임 세로축 밴드, chunk = 비드마다 위→아래
                   전체 팔레트) 사용. beads.colors 두 개 이상일 때만 실질
-                  차이가 남. */}
+                  차이가 남. Pinned OUTSIDE the scrolling chip row so it
+                  stays visible while the palette scrolls sideways. */}
               <button
                 type="button"
                 className={styles.chip}
@@ -1988,6 +1608,7 @@ export default function CustomizePanel({
               >
                 <GradientIcon />
               </button>
+              <div className={styles.options}>
               {BEAD_COLORS.map((c) => {
                 const active = beads.colors.includes(c.id)
                 return (
@@ -2033,6 +1654,7 @@ export default function CustomizePanel({
                   </button>
                 )
               })}
+              </div>
             </div>
             {activeAdjustColor && (
               <ColorAdjustSliders
@@ -2546,10 +2168,14 @@ export default function CustomizePanel({
                   // Plastic reads best at max size — a chunky moulded
                   // bead look. Snap the size slider up on the plastic
                   // pick so the user sees the intended silhouette without
-                  // having to hunt for the size sub-cat.
+                  // having to hunt for the size sub-cat. Switching BACK
+                  // to paper resets to the paper default so plastic's
+                  // chunky max doesn't linger as a mismatched paper size.
                   const patch: Partial<typeof sprinkles.paper> = { kind: k.id }
                   if (k.id === 'plastic') {
                     patch.size = SPRINKLES_LIMITS.sizeMax
+                  } else if (k.id === 'paper') {
+                    patch.size = SPRINKLES_DEFAULT.paper.size
                   }
                   updateSprinkleSub('paper', patch)
                 }}
@@ -2656,10 +2282,11 @@ export default function CustomizePanel({
           ))}
         </div>
         {activeSub === 'color' && (
-          <div className={styles.options}>
+          <div className={styles.optionsRow}>
             {/* Gradient toggle — same as beads. Multi-colour slime ball
                 only shows a top-to-bottom gradient when ON; otherwise
-                the ball uses the first picked colour. */}
+                the ball uses the first picked colour. Pinned outside
+                the scrolling chip row so it stays visible on scroll. */}
             <button
               type="button"
               className={styles.chip}
@@ -2675,6 +2302,7 @@ export default function CustomizePanel({
             >
               <GradientIcon />
             </button>
+            <div className={styles.options}>
             {BEAD_COLORS.map((c) => (
               <button
                 key={c.id}
@@ -2712,6 +2340,7 @@ export default function CustomizePanel({
                 <span className={styles.chipLabel}>{c.label}</span>
               </button>
             ))}
+            </div>
           </div>
         )}
         {activeSub === 'color' && activeAdjustColor && (
@@ -3002,9 +2631,9 @@ export default function CustomizePanel({
         />
         <div className={styles.tabs}>
           <CameraTriggerChip
-            ariaLabel="사진 인쇄 옵션"
+            ariaLabel={customBeadsPhotoOn ? '사진 교체' : '사진 인쇄'}
             active={customBeadsPhotoOn}
-            onClick={() => setPhotoTrayOpen((v) => !v)}
+            onClick={() => openPhotoPicker({ kind: 'customPhoto' })}
           />
           {CUSTOM_SUBS.map((s) => (
             <button
@@ -3021,28 +2650,12 @@ export default function CustomizePanel({
             </button>
           ))}
         </div>
-        {photoTrayOpen && (
-          <div className={styles.photoTray}>
-            <AddPhotoSlotChip
-              ariaLabel={customBeadsPhotoOn ? '사진 교체' : '사진 인쇄 추가'}
-              onClick={() => openPhotoPicker({ kind: 'customPhoto' })}
-            />
-            {customBeadsPhotoOn && (
-              <button
-                type="button"
-                className={styles.photoTrayThumb}
-                onClick={onClearCustomBeadsPhoto}
-                aria-label="사진 인쇄 제거"
-              >
-                ×
-              </button>
-            )}
-          </div>
-        )}
         {activeSub === 'color' && (
-          <div className={styles.options}>
+          <div className={styles.optionsRow}>
             {/* Gradient toggle mirrors the compact-beads one — 2+
-                palette picks interpolate across beads when active. */}
+                palette picks interpolate across beads when active.
+                Pinned outside the scrolling chip row so it stays
+                visible while the palette scrolls sideways. */}
             <button
               type="button"
               className={styles.chip}
@@ -3058,6 +2671,7 @@ export default function CustomizePanel({
             >
               <GradientIcon />
             </button>
+            <div className={styles.options}>
             {BEAD_COLORS.map((c) => {
               const adjustKey = `cb:${c.id}`
               return (
@@ -3097,6 +2711,7 @@ export default function CustomizePanel({
                 </button>
               )
             })}
+            </div>
           </div>
         )}
         {activeSub === 'color' && activeAdjustColor && (
@@ -3348,6 +2963,12 @@ export type SelectionTag = {
    *  button). Lets users jump straight from a tag back into the
    *  option that owns it. */
   targetCategory?: string
+  /** Optional sub-cat id (e.g. 'color', 'size', 'material', 'coating',
+   *  'shape', 'text', 'kind', 'count', 'flatness') to open INSIDE
+   *  the target category. Without this, the primary category opens
+   *  on its own default sub-cat and clicking a "슬라임 색상" tag
+   *  would land on 재질 instead of 색상. */
+  targetSubCategory?: string
 }
 
 function Header(_: {

@@ -58,6 +58,14 @@
   display: flex;
   gap: 4px;
   padding: 3px 6px;
+  /* Container stretches to the full panel width (default flex-item
+     behaviour under the panel's align-items: stretch). Tabs inside
+     distribute with `space-evenly` so the empty space on the left,
+     between each tab, and on the right is all equal — every category
+     reads with a balanced strip regardless of how many sub-tabs it
+     carries. `gap: 4px` sets the minimum inter-tab spacing so tabs
+     never touch even in the tightest category. */
+  justify-content: space-evenly;
   /* Filled container backdrop — darker gray in dark mode, brighter
      gray in light mode, so the strip reads as a subtle recessed
      surface against each theme's base panel colour without competing
@@ -66,7 +74,6 @@
   background: rgba(22, 22, 26, 0.92);
   border: none;
   border-radius: 999px;
-  justify-content: flex-start;
   /* Match .primaryChips: overflow the row horizontally so a long
      sub-tab list (e.g. slime with 6 tabs including 텍스트) is fully
      reachable via touch drag / trackpad swipe instead of being
@@ -309,12 +316,12 @@
   -webkit-tap-highlight-color: transparent;
   color: var(--color-text-muted);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: 0.02em;
   white-space: nowrap;
   cursor: pointer;
   min-width: 60px;
-  transition: background-color 120ms ease, color 120ms ease;
+  transition: color 160ms ease;
 }
 :global(html[data-theme='light']) .primaryChip {
   background: rgba(250, 250, 253, 0.98);
@@ -343,25 +350,21 @@
 
 .primaryChipLabel {
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 500;
   letter-spacing: 0.02em;
   line-height: 1;
   white-space: nowrap;
 }
 
+/* Active state paints ONLY the icon + label — no background swap so
+   the tile keeps its base surface. Selection reads via the ::after
+   underline animation + the text/icon color lift. */
 .primaryChip[data-active='true'] {
-  /* Active tile picks a brighter shade in dark mode so it lifts out
-     of the deeper base, and a darker shade in light mode so it sinks
-     against the paler base — both directions read as "selected". */
-  background: rgba(80, 80, 92, 0.98);
   color: var(--color-text);
-  font-weight: 700;
-}
-:global(html[data-theme='light']) .primaryChip[data-active='true'] {
-  background: rgba(200, 200, 210, 0.98);
+  font-weight: 600;
 }
 .primaryChip[data-active='true'] .primaryChipLabel {
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .primaryChip[data-dim='true'] {
@@ -538,6 +541,25 @@
 .detailTagRemove:focus-visible {
   background: rgba(0, 0, 0, 0.6);
   outline: none;
+}
+
+/* Pins a chip (e.g. gradient toggle) to the LEFT of a scrolling color
+   row while the rest of the chips scroll. Structure:
+     <div .optionsRow>
+       <button .chip>pinned</button>
+       <div .options>...scrollable chips...</div>
+     </div>
+   `.options` inside a row shrinks so scroll happens in the remaining
+   width; the pinned chip stays visible at any scroll offset. */
+.optionsRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.optionsRow > .options {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .options {
@@ -978,141 +1000,27 @@
   padding-right: 2px;
 }
 
-/* Text sub-tab: input + font chips + size slider + color chips.
-   Stacks vertically since input needs a full-width row of its own
-   and the size-slider needs a dedicated row above the color chips. */
-.textSubPanel {
+/* Simplified single-text panel — no focus-within collapse rules, no
+   sticky positioning, no scrollable pill row. Deliberately flat layout
+   so the color chips at the bottom stay unconditionally clickable
+   (the previous multi-slot panel had a :focus-within rule that
+   sometimes latched on Android WebView and made chips visible but
+   unresponsive). */
+.simpleTextPanel {
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding: 4px 0;
 }
 
-/* When the input is focused (soft-keyboard likely up), collapse every
-   sibling in the sub-panel so ONLY the input row remains. That shrinks
-   controlsHeightRef, which the slime canvas already watches to lift +
-   scale the mesh — so the slime pops back into view above the input
-   instead of being squeezed off-screen by the tall panel + keyboard.
-   Everything reappears on blur, so users don't lose access to the
-   font / size / color chips.
-   Uses display:none (not visibility:hidden) so the panel geometry
-   collapses instead of leaving reserved empty rows. */
-/* While the text input has focus (soft keyboard likely up), hide the
-   font / size / color / coating chips + face hint so the panel stays
-   short and the slime is visible above the keyboard. Pills row stays
-   visible (it contains the active input) but the individual applied-
-   text pills AND the compact + button inside it are hidden by the
-   rules below so only [input] [확인] remains in the row while typing. */
-.textSubPanel:focus-within > *:not(.textPillsRow) {
-  display: none;
-}
-
-.textSubPanel:focus-within .textPill {
-  display: none;
-}
-
-/* Also hide the panel's own top-of-panel primary chip row + sub-tab
-   strip while the text input has focus — otherwise those two rows
-   still eat 60–80 px above the input and the slime gets cropped by
-   the keyboard + those chrome rows combined. :has() checks the
-   descendant selector so the rule only fires for the slime → 텍스트
-   panel; other panels are unaffected. */
-.panel:has(.textSubPanel:focus-within) > .primaryChips,
-.panel:has(.textSubPanel:focus-within) > .tabs {
-  display: none;
-}
-
-.textInputRow {
+.simpleTextInputRow {
   display: flex;
   gap: 8px;
   align-items: stretch;
-  /* Resting size hugs the input — pills next to the row sit right
-     next to it with a consistent 8 px gap, instead of the input
-     stretching wide and pushing pills to the far right (which read
-     as "gap shrinks with each new pill"). Focused state expands
-     the row so the input has room to grow. */
-  flex: 0 0 auto;
-  min-width: 0;
-  /* Pin to the LEFT while the surrounding pills scroll horizontally.
-     Opaque page-tone background covers pills that slide underneath
-     so the input never overlaps a scrolled pill. Right padding gives
-     a small buffer between the input's border and the first scrolling
-     pill under the sticky edge. */
-  position: sticky;
-  left: 0;
-  z-index: 2;
-  background: var(--bg-page-middle);
-  padding-right: 4px;
 }
 
-.textInputRow:focus-within {
+.simpleTextInput {
   flex: 1 1 auto;
-}
-
-/* Row hosting the add-button (or its expanded input) + all existing
-   text-item pills. Horizontally scrollable so a 3-item row plus the
-   editing input never truncates on narrow screens; same edge-fade
-   mask as the other scrollable rows via the shared .options / .tabs
-   pattern.  Pills sit at their intrinsic width; the leading
-   input-or-button uses flex-grow so it fills the leftover space. */
-.textPillsRow {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  overflow-x: auto;
-  /* Vertical overflow VISIBLE so the × badges on pills can hang off
-     the top-right corner without getting clipped by the scroll box.
-     Extra top padding gives the badges the room they overhang into. */
-  overflow-y: visible;
-  scrollbar-width: none;
-  padding: 10px 0 6px;
-  touch-action: pan-x;
-}
-
-.textPillsRow::-webkit-scrollbar {
-  display: none;
-}
-
-/* Text-item pill — the committed text as a chip. Uses inline-flex so
-   the label + × sit as two independent tap targets side-by-side. The
-   × takes up its own space (no absolute positioning) so parent row
-   overflow can't clip it and neither element's click zone overlaps
-   the other's — solves the "× doesn't respond" case where the label
-   was intercepting taps meant for the badge. */
-.textPill {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 12px;
-  background: var(--bg-selected);
-  color: var(--color-selected-text);
-  padding: 8px 12px;
-  max-width: 200px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  outline: none;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  -webkit-tap-highlight-color: transparent;
-  touch-action: manipulation;
-}
-
-.textPill[data-active='true'] {
-  outline: 2px solid var(--color-outline-focus);
-  outline-offset: 1px;
-}
-
-.textInput {
-  /* Compact resting width — reads as a discrete chip whose padded
-     placeholder ("+ 텍스트 추가") sits centred so left/right border
-     padding is visually symmetric. Grows to fill the row only after
-     focus so the caret has room to type in. */
-  flex: 0 0 auto;
-  width: 128px;
   min-width: 0;
   padding: 8px 12px;
   border-radius: 12px;
@@ -1123,54 +1031,22 @@
   font-weight: 600;
   outline: none;
   box-sizing: border-box;
-  text-align: center;
-  transition: border-color 120ms ease, width 160ms ease;
 }
 
-.textInput:focus {
-  flex: 1 1 auto;
-  width: auto;
-  text-align: left;
+.simpleTextInput:focus {
   border-color: var(--color-outline-focus);
 }
 
-/* Placeholder disappears on focus so the caret has a clean field
-   to type into instead of overlapping the "텍스트 추가" hint. */
-.textInput:focus::placeholder {
-  color: transparent;
-}
-
-/* Confirm chip sits inside the input row while the input is being
-   edited; a plain "확인" pill that dismisses the soft keyboard by
-   blurring the active input. Hidden by default (nothing to confirm)
-   and only revealed when the row has focus, so the resting state
-   shows a clean single-line input without a leftover button. */
-.textConfirmBtn {
-  display: none;
+.simpleTextClearBtn {
   flex: 0 0 auto;
-  padding: 0 14px;
+  width: 36px;
   border-radius: 12px;
   border: none;
   outline: none;
   background: var(--bg-selected);
   color: var(--color-selected-text);
-  font-size: 13px;
+  font-size: 20px;
   font-weight: 700;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
-}
-
-.textInputRow:focus-within .textConfirmBtn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.textFaceHint {
-  font-size: 11px;
-  opacity: 0.75;
-  padding: 4px 8px;
-  border-radius: 999px;
-  background: var(--bg-slider-track);
-  align-self: flex-start;
 }

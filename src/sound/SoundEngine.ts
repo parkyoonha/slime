@@ -8,6 +8,38 @@
  * iOS/Safari require a user gesture before an AudioContext will produce sound;
  * call `resume()` from the first pointerdown/touchstart handler.
  */
+
+/**
+ * Return a NEW AudioBuffer with the sample range [skipStart, skipEnd]
+ * (seconds) removed. Pre-skip and post-skip regions get concatenated
+ * so the callers' coordinates shift: any offset past `skipEnd` should
+ * be reduced by (skipEnd - skipStart) after this splice. Used to
+ * excise a dead middle section (silence / unwanted knead) from a
+ * loop-region recording without editing the source file.
+ */
+function spliceAudioBuffer(
+  ctx: AudioContext,
+  src: AudioBuffer,
+  skipRange: readonly [number, number]
+): AudioBuffer {
+  const rate = src.sampleRate
+  const skipStart = Math.max(0, Math.min(src.length, Math.floor(skipRange[0] * rate)))
+  const skipEnd = Math.max(skipStart, Math.min(src.length, Math.floor(skipRange[1] * rate)))
+  const removed = skipEnd - skipStart
+  if (removed <= 0) return src
+  const outLength = src.length - removed
+  const out = ctx.createBuffer(src.numberOfChannels, outLength, rate)
+  for (let ch = 0; ch < src.numberOfChannels; ch++) {
+    const s = src.getChannelData(ch)
+    const d = out.getChannelData(ch)
+    // Copy [0, skipStart) → [0, skipStart)
+    d.set(s.subarray(0, skipStart), 0)
+    // Copy [skipEnd, end) → [skipStart, outLength)
+    d.set(s.subarray(skipEnd), skipStart)
+  }
+  return out
+}
+
 export class SoundEngine {
   private ctx: AudioContext | null = null
   private masterGain: GainNode | null = null
@@ -25,6 +57,7 @@ export class SoundEngine {
    *  keep re-triggering as long as the caller reports elevated pressure). */
   private namedTimers: Record<string, ReturnType<typeof setTimeout> | null> = {
     wax: null,
+    waxLayer: null,
     thinwax: null,
     foil: null,
     beads: null,
@@ -33,10 +66,13 @@ export class SoundEngine {
     matte: null,
     metal: null,
     emoji: null,
+    customBeads: null,
+    plasticLayer: null,
     slimeTap: null
   }
   private namedTargetLevels: Record<string, number> = {
     wax: 0,
+    waxLayer: 0,
     thinwax: 0,
     foil: 0,
     beads: 0,
@@ -45,6 +81,8 @@ export class SoundEngine {
     matte: 0,
     metal: 0,
     emoji: 0,
+    customBeads: 0,
+    plasticLayer: 0,
     slimeTap: 0
   }
   /** Per-slot GAIN multiplier for looping samples. Multiplies the
@@ -65,6 +103,7 @@ export class SoundEngine {
     { src: AudioBufferSourceNode; gain: GainNode } | null
   > = {
     wax: null,
+    waxLayer: null,
     thinwax: null,
     foil: null,
     beads: null,
@@ -73,6 +112,8 @@ export class SoundEngine {
     matte: null,
     metal: null,
     emoji: null,
+    customBeads: null,
+    plasticLayer: null,
     slimeTap: null
   }
 
@@ -90,6 +131,7 @@ export class SoundEngine {
    *  independently of the global playCrack limiter. */
   private namedSamples: Record<string, AudioBuffer | null> = {
     wax: null,
+    waxLayer: null,
     thinwax: null,
     foil: null,
     beads: null,
@@ -98,6 +140,8 @@ export class SoundEngine {
     matte: null,
     metal: null,
     emoji: null,
+    customBeads: null,
+    plasticLayer: null,
     slimeTap: null
   }
   /** Optional per-slot [startSec, endSec] source-range constraint. When
@@ -109,6 +153,7 @@ export class SoundEngine {
     readonly [number, number] | null
   > = {
     wax: null,
+    waxLayer: null,
     thinwax: null,
     foil: null,
     beads: null,
@@ -117,6 +162,8 @@ export class SoundEngine {
     matte: null,
     metal: null,
     emoji: null,
+    customBeads: null,
+    plasticLayer: null,
     slimeTap: null
   }
 
@@ -518,8 +565,21 @@ export class SoundEngine {
   /**
    * Load a single named sample. Silently no-ops on fetch/decode failure so
    * missing files just mute their slot without breaking anything else.
+   *
+   * `skipRanges` (optional) — array of [startSec, endSec] windows in
+   * the ORIGINAL recording; each is stripped out of the decoded buffer
+   * before it's stored, and the remaining regions are concatenated.
+   * Downstream playback / loop-point coords MUST use post-splice
+   * seconds. Use case: hide dead middle sections (silence / unwanted
+   * knead) without editing the source MP3 offline. Windows are
+   * processed right-to-left so earlier splices don't shift the
+   * indices of later ones — the caller can pass them in any order.
    */
-  async loadNamedSample(name: string, url: string) {
+  async loadNamedSample(
+    name: string,
+    url: string,
+    skipRanges?: readonly (readonly [number, number])[]
+  ) {
     const ctx = this.ensureCtx()
     if (!ctx) return
     try {
@@ -528,7 +588,13 @@ export class SoundEngine {
       const ct = res.headers.get('content-type') || ''
       if (!ct.startsWith('audio/')) return
       const buf = await res.arrayBuffer()
-      const decoded = await ctx.decodeAudioData(buf)
+      let decoded = await ctx.decodeAudioData(buf)
+      if (skipRanges && skipRanges.length > 0) {
+        const sorted = [...skipRanges].sort((a, b) => b[0] - a[0])
+        for (const range of sorted) {
+          decoded = spliceAudioBuffer(ctx, decoded, range)
+        }
+      }
       this.namedSamples[name] = decoded
     } catch {
       // silent fail — leave slot null

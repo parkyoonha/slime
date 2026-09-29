@@ -16,15 +16,11 @@ import {
   EMOJI_BEADS_DEFAULT,
   MATERIALS,
   SHAPES,
-  SLIME_TEXT_GROUP_DEFAULT,
-  SLIME_TEXT_ITEM_DEFAULT,
-  SLIME_TEXT_SLOT_MAX,
-  SLIME_TEXT_FONTS,
+  SLIME_TEXT_DEFAULT,
   resolveColorHex,
   resolveInnerCoatingHex,
   resolveFoilCoatingHex,
   resolveWaxCoatingHex,
-  slimeTextFaceAxis,
   type ColorAdjustments,
   SPRINKLE_COLORS,
   SPRINKLES_DEFAULT,
@@ -37,9 +33,7 @@ import {
   type EmojiBeadsConfig,
   type MaterialId,
   type ShapeId,
-  type SlimeTextFace,
-  type SlimeTextGroup,
-  type SlimeTextItem,
+  type SlimeText,
   type SprinklesConfig
 } from '../slime/presets'
 import {
@@ -51,6 +45,7 @@ import {
 } from '../lib/coords'
 import { SoundEngine } from '../sound/SoundEngine'
 import CustomizePanel, { type SelectionTag } from './CustomizePanel'
+import { AccountDrawerTop, AccountDrawerFooter } from './AccountDrawerSection'
 import styles from './SlimeApp.module.css'
 
 const CAMERA_Z = 3.4
@@ -111,7 +106,13 @@ const NAMED_SAMPLE_URLS = {
   // points. First press after a reset starts from t=0 (attack plays,
   // then loop kicks in); subsequent presses start straight from
   // loopStart so the sustain plays without re-attacking.
-  wax: '/sounds/Waxwax.mp3',
+  wax: '/sounds/Wakcom.mp3',
+  // Extra layer that plays IN PARALLEL with the wax coating loop —
+  // Thinwax.mp3 stacked over Wakcom so the thick-wax crack carries
+  // the thin-crackle texture underneath. Uses its own channel so
+  // the actual 씬왁스 coating (which also loads Thinwax.mp3 on the
+  // `thinwax` channel) stays independent.
+  waxLayer: '/sounds/Thinwax.mp3',
   // 씬왁스 — full-file loop of Thinwax.mp3. Independent from the ice
   // channel so the thin-wax and glaze/ice coatings can carry
   // distinct sound identities.
@@ -120,9 +121,9 @@ const NAMED_SAMPLE_URLS = {
   // Hoil.mp3 and Popp.mp3 respectively; swapped so foil cracks now use
   // the pop sample and the putty material kneading uses the wet foil
   // sample — matches the user's chosen sound identity for each channel.
-  foil: '/sounds/Foil.mp3',
-  // 글레이즈 (ice) 코팅 크랙 — 크리스탈-글래스 shell 사운드.
-  ice: '/sounds/Glaze.mp3',
+  foil: '/sounds/Bak.mp3',
+  // 글레이즈 (ice) 코팅 — sharp crack.
+  ice: '/sounds/Crack.mp3',
   // 젤(tube) coating crack — wet-jelly squelch.
   tube: '/sounds/Jelly.mp3',
   // 꽉비즈 (compact) + 비즈볼 (chunk) share the `beads` channel.
@@ -131,17 +132,27 @@ const NAMED_SAMPLE_URLS = {
   paper: '/sounds/Crunchier.mp3',
   // 스팽글 플라스틱 옵션 — sharper star-like tick.
   plastic: '/sounds/Sharpstar.mp3',
+  // Parallel layer stacked on top of plastic — Crunchier.mp3 gives
+  // the plastic tick a softer crinkle underneath. Own channel so
+  // gain / attenuation can be tuned independently from `paper`
+  // (which also loads Crunchier.mp3).
+  plasticLayer: '/sounds/Crunchier.mp3',
   // 슬라임 / 슬라임볼 폼(matte) 재질 앰비언트.
   matte: '/sounds/Papers.mp3',
   // 슬라임 / 슬라임볼 퍼티(metal) 재질 앰비언트.
-  metal: '/sounds/Purty.mp3',
+  metal: '/sounds/Glaze.mp3',
   // 소프트 재질 ambient.
   soft: '/sounds/Softslime.mp3',
   // 아이스 재질 (재질 vs 코팅 구분: 코팅은 Iced.mp3의 'ice' 채널).
   iceMat: '/sounds/Smoothie.mp3',
   // Ambient loop that fires when the user presses a slime that has
   // emojis on it.
-  emoji: '/sounds/Beads.mp3',
+  emoji: '/sounds/Imoji.mp3',
+  // 추가비즈 loop — shares Imoji.mp3 with the emoji channel so both
+  // additive-bead surfaces carry the same acoustic signature; kept
+  // as its own channel so gain / attenuation can be tuned
+  // independently.
+  customBeads: '/sounds/Imoji.mp3',
   // Slime.mp3의 squish와 병렬로 재생되는 tapping 레이어. 압력 따라
   // gain이 움직이며, squish가 무음 처리되는 조건(iceMat/matte/metal/
   // soft 재질, ice 코팅)에서 함께 무음.
@@ -154,19 +165,27 @@ const NAMED_SAMPLE_URLS = {
 // segment. Set to `null` to allow the full recording. Adjust the wax
 // range to pick the exact section of Wak.mp3 you want as the crack sound.
 const NAMED_SAMPLE_RANGES: Record<
-  'wax' | 'thinwax' | 'foil' | 'ice' | 'tube' | 'beads' | 'paper' | 'plastic' | 'matte' | 'metal' | 'soft' | 'iceMat' | 'emoji' | 'slimeTap',
+  'wax' | 'waxLayer' | 'thinwax' | 'foil' | 'ice' | 'tube' | 'beads' | 'paper' | 'plastic' | 'plasticLayer' | 'matte' | 'metal' | 'soft' | 'iceMat' | 'emoji' | 'customBeads' | 'slimeTap',
   readonly [number, number] | null
 > = {
-  // Waxwax.mp3 has the attack (Wax4) in [0, 5] and the sustain
-  // (WaxCrunch) in [5, 13]. Range acts as loopStart/loopEnd — the
-  // buffer natural-loops between those two seconds for as long as
-  // press pressure holds. First-press-after-reset separately starts
-  // playback at offset 0 to hear the attack (see render loop).
-  wax: [5, 13],
-  // Thinwax skips the first 2 s of the recording (quiet room-tone
-  // ramp) and loops between t=2 s and end-of-file. 999 sentinel
-  // resolves to buffer.duration inside the sound engine.
-  thinwax: [2, 999],
+  // Wakcom.mp3 with only [6, 8] spliced out at load time. Post-
+  // splice coords for the loop (original loop [9, 13]):
+  //   • original 9 → post-splice 7 (9 − 2)
+  //   • original 13 → post-splice 11 (13 − 2)
+  // `waxStartOffset = 2.4` (pre-splice, unchanged since 2.4 < 6)
+  // starts the attack; playback flows through the excised gap and
+  // settles into the [7, 11] loop for both manual and auto press.
+  wax: [7, 11],
+  // Thinwax.mp3 loops between t=2.5 s and t=7 s. Range acts as
+  // loopStart/loopEnd so playback naturally starts at 2.5 s and
+  // repeats [2.5, 7] for as long as press pressure holds — same
+  // behaviour whether the user is pressing manually or the
+  // auto-press session is running.
+  thinwax: [2.5, 7],
+  // waxLayer reuses the same Thinwax loop region so the parallel
+  // layer under a wax-coating press has the same rhythm as the
+  // primary thinwax channel.
+  waxLayer: [2.5, 7],
   // Popp.mp3 (now on the foil channel) needs no leading trim.
   foil: null,
   // Glaze.mp3 — whole file loops with no trim.
@@ -175,6 +194,7 @@ const NAMED_SAMPLE_RANGES: Record<
   beads: null,
   paper: null,
   plastic: null,
+  plasticLayer: null,
   matte: null,
   // Purty.mp3 is a clean recording that starts audible at t=0 —
   // no trim needed, loops the whole file.
@@ -182,6 +202,7 @@ const NAMED_SAMPLE_RANGES: Record<
   soft: null,
   iceMat: null,
   emoji: null,
+  customBeads: null,
   slimeTap: null
 }
 
@@ -224,7 +245,6 @@ export default function SlimeApp() {
   // up + shrink it to keep the sphere from being covered by the panel.
   const controlsRef = useRef<HTMLDivElement>(null)
   const controlsHeightRef = useRef(0)
-  const { status: handStatus, error: handError, detect } = useHandLandmarker()
   const [cameraStatus, setCameraStatus] = useState<
     'idle' | 'requesting' | 'ready' | 'error'
   >('idle')
@@ -234,13 +254,21 @@ export default function SlimeApp() {
   // no `detect()` calls, no overlay. Touch/pointer input still works
   // (that's the low-power interaction path). Persisted across sessions
   // so a user who prefers touch-only doesn't have to re-toggle each
-  // launch. Default TRUE preserves the original out-of-box hand-
-  // interaction feel; users who want to save battery can turn it off.
+  // launch. Default FALSE — first-launch users see the app run purely
+  // on touch (no camera prompt, no MediaPipe model fetch), avoiding the
+  // "grant camera → model fetch fails → app closes" crash path on the
+  // very first APK open. Hand tracking has to be explicitly opted into
+  // from the panel.
   const [skeletonOn, setSkeletonOn] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return true
+    if (typeof window === 'undefined') return false
     const saved = window.localStorage.getItem('wakbu-hand-tracking')
-    return saved === null ? true : saved === 'true'
+    return saved === null ? false : saved === 'true'
   })
+  // Gate the model fetch on the toggle so the WASM + landmarker download
+  // (~8 MB cold) only happens once the user actually turns hand tracking
+  // on — first-launch users with tracking off get a plain touch-only app
+  // with zero network activity for the hand pipeline.
+  const { status: handStatus, error: handError, detect } = useHandLandmarker(skeletonOn)
   const skeletonOnRef = useRef(skeletonOn)
   useEffect(() => {
     skeletonOnRef.current = skeletonOn
@@ -352,11 +380,6 @@ export default function SlimeApp() {
   // Top-right menu / guide modal — both start closed, guide opens from
   // the menu, menu itself opens on button click and closes on outside tap.
   const [menuOpen, setMenuOpen] = useState(false)
-  // Subscription info modal — opened from the "구독" drawer item.
-  // Shows what a subscription unlocks (unlimited collection, auto-
-  // press extension, 슬라임멍 session library, etc.) while actual
-  // payment integration is still on the roadmap.
-  const [subscribeOpen, setSubscribeOpen] = useState(false)
   // Scrollable unified tag row edge-fade tracking — mirrors the pattern
   // used by PrimaryChipsRow in CustomizePanel: when the row is scrolled
   // all the way to an end, drop the fade on that side so the first /
@@ -422,15 +445,12 @@ export default function SlimeApp() {
   // Header (right-slot camera button). `stickerOn` toggles the button
   // between "add" and "clear" modes.
   const [stickerOn, setStickerOn] = useState(false)
-  // 텍스트 데칼 — user builds a list of up to SLIME_TEXT_SLOT_MAX text
-  // items in the 슬라임 → 텍스트 sub-tab. Each item has its own
-  // content / font / size / colour / face; the shared aboveCoating
-  // flag decides whether the whole group renders BEFORE (buried under
-  // coating tint) or AFTER (crisp on top of coating) the coating
-  // overlay in the fragment shader.
-  const [slimeText, setSlimeText] = useState<SlimeTextGroup>(
-    SLIME_TEXT_GROUP_DEFAULT
-  )
+  // 텍스트 데칼 — ONE text label per slime. Content / colour / size are
+  // the only knobs. The label always sits on the camera-facing
+  // hemisphere; a coating on top auto-lifts the text above so it stays
+  // legible. Colour is pushed to the shader as a uniform so tint
+  // changes never trigger a texture upload.
+  const [slimeText, setSlimeText] = useState<SlimeText>(SLIME_TEXT_DEFAULT)
   // Which slime sub-panel is active (color / material / … / text). Only
   // meaningful when activePanel === 'slime'; used to enable the
   // click-to-pick-cube-face raycast branch in onPointerDown while the
@@ -442,7 +462,9 @@ export default function SlimeApp() {
   // Imperative "jump to category" bridge — CustomizePanel registers
   // its openCategory here so unified-tag-row clicks can navigate
   // straight into the panel that owns the tag.
-  const openCategoryRef = useRef<((id: string | null) => void) | null>(null)
+  const openCategoryRef = useRef<
+    ((id: string | null, subId?: string) => void) | null
+  >(null)
   // Up to 4 photo beads — big chunk-style beads on the slime's front
   // hemisphere with a photo decal on each. Managed as a fixed-length
   // slots array so users can add / remove specific slots without
@@ -653,15 +675,70 @@ export default function SlimeApp() {
   // the session. UI badge (`autoPressOn`) mirrors the ref for the
   // button's active state and gets flipped off from inside the loop
   // when the deadline passes.
-  const AUTO_PRESS_DURATION_MS = 10000
+  // Developer-set fallback default; user can override + persist via
+  // the countdown pill's edit modal (kept in localStorage under
+  // `wakbu-auto-default-ms`).
+  const AUTO_PRESS_DEFAULT_MS = 10000
+  const [autoPressDefaultMs, setAutoPressDefaultMs] = useState<number>(
+    () => {
+      try {
+        const raw = window.localStorage.getItem('wakbu-auto-default-ms')
+        const n = raw ? Number(raw) : NaN
+        if (Number.isFinite(n) && n > 0 && n <= 3600 * 1000) return n
+      } catch {
+        // private mode / storage error — fall through to default.
+      }
+      return AUTO_PRESS_DEFAULT_MS
+    }
+  )
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(
+        'wakbu-auto-default-ms',
+        String(autoPressDefaultMs)
+      )
+    } catch {
+      // ignore
+    }
+  }, [autoPressDefaultMs])
   const [autoPressOn, setAutoPressOn] = useState(false)
   const autoPressStartRef = useRef(0)
   const autoPressEndAtRef = useRef(0)
-  // Thinwax in auto-press mode plays ONCE as a one-shot on the first
-  // synthetic press of the session, then the thinwax loop channel is
-  // muted for the rest of the session so only squish carries the
-  // ambient. Ref latches "already fired"; reset on auto-session start.
-  const autoThinwaxFiredRef = useRef(false)
+  // Top-of-screen countdown pill state — remaining ms is polled from
+  // an interval that also flips `autoPressOn` off once the deadline
+  // lapses (previously handled by a setTimeout keyed to the fixed
+  // duration; now the duration can change mid-session so polling is
+  // simpler than reshuffling timers).
+  const [autoPressRemainingMs, setAutoPressRemainingMs] = useState(0)
+  // Time-edit modal — opens when the user taps the countdown pill.
+  // Local edit values decouple the picker from the live session so
+  // the user can dial without disturbing the running countdown.
+  const [autoTimeOpen, setAutoTimeOpen] = useState(false)
+  const [autoTimeEditMin, setAutoTimeEditMin] = useState(0)
+  const [autoTimeEditSec, setAutoTimeEditSec] = useState(10)
+  const [autoSaveAsDefault, setAutoSaveAsDefault] = useState(false)
+  // Poll the deadline while a session is active: updates the countdown
+  // display each tick and flips `autoPressOn` off the instant the
+  // remaining time hits zero. Interval-based instead of a setTimeout
+  // so mid-session duration edits (via the picker) don't need timer
+  // reshuffling — the next tick just reads the fresh endAt.
+  useEffect(() => {
+    if (!autoPressOn) return
+    const tick = () => {
+      const remaining = autoPressEndAtRef.current - performance.now()
+      if (remaining <= 0) {
+        autoPressEndAtRef.current = 0
+        autoPressNextAtRef.current = Number.POSITIVE_INFINITY
+        setAutoPressRemainingMs(0)
+        setAutoPressOn(false)
+        return
+      }
+      setAutoPressRemainingMs(remaining)
+    }
+    tick()
+    const id = window.setInterval(tick, 200)
+    return () => window.clearInterval(id)
+  }, [autoPressOn])
   // Currently in-flight synthetic presses. Each entry lives out its
   // own duration/envelope independently, so overlapping "flurries" and
   // isolated pokes can coexist. Purged as they finish. Kept as plain
@@ -682,31 +759,13 @@ export default function SlimeApp() {
   // (tight overlap), "normal", and "long pause" bands so the rhythm
   // never settles into a heartbeat cadence.
   const autoPressNextAtRef = useRef(0)
-  // Handle for the deferred badge-off timer so a mid-session cancel
-  // can clear it (otherwise it would still fire post-cancel and set
-  // state to a value it already holds).
-  const autoPressTimeoutRef = useRef<number | null>(null)
   // Refs mirrored from state for the cube-face text raycast branch inside
   // onPointerDown — the pointer handler is installed once at mount and
   // otherwise runs against a stale closure, so we thread every input it
   // needs through refs kept in sync via effects below.
   const activeSlimeSubRef = useRef<string | null>(null)
   const shapeRef = useRef<ShapeId>('sphere')
-  const slimeTextRef = useRef<SlimeTextGroup>(SLIME_TEXT_GROUP_DEFAULT)
-  // Which text item slot is currently being edited (input focused OR
-  // pill tapped). Cube-face raycast writes into items[activeTextItemIdx]
-  // when > -1; -1 means no active edit, so face clicks are ignored.
-  const activeTextItemIdxRef = useRef<number>(-1)
-  // Target quaternion the render loop eases the slime mesh toward when
-  // the user activates a text item on a CUBE shape — so the newly
-  // picked / just-selected face rotates into view. Null when there's
-  // no active auto-rotate. Reset by the render loop once close enough.
-  const slimeAutoRotateTargetRef = useRef<THREE.Quaternion | null>(null)
-  // Whether the 텍스트 input currently has focus (soft keyboard likely
-  // up). Read every render frame to push the slime downward + shrink
-  // it so the sphere fits inside the visible area above the input +
-  // keyboard, instead of getting cropped by the top of the viewport.
-  const textInputFocusedRef = useRef(false)
+  const slimeTextRef = useRef<SlimeText>(SLIME_TEXT_DEFAULT)
   // Auto-exit emoji move mode when the emoji layer becomes empty
   // (user removed all emojis). Prevents an orphan mode where the
   // toggle button disappears but press stays disabled.
@@ -800,20 +859,19 @@ export default function SlimeApp() {
      *  front hemisphere. Pass null to disable and dispose the
      *  underlying texture. */
     setPhotoDecal: (texture: THREE.Texture | null) => void
-    /** Swap the 텍스트 데칼 texture for a single slot (0..slots-1).
+    /** Swap the 텍스트 데칼 texture (single slot per slime).
      *  Axis is managed independently via setTextAxis. */
-    setTextDecal: (slot: number, texture: THREE.Texture | null) => void
-    /** Axis-only text update for a single slot — cheap enough to
-     *  call every render frame for the sphere camera-facing path. */
-    setTextAxis: (
-      slot: number,
-      axisX: number,
-      axisY: number,
-      axisZ: number
-    ) => void
+    setTextDecal: (texture: THREE.Texture | null) => void
+    /** Axis-only text update — cheap enough to call every render
+     *  frame for the sphere camera-facing path. */
+    setTextAxis: (axisX: number, axisY: number, axisZ: number) => void
     /** Toggle whether text draws OVER the coating (crisp on top) or
      *  UNDER it (buried, tinted by translucent coats). */
     setTextAboveCoating: (above: boolean) => void
+    /** Text tint. Canvas ships white alpha mask; the shader tints
+     *  fragments by this colour × canvas alpha, so a colour change is
+     *  a single uniform write with no texture upload. */
+    setTextColor: (hex: number) => void
     /** Whether ANY text slot has an uploaded texture — lets the
      *  render loop skip per-frame axis math when there's nothing
      *  to place. */
@@ -934,23 +992,6 @@ export default function SlimeApp() {
     // non-null and how many active beads exist.
     applyRef.current?.setPhotoBeads(photoBeads)
   }, [photoBeads])
-  // Sphere-shape guard for the text face: sphere can only wear text on
-  // its +Z hemisphere, so any per-item face left behind by a previous
-  // cube session is reset when the user switches back to sphere / rect
-  // / twist. Cube preserves whatever face the user last picked.
-  useEffect(() => {
-    if (shape === 'cube') return
-    setSlimeText((g) => {
-      const needsReset = g.items.some((it) => it.face !== 'front')
-      if (!needsReset) return g
-      return {
-        ...g,
-        items: g.items.map((it) =>
-          it.face === 'front' ? it : { ...it, face: 'front' }
-        )
-      }
-    })
-  }, [shape])
   // Mirror latest state into the pointer-handler-facing refs.
   useEffect(() => {
     activeSlimeSubRef.current = activeSlimeSub
@@ -961,114 +1002,85 @@ export default function SlimeApp() {
   useEffect(() => {
     slimeTextRef.current = slimeText
   }, [slimeText])
-  // Text decal pipeline (multi-slot). Each slot has its own canvas +
-  // reused CanvasTexture kept in a ref array so a fresh render only
-  // touches the slot(s) that changed. Debounced 40 ms per slot to
-  // coalesce slider drags; the per-slot `key` guard skips no-op
-  // rebuilds when unrelated state re-fires the effect. Canvas AND
-  // CanvasTexture reuse (needsUpdate = true) means Three.js re-runs
-  // texImage2D into the SAME GPU handle instead of allocating a new
-  // one — this is the single biggest heat / GC optimisation.
-  const textCanvasRef = useRef<(HTMLCanvasElement | null)[]>(
-    Array(SLIME_TEXT_SLOT_MAX).fill(null)
-  )
-  const textTextureRef = useRef<(THREE.CanvasTexture | null)[]>(
-    Array(SLIME_TEXT_SLOT_MAX).fill(null)
-  )
-  const textKeyRef = useRef<string[]>(
-    Array(SLIME_TEXT_SLOT_MAX).fill('')
-  )
-  // Snapshot of every item's resolved colour hex — used both in the
-  // effect dep list (so unrelated colour-adjust slider drags don't
-  // trigger a text rebuild) AND inside the effect to draw the
-  // per-item fillStyle. Length always === SLIME_TEXT_SLOT_MAX so the
-  // dep list stays stable across item add / remove churn.
-  const textItemColorHexes = Array.from(
-    { length: SLIME_TEXT_SLOT_MAX },
-    (_, i) => {
-      const item = slimeText.items[i]
-      return item
-        ? resolveColorHex(item.color, colorAdjustments)
-        : 0
-    }
-  )
+  // Text decal pipeline — SINGLE text label per slime. The canvas is
+  // redrawn only when content / size changes (the shape of the alpha
+  // mask); colour is a shader uniform pushed separately so tint
+  // changes don't require a texture upload. Debounced 40 ms to
+  // coalesce slider drags. Front-hemisphere placement (camera-facing
+  // for sphere via the render loop's setTextAxis call).
+  const textCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const textTextureRef = useRef<THREE.CanvasTexture | null>(null)
+  const textKeyRef = useRef<string>('')
   useEffect(() => {
+    const trimmed = slimeText.content.trim()
+    const key = `${trimmed}|${slimeText.size}`
     const timer = setTimeout(() => {
-      for (let i = 0; i < SLIME_TEXT_SLOT_MAX; i++) {
-        const item = slimeText.items[i]
-        const content = item?.content.trim() ?? ''
-        const hex = textItemColorHexes[i]
-        const key = item
-          ? `${content}|${item.fontId}|${item.size}|${hex}`
-          : ''
-        if (key === textKeyRef.current[i]) continue
-        textKeyRef.current[i] = key
-        if (!item || !content) {
-          const prev = textTextureRef.current[i]
-          if (prev) {
-            prev.dispose()
-            textTextureRef.current[i] = null
-          }
-          applyRef.current?.setTextDecal(i, null)
-          continue
+      if (key === textKeyRef.current) return
+      textKeyRef.current = key
+      if (!trimmed) {
+        const prev = textTextureRef.current
+        if (prev) {
+          prev.dispose()
+          textTextureRef.current = null
         }
-        // Lazily allocate the per-slot canvas on first non-empty render.
-        if (!textCanvasRef.current[i]) {
-          const c = document.createElement('canvas')
-          c.width = 512
-          c.height = 512
-          textCanvasRef.current[i] = c
-        }
-        const canvas = textCanvasRef.current[i]!
-        const ctx = canvas.getContext('2d')
-        if (!ctx) continue
-        const size = canvas.width
-        const font =
-          SLIME_TEXT_FONTS.find((f) => f.id === item.fontId) ??
-          SLIME_TEXT_FONTS[0]
-        ctx.clearRect(0, 0, size, size)
-        const fontPx = Math.max(32, Math.round(size * 0.32 * item.size))
-        ctx.font = `${font.weight} ${fontPx}px ${font.family}`
-        ctx.textAlign = 'center'
-        ctx.textBaseline = 'middle'
-        ctx.fillStyle = hexToCssColor(hex)
-        // Shrink-to-fit for overflow so long words stay readable.
-        const maxWidth = size * 0.85
-        const measured = ctx.measureText(content).width
-        if (measured > maxWidth) {
-          const scale = maxWidth / measured
-          const shrunk = Math.max(24, Math.round(fontPx * scale))
-          ctx.font = `${font.weight} ${shrunk}px ${font.family}`
-        }
-        ctx.fillText(content, size / 2, size / 2)
-        let tex = textTextureRef.current[i]
-        if (!tex) {
-          tex = new THREE.CanvasTexture(canvas)
-          tex.colorSpace = THREE.SRGBColorSpace
-          tex.anisotropy = 4
-          textTextureRef.current[i] = tex
-        }
-        tex.needsUpdate = true
-        applyRef.current?.setTextDecal(i, tex)
+        applyRef.current?.setTextDecal(null)
+        return
       }
+      if (!textCanvasRef.current) {
+        const c = document.createElement('canvas')
+        c.width = 512
+        c.height = 512
+        textCanvasRef.current = c
+      }
+      const canvas = textCanvasRef.current
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      const size = canvas.width
+      ctx.clearRect(0, 0, size, size)
+      const fontPx = Math.max(32, Math.round(size * 0.32 * slimeText.size))
+      const family =
+        '"Noto Sans KR", "Malgun Gothic", system-ui, sans-serif'
+      ctx.font = `900 ${fontPx}px ${family}`
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'middle'
+      // Canvas ships as a pure-white alpha mask; the shader tints
+      // those alpha pixels by uTextColor at draw time, so colour
+      // changes are one uniform write with no texture upload.
+      ctx.fillStyle = '#ffffff'
+      const maxWidth = size * 0.85
+      const measured = ctx.measureText(trimmed).width
+      if (measured > maxWidth) {
+        const scale = maxWidth / measured
+        const shrunk = Math.max(24, Math.round(fontPx * scale))
+        ctx.font = `900 ${shrunk}px ${family}`
+      }
+      ctx.fillText(trimmed, size / 2, size / 2)
+      const tex = new THREE.CanvasTexture(canvas)
+      tex.colorSpace = THREE.SRGBColorSpace
+      tex.anisotropy = 4
+      tex.needsUpdate = true
+      textTextureRef.current = tex
+      applyRef.current?.setTextDecal(tex)
     }, 40)
     return () => clearTimeout(timer)
-  }, [slimeText.items, ...textItemColorHexes])
-  // aboveCoating flag — cheap uniform write, no texture work.
+  }, [slimeText.content, slimeText.size])
+  // Colour push — no debounce. Fires on every render so a colour chip
+  // click always reaches the shader on the same tick, regardless of
+  // whether the deps-array reconciler catches the change (a previous
+  // deps-array approach silently failed on the Android WebView bundle).
   useEffect(() => {
-    applyRef.current?.setTextAboveCoating(slimeText.aboveCoating)
-  }, [slimeText.aboveCoating])
-  // Axis-only update — face changes for cube slime should not force a
-  // canvas rebuild (texture pixels unchanged). Push each item's face
-  // to its shader slot; sphere shape overrides these every render
-  // frame with the current camera-facing local direction.
+    const hex = resolveColorHex(slimeText.color, colorAdjustments)
+    applyRef.current?.setTextColor(hex)
+  })
+  // aboveCoating — auto-lift text above any active coating so the
+  // letters stay legible instead of getting buried under wax / foil /
+  // ice / tube. On plain (uncoated) slime the flag stays off so the
+  // text mixes into the material at the pre-coating stage.
   useEffect(() => {
-    for (let i = 0; i < SLIME_TEXT_SLOT_MAX; i++) {
-      const item = slimeText.items[i]
-      const [ax, ay, az] = slimeTextFaceAxis(item?.face ?? 'front')
-      applyRef.current?.setTextAxis(i, ax, ay, az)
-    }
-  }, [slimeText.items])
+    const hasText = slimeText.content.trim().length > 0
+    const coatingActive = coating !== 'none'
+    applyRef.current?.setTextAboveCoating(coatingActive && hasText)
+  }, [slimeText.content, coating])
   // Emoji visibility — two independent knobs:
   //  • Ghost pass (dim fill-in through opaque geometry) is on for CRYSTAL
   //    slime only, so the buried portion of an emoji reads faintly through
@@ -1184,7 +1196,7 @@ export default function SlimeApp() {
     setSprinkles(SPRINKLES_DEFAULT)
     setEmojiBeads(EMOJI_BEADS_DEFAULT)
     setCrunchOn(false)
-    setSlimeText(SLIME_TEXT_GROUP_DEFAULT)
+    setSlimeText(SLIME_TEXT_DEFAULT)
     // Wipe every hue / lightness tune so the adjust sliders re-open
     // at zero if the user tunes a colour again after resetting.
     setColorAdjustments({})
@@ -1215,7 +1227,8 @@ export default function SlimeApp() {
     is: innerSlime,
     cb: customBeads,
     cr: crunchOn,
-    tx: slimeText
+    tx: slimeText,
+    ca: colorAdjustments
   })
 
   // Apply a decoded snapshot to the live customisation. Missing /
@@ -1295,41 +1308,37 @@ export default function SlimeApp() {
     if (s.cb && typeof s.cb === 'object')
       setCustomBeads(s.cb as CustomBeadsConfig)
     if (typeof s.cr === 'boolean') setCrunchOn(s.cr)
-    // Text decal — legacy snapshots predate the multi-slot refactor,
-    // so we accept either:
-    //   • new shape: `{ items: [...], aboveCoating: bool }`
-    //   • old single-item shape: `{ content, fontId, size, color, face,
-    //     aboveCoating? }` → coerce into a 1-item group so an existing
-    //     saved slime still shows its old text after upgrade.
+    // Text decal — single item per slime. Legacy snapshots may carry
+    // either the multi-slot `{ items: [...] }` shape or the older
+    // per-item `{ content, fontId, size, color, face, aboveCoating }`
+    // shape; both are coerced into the current SlimeText fields.
     if (s.tx && typeof s.tx === 'object') {
       const raw = s.tx as Record<string, unknown>
-      if (Array.isArray(raw.items)) {
-        setSlimeText({
-          items: (raw.items as Partial<SlimeTextItem>[])
-            .slice(0, SLIME_TEXT_SLOT_MAX)
-            .map((it) => ({
-              ...SLIME_TEXT_ITEM_DEFAULT,
-              ...it,
-              content:
-                typeof it.content === 'string' ? it.content : ''
-            })),
-          aboveCoating: raw.aboveCoating === true
-        })
+      let content = ''
+      let color: ColorId = SLIME_TEXT_DEFAULT.color
+      let size = SLIME_TEXT_DEFAULT.size
+      if (Array.isArray(raw.items) && raw.items.length > 0) {
+        const first = raw.items[0] as Record<string, unknown>
+        content = typeof first.content === 'string' ? first.content : ''
+        color = (first.color as ColorId) ?? color
+        size = typeof first.size === 'number' ? first.size : size
       } else if (typeof raw.content === 'string') {
-        const item: SlimeTextItem = {
-          ...SLIME_TEXT_ITEM_DEFAULT,
-          ...(raw as Partial<SlimeTextItem>),
-          content: raw.content
-        }
-        setSlimeText({
-          items: item.content.trim() ? [item] : [],
-          aboveCoating: raw.aboveCoating === true
-        })
-      } else {
-        setSlimeText(SLIME_TEXT_GROUP_DEFAULT)
+        content = raw.content
+        color = (raw.color as ColorId) ?? color
+        size = typeof raw.size === 'number' ? raw.size : size
       }
+      setSlimeText({ content, color, size })
     } else {
-      setSlimeText(SLIME_TEXT_GROUP_DEFAULT)
+      setSlimeText(SLIME_TEXT_DEFAULT)
+    }
+    // Hue/lightness slider tweaks live outside the colour list itself,
+    // so a snapshot without `ca` predates this field — reset to {} in
+    // that case so an older save doesn't inherit the current session's
+    // adjustments and shift the loaded slime's colours.
+    if (s.ca && typeof s.ca === 'object') {
+      setColorAdjustments(s.ca as ColorAdjustments)
+    } else {
+      setColorAdjustments({})
     }
   }
 
@@ -1516,7 +1525,7 @@ export default function SlimeApp() {
     if (!entry) return
     const url = encodeShareUrlFromState(entry.state)
     const payload = {
-      title: '왁부 슬라임',
+      title: 'soundslime',
       text: `${entry.name} 만들어봤어!`,
       url
     }
@@ -1577,7 +1586,7 @@ export default function SlimeApp() {
   const handleShare = async () => {
     const url = encodeShareUrl()
     const payload = {
-      title: '왁부 슬라임',
+      title: 'soundslime',
       text: '내가 만든 슬라임 놀아봐!',
       url
     }
@@ -1628,7 +1637,14 @@ export default function SlimeApp() {
   useEffect(() => {
     const engine = soundRef.current
     void engine?.loadSquishSamples(SQUISH_SAMPLE_URLS)
-    void engine?.loadNamedSample('wax', NAMED_SAMPLE_URLS.wax)
+    // Wakcom.mp3 has a dead middle section [6, 8] we don't want
+    // audible — pass it as `skipRanges` so the loader hands the
+    // engine a spliced buffer. Loop range + start offset above are
+    // expressed in POST-SPLICE seconds.
+    void engine?.loadNamedSample('wax', NAMED_SAMPLE_URLS.wax, [
+      [6, 8]
+    ])
+    void engine?.loadNamedSample('waxLayer', NAMED_SAMPLE_URLS.waxLayer)
     void engine?.loadNamedSample('thinwax', NAMED_SAMPLE_URLS.thinwax)
     void engine?.loadNamedSample('foil', NAMED_SAMPLE_URLS.foil)
     void engine?.loadNamedSample('ice', NAMED_SAMPLE_URLS.ice)
@@ -1636,25 +1652,46 @@ export default function SlimeApp() {
     void engine?.loadNamedSample('beads', NAMED_SAMPLE_URLS.beads)
     void engine?.loadNamedSample('paper', NAMED_SAMPLE_URLS.paper)
     void engine?.loadNamedSample('plastic', NAMED_SAMPLE_URLS.plastic)
+    void engine?.loadNamedSample(
+      'plasticLayer',
+      NAMED_SAMPLE_URLS.plasticLayer
+    )
     void engine?.loadNamedSample('matte', NAMED_SAMPLE_URLS.matte)
     void engine?.loadNamedSample('metal', NAMED_SAMPLE_URLS.metal)
     void engine?.loadNamedSample('soft', NAMED_SAMPLE_URLS.soft)
     void engine?.loadNamedSample('iceMat', NAMED_SAMPLE_URLS.iceMat)
-    void engine?.loadNamedSample('emoji', NAMED_SAMPLE_URLS.emoji)
+    // Imoji.mp3 has a dead middle section [4, 5] to splice out —
+    // apply the same skip to the customBeads channel that reuses
+    // the same file.
+    void engine?.loadNamedSample('emoji', NAMED_SAMPLE_URLS.emoji, [
+      [4, 5]
+    ])
+    void engine?.loadNamedSample('customBeads', NAMED_SAMPLE_URLS.customBeads, [
+      [4, 5]
+    ])
     void engine?.loadNamedSample('slimeTap', NAMED_SAMPLE_URLS.slimeTap)
     engine?.setNamedSampleRange('wax', NAMED_SAMPLE_RANGES.wax)
     engine?.setNamedSampleRange('thinwax', NAMED_SAMPLE_RANGES.thinwax)
+    engine?.setNamedSampleRange('waxLayer', NAMED_SAMPLE_RANGES.waxLayer)
     engine?.setNamedSampleRange('foil', NAMED_SAMPLE_RANGES.foil)
     engine?.setNamedSampleRange('ice', NAMED_SAMPLE_RANGES.ice)
     engine?.setNamedSampleRange('tube', NAMED_SAMPLE_RANGES.tube)
     engine?.setNamedSampleRange('beads', NAMED_SAMPLE_RANGES.beads)
     engine?.setNamedSampleRange('paper', NAMED_SAMPLE_RANGES.paper)
     engine?.setNamedSampleRange('plastic', NAMED_SAMPLE_RANGES.plastic)
+    engine?.setNamedSampleRange(
+      'plasticLayer',
+      NAMED_SAMPLE_RANGES.plasticLayer
+    )
     engine?.setNamedSampleRange('matte', NAMED_SAMPLE_RANGES.matte)
     engine?.setNamedSampleRange('metal', NAMED_SAMPLE_RANGES.metal)
     engine?.setNamedSampleRange('soft', NAMED_SAMPLE_RANGES.soft)
     engine?.setNamedSampleRange('iceMat', NAMED_SAMPLE_RANGES.iceMat)
     engine?.setNamedSampleRange('emoji', NAMED_SAMPLE_RANGES.emoji)
+    engine?.setNamedSampleRange(
+      'customBeads',
+      NAMED_SAMPLE_RANGES.customBeads
+    )
     engine?.setNamedSampleRange('slimeTap', NAMED_SAMPLE_RANGES.slimeTap)
     // Softy.mp3 recorded quietly — boost the soft channel above the
     // 0..1 intensity ceiling so it reads at a comparable level to the
@@ -1667,6 +1704,33 @@ export default function SlimeApp() {
     // Foil.mp3 (박지 coating) also recorded low — boost so the crack
     // sits at a comparable level to the other coating loops.
     engine?.setLoopingSampleGain('foil', 4.0)
+    // Waxwax.mp3 (왁스 코팅, 어택+서스테인 통합 파일) — 다른 코팅
+    // 채널과 균형 맞추기 위해 부스트.
+    engine?.setLoopingSampleGain('wax', 3.0)
+    // Thinwax.mp3 (씬왁스 코팅 loop) — 녹음 자체가 조용해서 다른
+    // 코팅 채널과 균형 맞추려면 큰 부스트 필요.
+    engine?.setLoopingSampleGain('thinwax', 6.0)
+    // waxLayer도 같은 Thinwax.mp3를 씀 — 왁스 위에 얹히는 레이어라
+    // primary thinwax보다 조금 낮게 부스트해서 위압하지 않도록.
+    engine?.setLoopingSampleGain('waxLayer', 4.0)
+    // Crisp.mp3 (글레이즈 ice 코팅) — 다른 코팅 채널 대비 조용해서
+    // 균형 맞추기 위해 부스트.
+    engine?.setLoopingSampleGain('ice', 3.0)
+    // Papers.mp3 (폼/matte 재질) — 다른 재질 채널과 균형 맞추기
+    // 위해 부스트.
+    engine?.setLoopingSampleGain('matte', 3.0)
+    // Glaze.mp3 (퍼티/metal 재질) — 같이 부스트.
+    engine?.setLoopingSampleGain('metal', 3.0)
+    // Imoji.mp3 (이모지) — 이모지 press 시 슬라임 base가 dim되므로
+    // 그만큼 emoji가 acoustic foreground를 확실히 잡도록 부스트.
+    engine?.setLoopingSampleGain('emoji', 3.0)
+    // 추가비즈 (같은 Imoji.mp3 재사용) — 요청 gain 3.0.
+    engine?.setLoopingSampleGain('customBeads', 3.0)
+    // 스팽글 플라스틱 (Sharpstar.mp3) 부스트.
+    engine?.setLoopingSampleGain('plastic', 3.0)
+    // 플라스틱 위 병렬 Crunchier.mp3 레이어 — primary보다 낮게 잡아
+    // 배경으로 깔림.
+    engine?.setLoopingSampleGain('plasticLayer', 2.0)
     return () => {
       engine?.dispose()
     }
@@ -1745,6 +1809,13 @@ export default function SlimeApp() {
     emojiActiveRef.current =
       emojiBeads.emojis.length > 0 && emojiBeads.count > 0
   }, [emojiBeads])
+  // 추가비즈 (custom-beads) activity — mirror React state so the
+  // render loop can drive its own ambient loop when the user presses
+  // a slime carrying custom beads. Active whenever count > 0.
+  const customBeadsActiveRef = useRef<boolean>(false)
+  useEffect(() => {
+    customBeadsActiveRef.current = customBeads.count > 0
+  }, [customBeads])
   // Paper sprinkle activity — mirror React state to a ref so the render
   // loop can drive its sound scheduler each frame. Only fires while
   // paper is in FILL mode; scattered paper pieces are silent because
@@ -2171,16 +2242,21 @@ export default function SlimeApp() {
         // so ink counts past 400 push amount ABOVE 1.0, widening the ink
         // area in the shader progressively.
         if (v.ink.count > 0) {
-          const primaryColorHex =
-            SPRINKLE_COLORS.find((c) => c.id === v.ink.colors[0])?.hex ??
-            0xffffff
+          // Map every picked colour id → hex so setInk can build a
+          // multi-colour LUT. Single-colour ink still flat-tints;
+          // 2+ colours paint distinct hues across the marble ribbon.
+          const hexes = v.ink.colors
+            .map(
+              (cid) =>
+                SPRINKLE_COLORS.find((c) => c.id === cid)?.hex ?? 0xffffff
+            )
           const amount = Math.max(
             0,
             v.ink.count / SPRINKLES_LIMITS.inkAmountDivisor
           )
-          slime.setInk(primaryColorHex, amount)
+          slime.setInk(hexes.length > 0 ? hexes : [0xffffff], amount)
         } else {
-          slime.setInk(0xffffff, 0)
+          slime.setInk([0xffffff], 0)
         }
         // 슬라임 안 — same treatment as compact beads: shrink the spangle
         // group toward the slime origin so the pieces read as embedded.
@@ -2218,9 +2294,9 @@ export default function SlimeApp() {
         powderLayer.setColorAdjustments(adj)
       },
       setPhotoDecal: (texture) => slime.setPhotoDecal(texture),
-      setTextDecal: (slot, texture) => slime.setTextDecal(slot, texture),
-      setTextAxis: (slot, ax, ay, az) =>
-        slime.setTextAxis(slot, ax, ay, az),
+      setTextDecal: (texture) => slime.setTextDecal(texture),
+      setTextColor: (hex) => slime.setTextColor(hex),
+      setTextAxis: (ax, ay, az) => slime.setTextAxis(ax, ay, az),
       setTextAboveCoating: (above) => slime.setTextAboveCoating(above),
       hasTextDecal: () => slime.hasTextDecal(),
       setPhotoBeads: (textures) => beadsLayer.setPhotos(textures),
@@ -2311,6 +2387,13 @@ export default function SlimeApp() {
         const savedQuat = slime.mesh.quaternion.clone()
         const savedPos = slime.mesh.position.clone()
         const stateSnap = slime.snapshotMutableState()
+        // 슬라임볼 dents live in the render-loop closure, not on the
+        // BeadsLayer instance — snapshot & restore them locally so the
+        // capture renders a round ball while the user's actual dents
+        // survive after the shot. Same for the bulge accumulator.
+        const savedBallDentDirs = ballDentDirs.map((v) => v.clone())
+        const savedBallDentStrengths = new Float32Array(ballDentStrengths)
+        const savedBallBulgeTime = ballBulgeTime
         // Hide the environment-tint background sphere for the capture
         // frame so the thumbnail is a true slime cutout on transparent
         // pixels — otherwise the sphere fills every non-slime pixel
@@ -2370,6 +2453,49 @@ export default function SlimeApp() {
         // Undeformed rest shape — no crack, no squish — so the
         // saved thumbnail reads as the finished slime configuration.
         slime.reset()
+        // Clear the buried-ball dents + bulge so a 슬라임볼 renders
+        // round in the thumbnail (user press state is restored in
+        // finally). Bead layers cache their instance matrices from
+        // the LAST update() call — slime.reset() alone leaves them at
+        // their pressed positions.
+        clearBallDents()
+        // Fully re-seat every bead / sprinkle layer against the reset
+        // slime so 꽉비즈 (fill-mode + grid-mode compact beads) and
+        // sprinkles snap to their pre-press layout, then run update()
+        // with restPositionArray to guarantee bead matrices are baked
+        // from rest coords — plain update(positionArray) alone left
+        // some fill/grid caches carrying deformed anchors from the
+        // last live frame.
+        beadsLayer.reseat(
+          slime.unitDirsArray,
+          slime.restPositionArray,
+          slime.shape
+        )
+        innerBeadsLayer.reseat(
+          slime.unitDirsArray,
+          slime.restPositionArray,
+          slime.shape
+        )
+        paperLayer.reseat(
+          slime.unitDirsArray,
+          slime.restPositionArray,
+          slime.indexArray,
+          currentBeadInfo()
+        )
+        powderLayer.reseat(
+          slime.unitDirsArray,
+          slime.restPositionArray,
+          slime.indexArray,
+          currentBeadInfo()
+        )
+        emojiBeadsLayer.reseat(slime.unitDirsArray)
+        customBeadsLayer.reseat(slime.unitDirsArray)
+        beadsLayer.update(slime.restPositionArray, 0, null)
+        innerBeadsLayer.update(slime.restPositionArray, 0, null)
+        paperLayer.update(slime.restPositionArray, slime.normalArray)
+        powderLayer.update(slime.restPositionArray, slime.normalArray)
+        emojiBeadsLayer.update(slime.restPositionArray, slime.restPositionArray)
+        customBeadsLayer.update(slime.restPositionArray)
         try {
           renderer.render(scene, camera)
           const src = canvas
@@ -2409,6 +2535,33 @@ export default function SlimeApp() {
           slime.mesh.position.copy(savedPos)
           slime.restoreMutableState(stateSnap)
           bg.visible = savedBgVisible
+          // Restore the buried-ball dent + bulge state we cleared for
+          // the capture so the live view keeps whatever the user was
+          // pressing. Push everything back to the shader uniforms in
+          // one shot; the RAF loop will keep re-pushing on subsequent
+          // frames anyway, but this keeps the immediate render below
+          // consistent instead of flashing a round ball for one frame.
+          for (let i = 0; i < ballDentCap; i++) {
+            ballDentDirs[i].copy(savedBallDentDirs[i])
+            ballDentStrengths[i] = savedBallDentStrengths[i]
+          }
+          ballBulgeTime = savedBallBulgeTime
+          pushBallDentsToShader()
+          let _anyDent = 0
+          for (let i = 0; i < ballDentCap; i++) {
+            if (ballDentStrengths[i] > _anyDent) _anyDent = ballDentStrengths[i]
+          }
+          innerBeadsLayer.setBallDentEnabled(_anyDent > 0)
+          innerBeadsLayer.setBallBulgeAmount(ballBulgeTime)
+          // Re-seat bead / sprinkle layers to the restored slime
+          // positions so they resume tracking whatever squish the
+          // user is holding, rather than staying frozen at rest.
+          beadsLayer.update(slime.positionArray, 0, null)
+          innerBeadsLayer.update(slime.positionArray, 0, null)
+          paperLayer.update(slime.positionArray, slime.normalArray)
+          powderLayer.update(slime.positionArray, slime.normalArray)
+          emojiBeadsLayer.update(slime.positionArray, slime.restPositionArray)
+          customBeadsLayer.update(slime.positionArray)
           // Render again with restored transform so the next frame
           // draws from the correct state (the RAF loop would do this
           // anyway but a manual render keeps the display seamless).
@@ -2421,6 +2574,12 @@ export default function SlimeApp() {
     // wraps briefly render with hardcoded defaults until the user changes
     // a slime setting.
     syncBeadWrap()
+    // Prime text tint from current state so first frame renders the
+    // correct colour before React fires its re-render for the
+    // always-on `setTextColor` effect above.
+    slime.setTextColor(
+      resolveColorHex(slimeTextRef.current.color, colorAdjustments)
+    )
 
     function currentBeadInfo() {
       const cfg = beadsLayer.currentConfig
@@ -2431,7 +2590,12 @@ export default function SlimeApp() {
         slime.restPositionArray
       )
       if (positions.length === 0) return null
-      return { positions, size: cfg.size }
+      // Ship per-bead outer radii so sprinkles / powder attach to the
+      // ACTUAL bead silhouette on non-sphere shapes (torus / star /
+      // cube) — otherwise the ray-sphere approximation returns a
+      // contact inside the visible envelope and sprinkles float free.
+      const radii = beadsLayer.getBeadShapeRadii()
+      return { positions, size: cfg.size, radii }
     }
 
     const overlay = overlayRef.current
@@ -2528,11 +2692,6 @@ export default function SlimeApp() {
     const raycaster = new THREE.Raycaster()
     const _ndc = new THREE.Vector2()
     const _worldPos = new THREE.Vector3()
-    // Scratch objects reused every frame by the sphere-shape text
-    // camera-facing update — avoids GC pressure from per-frame Vector3
-    // and Quaternion allocations inside the render loop.
-    const _textAxisScratch = new THREE.Vector3()
-    const _textQuatScratch = new THREE.Quaternion()
     const _closest = new THREE.Vector3()
     const _center = new THREE.Vector3()
     const _restSphere = new THREE.Sphere()
@@ -2548,14 +2707,6 @@ export default function SlimeApp() {
     // overlap with the panel below without a hard jump.
     let currentPanelShiftY = 0
     let currentPanelScale = 1
-    // Eased text-input-focus channel — used to slide the sphere down
-    // + shrink it smoothly when the 텍스트 input takes focus (soft
-    // keyboard likely up) so the sphere stays visible above the
-    // keyboard instead of getting cropped at the viewport top. Snaps
-    // back to 0 / 1 on blur with the same ease so the transition
-    // feels intentional rather than teleporting.
-    let currentTextFocusDown = 0
-    let currentTextFocusScale = 1
 
     // Emoji-selection state. Clicking an emoji SELECTS it (blue glow on
     // + drag mode active); clicking the same emoji AGAIN deselects it.
@@ -2703,47 +2854,6 @@ export default function SlimeApp() {
             dragPointerId = e.pointerId
             return
           }
-        }
-      }
-      // Cube-face text placement. When the slime → 텍스트 sub-tab is
-      // open AND the shape is 'cube', taps on the slime pick a face for
-      // the text decal instead of counting as a press. We take the hit
-      // point's LARGEST absolute-value local axis and its sign as the
-      // face — matches how the cube shape morph normalises rest
-      // positions (see shapeTransform 'cube' branch), so hits near a
-      // face centre map cleanly to that face id.
-      if (
-        activeSlimeSubRef.current === 'text' &&
-        shapeRef.current === 'cube' &&
-        activePointers.size === 0 &&
-        pointerToNDC(e)
-      ) {
-        raycaster.setFromCamera(ndc, camera)
-        const hits = raycaster.intersectObject(slime.mesh, false)
-        if (hits.length > 0) {
-          slime.mesh.worldToLocal(localHit.copy(hits[0].point))
-          const ax = Math.abs(localHit.x)
-          const ay = Math.abs(localHit.y)
-          const az = Math.abs(localHit.z)
-          let face: SlimeTextFace
-          if (ax >= ay && ax >= az) {
-            face = localHit.x >= 0 ? '+x' : '-x'
-          } else if (ay >= ax && ay >= az) {
-            face = localHit.y >= 0 ? '+y' : '-y'
-          } else {
-            face = localHit.z >= 0 ? '+z' : '-z'
-          }
-          const idx = activeTextItemIdxRef.current
-          const cur = slimeTextRef.current.items[idx]
-          if (idx >= 0 && cur && face !== cur.face) {
-            setSlimeText({
-              ...slimeTextRef.current,
-              items: slimeTextRef.current.items.map((it, i) =>
-                i === idx ? { ...it, face } : it
-              )
-            })
-          }
-          return
         }
       }
       activePointers.set(e.pointerId, {
@@ -3021,14 +3131,17 @@ export default function SlimeApp() {
       s.setLoopingSampleLevel('soft', 0)
       s.setLoopingSampleLevel('iceMat', 0)
       s.setLoopingSampleLevel('wax', 0)
+      s.setLoopingSampleLevel('waxLayer', 0)
       s.setLoopingSampleLevel('thinwax', 0)
       s.setLoopingSampleLevel('foil', 0)
       s.setLoopingSampleLevel('ice', 0)
       s.setLoopingSampleLevel('tube', 0)
       s.setLoopingSampleLevel('paper', 0)
       s.setLoopingSampleLevel('plastic', 0)
+      s.setLoopingSampleLevel('plasticLayer', 0)
       s.setLoopingSampleLevel('beads', 0)
       s.setLoopingSampleLevel('emoji', 0)
+      s.setLoopingSampleLevel('customBeads', 0)
       s.setLoopingSampleLevel('slimeTap', 0)
     }
     const handleHide = () => {
@@ -3804,10 +3917,17 @@ export default function SlimeApp() {
         // ambient (Sprinkle / Popp / Softslime / Smoothie / Iced) is
         // the sole slime-body sound in those states rather than
         // doubling with Slime.mp3 + Slimetapping.mp3.
+        // When either emoji or 추가비즈 stickers are on the slime,
+        // that channel takes the acoustic foreground — dim the slime
+        // body sound to 30 % so Imoji.mp3 can breathe on top without
+        // needing to shout.
+        const emojiOrCustomActive =
+          emojiActiveRef.current || customBeadsActiveRef.current
+        const emojiAtten = emojiOrCustomActive ? 0.3 : 1.0
         const slimeBaseLevel =
           isMatte || isMetal || isSoft || isIceMat || iceCoatingActive
             ? 0
-            : soundLevel * materialAtten
+            : soundLevel * materialAtten * emojiAtten
         sound.setSquishLevel(slimeBaseLevel)
         sound.setLoopingSampleLevel('slimeTap', slimeBaseLevel)
         // Union outer-slime + ball material sounds so a matte ball inside
@@ -3938,13 +4058,23 @@ export default function SlimeApp() {
           beadWaxLevel,
           innerWaxLevel
         )
-        const waxStartOffset = waxAttackPendingRef.current ? 0 : undefined
+        // Wakcom.mp3 has a quiet lead-in in [0, ~2.4] — start the
+        // attack at t=2.4 so the audible crack lands the moment the
+        // user presses instead of a beat later. (Same value pre- and
+        // post-splice since the excised [6, 8] region is past this
+        // offset.)
+        const waxStartOffset = waxAttackPendingRef.current ? 2.4 : undefined
         sound.setLoopingSampleLevel(
           'wax',
           waxCombined,
           0.008,
           waxStartOffset
         )
+        // Parallel Thinwax.mp3 layer stacked on top of the wax loop —
+        // driven by the same combined wax level so it fades in / out
+        // with the primary channel and disappears entirely when the
+        // wax coating isn't active.
+        sound.setLoopingSampleLevel('waxLayer', waxCombined)
         if (waxCombined > 0.02 && waxAttackPendingRef.current) {
           waxAttackPendingRef.current = false
         }
@@ -3968,31 +4098,16 @@ export default function SlimeApp() {
           'ice',
           Math.max(slimeIceLevel, beadIceLevel, innerIceLevel)
         )
-        // 씬왁스 라우팅:
-        //   • 수동 모드 → Thinwax0.mp3 전체 파일 loop, press 압력을
-        //     따라 gain 변조. 손 뗄 때 fade out.
-        //   • 자동 모드 → 세션 첫 synthetic press에 one-shot 1회만
-        //     재생하고 이후 loop 채널은 무음(0) 강제. 그 뒤로는
-        //     기본 squish 사운드만 남음. `autoThinwaxFiredRef`가
-        //     "이번 세션에 이미 쳤음" 래치.
-        const thinwaxCombined = Math.max(
-          slimeThinWaxLevel,
-          beadThinWaxLevel,
-          innerThinWaxLevel
+        // 씬왁스 — Thinwax.mp3의 [3, 7] 구간 loop. 수동/자동 모두
+        // 동일하게 press 압력을 gain으로 매핑, 손 뗄 때 fade out.
+        sound.setLoopingSampleLevel(
+          'thinwax',
+          Math.max(
+            slimeThinWaxLevel,
+            beadThinWaxLevel,
+            innerThinWaxLevel
+          )
         )
-        const autoSessionActive = autoPressEndAtRef.current > now
-        if (autoSessionActive) {
-          if (
-            !autoThinwaxFiredRef.current &&
-            thinwaxCombined > 0.02
-          ) {
-            sound.playNamedSampleFull('thinwax', thinwaxCombined)
-            autoThinwaxFiredRef.current = true
-          }
-          sound.setLoopingSampleLevel('thinwax', 0)
-        } else {
-          sound.setLoopingSampleLevel('thinwax', thinwaxCombined)
-        }
 
         // Paper / beads sounds are CONTINUOUS ambient recordings
         // ("치이이이익" style), so they use setLoopingSampleLevel — a
@@ -4008,6 +4123,12 @@ export default function SlimeApp() {
           'plastic',
           plasticActiveRef.current ? soundLevel : 0
         )
+        // Parallel Crunchier.mp3 layer under the plastic tick — same
+        // gate + level as the primary plastic channel.
+        sound.setLoopingSampleLevel(
+          'plasticLayer',
+          plasticActiveRef.current ? soundLevel : 0
+        )
         sound.setLoopingSampleLevel(
           'beads',
           beadsActiveRef.current ? soundLevel : 0
@@ -4015,6 +4136,10 @@ export default function SlimeApp() {
         sound.setLoopingSampleLevel(
           'emoji',
           emojiActiveRef.current ? soundLevel : 0
+        )
+        sound.setLoopingSampleLevel(
+          'customBeads',
+          customBeadsActiveRef.current ? soundLevel : 0
         )
       }
 
@@ -4038,25 +4163,6 @@ export default function SlimeApp() {
       }
       rotVelY *= 0.88
       rotVelX *= 0.88
-      // Auto-rotate override — when the user picks / activates a text
-      // item on a cube slime, ease the mesh toward the target quat so
-      // the face carrying that text swings into view. Kills any drag
-      // inertia so the auto-rotate arrives clean instead of fighting
-      // a still-decaying spin. Clears the target once close enough
-      // (dot product > 0.9995 ≈ 1.8° apart) so subsequent user drags
-      // aren't hijacked.
-      if (slimeAutoRotateTargetRef.current) {
-        slime.mesh.quaternion.slerp(
-          slimeAutoRotateTargetRef.current,
-          0.18
-        )
-        rotVelX = 0
-        rotVelY = 0
-        const dot = Math.abs(
-          slime.mesh.quaternion.dot(slimeAutoRotateTargetRef.current)
-        )
-        if (dot > 0.9995) slimeAutoRotateTargetRef.current = null
-      }
 
       // Browse-mode auto-spin — every time the user switches to a
       // different saved slime, spin one full turn around world-Y
@@ -4116,45 +4222,14 @@ export default function SlimeApp() {
         : 1 - frac * 0.22
       currentPanelShiftY += (targetShiftY - currentPanelShiftY) * 0.15
       currentPanelScale += (targetPanelScale - currentPanelScale) * 0.15
-      // Text-input focus (soft keyboard likely up) — the panel-collapse
-      // path takes controlsHeightRef to ~0 so targetShiftY is 0, but
-      // that alone leaves the sphere at world y=0 which visually sits
-      // above the centre of the shrunk viewport. Push the sphere DOWN
-      // and shrink it a bit so the whole silhouette stays inside the
-      // visible area above the keyboard. Values tuned for the typical
-      // Android keyboard height (~45 % of screen); the eased channel
-      // (currentTextFocusDown / currentTextFocusScale) keeps the
-      // transition smooth instead of snapping on focus.
-      const targetTextFocusDown = textInputFocusedRef.current ? -0.55 : 0
-      const targetTextFocusScale = textInputFocusedRef.current ? 0.72 : 1
-      currentTextFocusDown +=
-        (targetTextFocusDown - currentTextFocusDown) * 0.18
-      currentTextFocusScale +=
-        (targetTextFocusScale - currentTextFocusScale) * 0.18
-      slime.mesh.position.y = currentPanelShiftY + currentTextFocusDown
+      slime.mesh.position.y = currentPanelShiftY
 
-      // Sphere text: keep every active decal slot glued to whichever
-      // side of the ball currently faces the camera. Sphere has no
-      // meaningful "front" face, so fixed local +Z axes would ride
-      // around with drag rotations and appear to sink under the
-      // visible silhouette. Cube keeps the user-picked face id per
-      // slot since those shapes DO have real faces.
-      if (
-        shapeRef.current === 'sphere' &&
-        applyRef.current?.hasTextDecal()
-      ) {
-        _textQuatScratch.copy(slime.mesh.quaternion).invert()
-        _textAxisScratch.set(0, 0, 1).applyQuaternion(_textQuatScratch)
-        const slots = slimeTextRef.current.items.length
-        for (let i = 0; i < slots; i++) {
-          applyRef.current.setTextAxis(
-            i,
-            _textAxisScratch.x,
-            _textAxisScratch.y,
-            _textAxisScratch.z
-          )
-        }
-      }
+      // Text decal is baked to a FIXED slime-local axis (+Z at the
+      // moment of application) — no per-frame camera-facing update.
+      // Rotating the slime carries the text around with the mesh,
+      // eventually to the back, matching a physical sticker on the
+      // ball's surface. The axis is initialised to (0,0,1) in the
+      // uniform declaration; nothing to push here per frame.
       // Browse mode gets a modest extra scale boost so the previewed
       // slime reads slightly larger — the customization panel is
       // hidden, so the extra room can be filled by the slime itself.
@@ -4169,11 +4244,7 @@ export default function SlimeApp() {
         spinShrink = 1 + 0.35 * Math.max(0, Math.min(1, t))
       }
       slime.mesh.scale.setScalar(
-        currentScale *
-          currentPanelScale *
-          browseScale *
-          spinShrink *
-          currentTextFocusScale
+        currentScale * currentPanelScale * browseScale * spinShrink
       )
 
       // Carousel slide — offset mesh.position.x during the browse
@@ -4436,45 +4507,7 @@ export default function SlimeApp() {
               </button>
             </div>
             <nav className={styles.drawerNav} role="menu">
-              <button
-                type="button"
-                className={styles.drawerItem}
-                role="menuitem"
-                onClick={() => {
-                  setMenuOpen(false)
-                  setToast('사용자 · 준비 중')
-                  window.setTimeout(() => setToast(null), 1500)
-                }}
-              >
-                사용자
-              </button>
-              <button
-                type="button"
-                className={styles.drawerItem}
-                role="menuitem"
-                onClick={() => {
-                  setMenuOpen(false)
-                  setSubscribeOpen(true)
-                }}
-              >
-                구독
-              </button>
-              <button
-                type="button"
-                className={styles.drawerItem}
-                role="menuitem"
-                onClick={() => {
-                  setMenuOpen(false)
-                  void handleShare()
-                }}
-              >
-                현재 슬라임 공유
-              </button>
-              {/* Theme picker — segmented control inline with the other
-                  drawer items so the label is visible and the two options
-                  live side-by-side. Clicking flips the theme immediately
-                  and keeps the drawer open so the user can preview the
-                  change. */}
+              <AccountDrawerTop onCloseDrawer={() => setMenuOpen(false)} />
               <div className={styles.drawerItem} role="none">
                 <span>테마</span>
                 <div className={styles.themeSwitch} role="radiogroup" aria-label="테마">
@@ -4501,6 +4534,9 @@ export default function SlimeApp() {
                 </div>
               </div>
             </nav>
+            <div className={styles.drawerFooter}>
+              <AccountDrawerFooter onCloseDrawer={() => setMenuOpen(false)} />
+            </div>
           </aside>
         </>
       )}
@@ -4918,41 +4954,138 @@ export default function SlimeApp() {
         </div>
       )}
 
-      {subscribeOpen && (
+      {autoPressOn && (() => {
+        const totalSec = Math.max(0, Math.ceil(autoPressRemainingMs / 1000))
+        const mm = String(Math.floor(totalSec / 60)).padStart(2, '0')
+        const ss = String(totalSec % 60).padStart(2, '0')
+        return (
+          <button
+            type="button"
+            className={styles.autoCountdown}
+            data-hud
+            onClick={() => {
+              const remaining = Math.max(
+                0,
+                autoPressEndAtRef.current - performance.now()
+              )
+              const secTotal =
+                remaining > 0
+                  ? Math.max(1, Math.round(remaining / 1000))
+                  : Math.max(1, Math.round(autoPressDefaultMs / 1000))
+              setAutoTimeEditMin(Math.floor(secTotal / 60))
+              setAutoTimeEditSec(secTotal % 60)
+              setAutoSaveAsDefault(false)
+              setAutoTimeOpen(true)
+            }}
+            aria-label="자동 압박 남은 시간 (탭하여 조정)"
+          >
+            {mm}:{ss}
+          </button>
+        )
+      })()}
+
+      {autoTimeOpen && (
         <div
           className={styles.modalBackdrop}
-          onClick={() => setSubscribeOpen(false)}
+          onClick={() => setAutoTimeOpen(false)}
         >
           <div
             className={styles.modal}
             data-hud
             onClick={(e) => e.stopPropagation()}
           >
-            <div className={styles.modalTitle}>왁부 구독</div>
-            <p className={styles.modalList}>
-              콘텐츠는 전부 무료로 열려 있어요. 구독은 오래 만지고,
-              오래 간직하고, 더 깊게 쉬는 도구를 열어줍니다.
-            </p>
-            <ul className={styles.modalList} style={{ paddingLeft: 18 }}>
-              <li>컬렉션 무제한 저장 · 기기 간 동기화</li>
-              <li>광고 제거</li>
-              <li>슬라임멍 세션 확장 (기본 3분 → 최대 20분)</li>
-              <li>자동 압박 확장 (10초 → 긴 세션 · 리듬 커스텀)</li>
-              <li>스트레스 코치 · 감정 캘린더 (예정)</li>
-            </ul>
-            <p
-              className={styles.modalList}
-              style={{ opacity: 0.7, marginTop: 8 }}
-            >
-              결제 시스템 준비 중입니다. 출시되면 알려드릴게요.
-            </p>
+            <div className={styles.modalTitle}>자동 압박 시간</div>
+            <div className={styles.autoTimeRow}>
+              <div className={styles.autoTimeStepper}>
+                <button
+                  type="button"
+                  className={styles.autoTimeBtn}
+                  onClick={() =>
+                    setAutoTimeEditMin((v) => Math.max(0, v - 1))
+                  }
+                  aria-label="분 감소"
+                >
+                  −
+                </button>
+                <span className={styles.autoTimeValue}>
+                  {String(autoTimeEditMin).padStart(2, '0')}
+                </span>
+                <button
+                  type="button"
+                  className={styles.autoTimeBtn}
+                  onClick={() =>
+                    setAutoTimeEditMin((v) => Math.min(59, v + 1))
+                  }
+                  aria-label="분 증가"
+                >
+                  +
+                </button>
+                <div className={styles.autoTimeUnit}>분</div>
+              </div>
+              <div className={styles.autoTimeStepper}>
+                <button
+                  type="button"
+                  className={styles.autoTimeBtn}
+                  onClick={() =>
+                    setAutoTimeEditSec((v) => Math.max(0, v - 1))
+                  }
+                  aria-label="초 감소"
+                >
+                  −
+                </button>
+                <span className={styles.autoTimeValue}>
+                  {String(autoTimeEditSec).padStart(2, '0')}
+                </span>
+                <button
+                  type="button"
+                  className={styles.autoTimeBtn}
+                  onClick={() =>
+                    setAutoTimeEditSec((v) => Math.min(59, v + 1))
+                  }
+                  aria-label="초 증가"
+                >
+                  +
+                </button>
+                <div className={styles.autoTimeUnit}>초</div>
+              </div>
+            </div>
+            <label className={styles.autoTimeSaveRow}>
+              <input
+                type="checkbox"
+                checked={autoSaveAsDefault}
+                onChange={(e) => setAutoSaveAsDefault(e.target.checked)}
+              />
+              <span>기본값으로 저장</span>
+            </label>
             <div className={styles.nameDialogActions}>
               <button
                 type="button"
                 className={styles.modalClose}
-                onClick={() => setSubscribeOpen(false)}
+                onClick={() => setAutoTimeOpen(false)}
               >
-                닫기
+                취소
+              </button>
+              <button
+                type="button"
+                className={styles.nameDialogSaveBtn}
+                onClick={() => {
+                  const totalMs =
+                    (autoTimeEditMin * 60 + autoTimeEditSec) * 1000
+                  if (totalMs <= 0) {
+                    setAutoTimeOpen(false)
+                    return
+                  }
+                  if (autoSaveAsDefault) {
+                    setAutoPressDefaultMs(totalMs)
+                  }
+                  // Retarget the current session's deadline so the
+                  // countdown pill immediately reflects the new value.
+                  autoPressEndAtRef.current = performance.now() + totalMs
+                  setAutoPressRemainingMs(totalMs)
+                  setAutoTimeOpen(false)
+                }}
+              >
+                확인
               </button>
             </div>
           </div>
@@ -5129,22 +5262,23 @@ export default function SlimeApp() {
             data-active={autoPressOn}
             onClick={() => {
               // Re-click during a session = immediate cancel. Stop
-              // spawning, drop any in-flight presses, and clear the
-              // deferred badge-off timer so it can't overwrite state.
+              // spawning and drop any in-flight presses; the badge
+              // is cleared by the countdown effect on next tick.
               if (autoPressOn) {
                 autoPressEndAtRef.current = 0
                 autoPressNextAtRef.current = Number.POSITIVE_INFINITY
                 autoPressActivesRef.current = []
-                if (autoPressTimeoutRef.current !== null) {
-                  window.clearTimeout(autoPressTimeoutRef.current)
-                  autoPressTimeoutRef.current = null
-                }
                 setAutoPressOn(false)
+                setAutoPressRemainingMs(0)
                 return
               }
               const now = performance.now()
               autoPressStartRef.current = now
-              autoPressEndAtRef.current = now + AUTO_PRESS_DURATION_MS
+              // Fresh session opens at the user-persisted default
+              // duration; the countdown pill lets them retune on the
+              // fly (and optionally save the new value as default).
+              autoPressEndAtRef.current = now + autoPressDefaultMs
+              setAutoPressRemainingMs(autoPressDefaultMs)
               // Fresh session: clear any stragglers from a prior run
               // and fire the first press immediately.
               autoPressActivesRef.current = []
@@ -5153,25 +5287,11 @@ export default function SlimeApp() {
               // stage envelope, so re-arm the Wax4 attack; it'll fire
               // on the first synthetic press this session lands.
               waxAttackPendingRef.current = true
-              // Thinwax one-shot re-armed for this auto session; fires
-              // on the first synthetic press then stays quiet.
-              autoThinwaxFiredRef.current = false
               setAutoPressOn(true)
-              // Auto-clear the badge shortly after the last spawn
-              // window closes; in-flight presses may still tail out
-              // for another ~800 ms after endAt, but the button state
-              // going quiet just tracks "no new taps scheduled".
-              if (autoPressTimeoutRef.current !== null) {
-                window.clearTimeout(autoPressTimeoutRef.current)
-              }
-              autoPressTimeoutRef.current = window.setTimeout(() => {
-                autoPressTimeoutRef.current = null
-                setAutoPressOn(false)
-              }, AUTO_PRESS_DURATION_MS + 30)
             }}
             aria-label={autoPressOn ? '자동 압박 중' : '자동 압박 시작'}
             aria-pressed={autoPressOn}
-            title="자동 압박 (10초)"
+            title="자동 압박"
           >
             {/* Concentric ripples — reads as "auto tapping / press
                 waves". Center dot is the tap, rings are the pulse. */}
@@ -5308,7 +5428,6 @@ export default function SlimeApp() {
           onClearSticker={clearSticker}
           photoBeadSlots={photoBeads.map((t) => t !== null)}
           onPickPhotoBead={(i, f) => void setPhotoBeadAt(i, f)}
-          onClearPhotoBead={clearPhotoBeadAt}
           colorAdjustments={colorAdjustments}
           onColorAdjustment={(id, dh, dl) => {
             setColorAdjustments((prev) => {
@@ -5331,29 +5450,9 @@ export default function SlimeApp() {
           onClearCustomBeadsPhoto={() => setCustomBeadsPhoto(null)}
           slimeText={slimeText}
           onSlimeText={setSlimeText}
-          onTextInputFocusChange={(focused) => {
-            textInputFocusedRef.current = focused
-          }}
-          onActiveTextItemChange={(idx) => {
-            activeTextItemIdxRef.current = idx
-            // On cube shape, ease the mesh to a rotation that puts
-            // the item's face directly toward the camera so the user
-            // sees the text spot they're about to edit. Skip sphere
-            // (already camera-facing) and shapes without meaningful
-            // faces (rect currently unused for text).
-            if (idx < 0 || shape !== 'cube') {
-              slimeAutoRotateTargetRef.current = null
-              return
-            }
-            const item = slimeText.items[idx]
-            if (!item) return
-            const [ax, ay, az] = slimeTextFaceAxis(item.face)
-            const target = new THREE.Quaternion().setFromUnitVectors(
-              new THREE.Vector3(ax, ay, az),
-              new THREE.Vector3(0, 0, 1)
-            )
-            slimeAutoRotateTargetRef.current = target
-          }}
+          onTextColorImmediate={(hex) =>
+            applyRef.current?.setTextColor(hex)
+          }
           onActiveSlimeSubChange={setActiveSlimeSub}
           onRegisterOpenCategory={(fn) => {
             openCategoryRef.current = fn
@@ -5374,7 +5473,8 @@ export default function SlimeApp() {
                 resolveColorHex(cid, colorAdjustments)
               ),
               onRemove: () => setColors(colors.filter((x) => x !== cid)),
-              targetCategory: 'slime'
+              targetCategory: 'slime',
+              targetSubCategory: 'color'
             })
           })
           if (material !== 'crystal') {
@@ -5384,7 +5484,8 @@ export default function SlimeApp() {
                 key: `sm-${material}`,
                 label: m.label,
                 onRemove: () => setMaterial('crystal'),
-                targetCategory: 'slime'
+                targetCategory: 'slime',
+                targetSubCategory: 'material'
               })
             }
           }
@@ -5403,7 +5504,8 @@ export default function SlimeApp() {
                 key: `sco-${coating}`,
                 label: c.label,
                 onRemove: () => setCoating('none'),
-                targetCategory: 'slime'
+                targetCategory: 'slime',
+                targetSubCategory: 'coating'
               })
             }
             // Coating colour tags — user asked for the same tag +
@@ -5421,7 +5523,8 @@ export default function SlimeApp() {
                   ),
                   onRemove: () =>
                     setFoilColors(foilColors.filter((x) => x !== cid)),
-                  targetCategory: 'slime'
+                  targetCategory: 'slime',
+                  targetSubCategory: 'coating'
                 })
               })
             } else {
@@ -5436,7 +5539,8 @@ export default function SlimeApp() {
                     setCoatingColors(
                       coatingColors.filter((x) => x !== cid)
                     ),
-                  targetCategory: 'slime'
+                  targetCategory: 'slime',
+                  targetSubCategory: 'coating'
                 })
               })
             }
@@ -5448,7 +5552,8 @@ export default function SlimeApp() {
                 key: `ssh-${shape}`,
                 label: s.label,
                 onRemove: () => setShape('sphere'),
-                targetCategory: 'slime'
+                targetCategory: 'slime',
+                targetSubCategory: 'shape'
               })
             }
           }
@@ -5460,23 +5565,21 @@ export default function SlimeApp() {
               targetCategory: 'slime'
             })
           }
-          slimeText.items.forEach((item, idx) => {
-            const trimmed = item.content.trim()
-            if (!trimmed) return
-            allTags.push({
-              key: `stext-${idx}`,
-              label: `"${trimmed}"`,
-              swatchColor: hexToCssColor(
-                resolveColorHex(item.color, colorAdjustments)
-              ),
-              onRemove: () =>
-                setSlimeText({
-                  ...slimeText,
-                  items: slimeText.items.filter((_, i) => i !== idx)
-                }),
-              targetCategory: 'slime'
-            })
-          })
+          {
+            const trimmed = slimeText.content.trim()
+            if (trimmed) {
+              allTags.push({
+                key: 'stext',
+                label: `"${trimmed}"`,
+                swatchColor: hexToCssColor(
+                  resolveColorHex(slimeText.color, colorAdjustments)
+                ),
+                onRemove: () => setSlimeText(SLIME_TEXT_DEFAULT),
+                targetCategory: 'slime',
+                targetSubCategory: 'text'
+              })
+            }
+          }
           // 미니비즈 / 속비즈 (both bind to `beads`). Active-layer tag
           // (label reflects the combo) appears any time the user has
           // dragged a count or toggled fill — removing it wipes the
@@ -5491,7 +5594,8 @@ export default function SlimeApp() {
                 ? '비즈 꽉'
                 : `비즈 ${beads.count}개`,
               onRemove: () => setBeads(BEADS_DEFAULT),
-              targetCategory: 'compact'
+              targetCategory: 'compact',
+              targetSubCategory: 'color'
             })
           }
           if (beads.combo === 'chunk' && beads.count > 0) {
@@ -5499,7 +5603,8 @@ export default function SlimeApp() {
               key: 'b-chunk',
               label: `비즈볼 ${beads.count}개`,
               onRemove: () => setBeads(BEADS_DEFAULT),
-              targetCategory: 'chunk'
+              targetCategory: 'chunk',
+              targetSubCategory: 'count'
             })
           }
           if (beads.combo !== 'none') {
@@ -5518,7 +5623,8 @@ export default function SlimeApp() {
                     ...beads,
                     colors: beads.colors.filter((x) => x !== cid)
                   }),
-                targetCategory: beadCategory
+                targetCategory: beadCategory,
+                targetSubCategory: 'color'
               })
             })
             beads.shapes.forEach((sid) => {
@@ -5533,7 +5639,8 @@ export default function SlimeApp() {
                     ...beads,
                     shapes: beads.shapes.filter((x) => x !== sid)
                   }),
-                targetCategory: beadCategory
+                targetCategory: beadCategory,
+                targetSubCategory: 'shape'
               })
             })
             if (beads.material !== 'plastic') {
@@ -5543,7 +5650,8 @@ export default function SlimeApp() {
                   key: `bm-${beads.material}`,
                   label: `비즈 ${bm.label}`,
                   onRemove: () => setBeads({ ...beads, material: 'plastic' }),
-                  targetCategory: beadCategory
+                  targetCategory: beadCategory,
+                  targetSubCategory: 'material'
                 })
               }
             }
@@ -5564,7 +5672,8 @@ export default function SlimeApp() {
               key: 'is-active',
               label: `슬라임볼 ${innerSlime.count}개`,
               onRemove: () => setInnerSlime(BEADS_DEFAULT),
-              targetCategory: 'inner-slime'
+              targetCategory: 'inner-slime',
+              targetSubCategory: 'count'
             })
           }
           if (innerSlime.combo !== 'none') {
@@ -5580,7 +5689,8 @@ export default function SlimeApp() {
                     ...innerSlime,
                     colors: innerSlime.colors.filter((x) => x !== cid)
                   }),
-                targetCategory: 'inner-slime'
+                targetCategory: 'inner-slime',
+                targetSubCategory: 'color'
               })
             })
             if (innerSlime.coating !== 'none') {
@@ -5594,7 +5704,8 @@ export default function SlimeApp() {
                   label: `슬라임볼 ${bc.label}`,
                   onRemove: () =>
                     setInnerSlime({ ...innerSlime, coating: 'none' }),
-                  targetCategory: 'inner-slime'
+                  targetCategory: 'inner-slime',
+                  targetSubCategory: 'coating'
                 })
               }
               // Slime ball coating colour tags — same UX as slime body
@@ -5613,7 +5724,8 @@ export default function SlimeApp() {
                         (x) => x !== cid
                       )
                     }),
-                  targetCategory: 'inner-slime'
+                  targetCategory: 'inner-slime',
+                  targetSubCategory: 'coating'
                 })
               })
             }
@@ -5624,7 +5736,8 @@ export default function SlimeApp() {
               key: 'cb-active',
               label: `추가비즈 ${customBeads.count}개`,
               onRemove: () => setCustomBeads(CUSTOM_BEADS_DEFAULT),
-              targetCategory: 'custom-beads'
+              targetCategory: 'custom-beads',
+              targetSubCategory: 'count'
             })
           }
           customBeads.colors.forEach((cid) => {
@@ -5639,7 +5752,8 @@ export default function SlimeApp() {
                   ...customBeads,
                   colors: customBeads.colors.filter((x) => x !== cid)
                 }),
-              targetCategory: 'custom-beads'
+              targetCategory: 'custom-beads',
+              targetSubCategory: 'color'
             })
           })
           if (customBeadsPhoto) {
@@ -5668,6 +5782,7 @@ export default function SlimeApp() {
                 label: typeLabel,
                 swatchColor: hexToCssColor(c.hex),
                 targetCategory: typeId,
+                targetSubCategory: 'color',
                 onRemove: () => {
                   const next = cfg.colors.filter((x) => x !== cid)
                   // Dropping the last colour also zeroes the count/fill
@@ -5743,7 +5858,11 @@ export default function SlimeApp() {
               >
               {allTags.map((t) => {
                 const jump = t.targetCategory
-                  ? () => openCategoryRef.current?.(t.targetCategory!)
+                  ? () =>
+                      openCategoryRef.current?.(
+                        t.targetCategory!,
+                        t.targetSubCategory
+                      )
                   : undefined
                 return (
                   <span

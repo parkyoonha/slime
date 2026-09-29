@@ -27,7 +27,7 @@ export type DetectFn = (
 let landmarkerPromise: Promise<HandLandmarker> | null = null
 function preloadLandmarker(): Promise<HandLandmarker> {
   if (landmarkerPromise) return landmarkerPromise
-  landmarkerPromise = (async () => {
+  const attempt = (async () => {
     const vision = await FilesetResolver.forVisionTasks(WASM_URL)
     return HandLandmarker.createFromOptions(vision, {
       baseOptions: {
@@ -41,22 +41,40 @@ function preloadLandmarker(): Promise<HandLandmarker> {
       minTrackingConfidence: 0.5
     })
   })()
+  // Wipe the shared cache on failure so the NEXT caller retries the
+  // fetch from scratch. Without this, one transient network hiccup on
+  // app launch would poison the cached promise for the entire session
+  // and the user would be stuck seeing "모델 오류" until they killed
+  // the app. Retry-on-demand keeps the happy-path fast (cache hit) and
+  // the error-path recoverable (next hook use re-attempts the fetch).
+  attempt.catch(() => {
+    if (landmarkerPromise === attempt) landmarkerPromise = null
+  })
+  landmarkerPromise = attempt
   return landmarkerPromise
 }
-// Kick off the download at module load time — no `await`, we just want the
-// network request in flight before the component even mounts.
-void preloadLandmarker().catch(() => {
-  // Swallow — the hook's effect will surface any real error via state.
-})
 
-export function useHandLandmarker() {
+/** When `enabled` is false the model download is DEFERRED — no WASM /
+ *  model fetch until the caller flips it true. Lets first-launch users
+ *  with hand tracking off avoid the 8+ MB cold download (and the "model
+ *  fetch error → app closes" crash on a flaky first-run network) that
+ *  used to fire the instant the module was imported. Flipping to true
+ *  starts the download; failures reset the shared cache so subsequent
+ *  attempts retry from scratch. */
+export function useHandLandmarker(enabled: boolean = true) {
   const [status, setStatus] = useState<HandStatus>('idle')
   const [error, setError] = useState<string | null>(null)
   const landmarkerRef = useRef<HandLandmarker | null>(null)
 
   useEffect(() => {
+    if (!enabled) {
+      setStatus('idle')
+      setError(null)
+      return
+    }
     let cancelled = false
     setStatus('loading')
+    setError(null)
     preloadLandmarker().then(
       (landmarker) => {
         if (cancelled) return
@@ -78,7 +96,7 @@ export function useHandLandmarker() {
       // cost again. In a production single-mount app this leaks nothing.
       landmarkerRef.current = null
     }
-  }, [])
+  }, [enabled])
 
   // Stable identity across renders — the effect that spins the render loop
   // must not tear down when unrelated state (hand count, status) changes.

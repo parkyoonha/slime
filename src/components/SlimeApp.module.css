@@ -160,6 +160,12 @@
   gap: 14px;
 }
 
+.drawerFooter {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+}
+
 .drawerItem {
   background: transparent;
   border: none;
@@ -1206,6 +1212,110 @@
   white-space: nowrap;
   pointer-events: none;
   z-index: 3;
+}
+
+/* Auto-press countdown pill — floats top-centre while a session is
+   active. Tap to open the time editor. Uses a monospace tabular
+   feel so the digits don't jump width as they tick down. */
+.autoCountdown {
+  position: absolute;
+  top: max(56px, calc(env(safe-area-inset-top) + 40px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  pointer-events: auto;
+  padding: 8px 18px;
+  border-radius: 999px;
+  border: none;
+  outline: none;
+  background: var(--bg-toggle);
+  color: var(--color-text);
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  backdrop-filter: blur(10px);
+  min-width: 84px;
+  text-align: center;
+}
+.autoCountdown:hover,
+.autoCountdown:focus-visible {
+  background: var(--bg-toggle-hover);
+  outline: none;
+}
+
+/* Time-edit modal contents — two ± steppers side-by-side + a
+   "save as default" checkbox row above the confirm/cancel actions. */
+.autoTimeRow {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 24px;
+  padding: 12px 0 8px;
+}
+.autoTimeStepper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: relative;
+}
+.autoTimeBtn {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: none;
+  outline: none;
+  background: var(--bg-chip);
+  color: var(--color-text);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.autoTimeBtn:hover,
+.autoTimeBtn:focus-visible {
+  background: var(--bg-chip-hover);
+  outline: none;
+}
+.autoTimeValue {
+  display: inline-block;
+  min-width: 42px;
+  text-align: center;
+  font-size: 26px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-text);
+}
+.autoTimeUnit {
+  position: absolute;
+  top: -18px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  letter-spacing: 0.06em;
+}
+.autoTimeSaveRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 4px 0;
+  font-size: 13px;
+  color: var(--color-text);
+  cursor: pointer;
+  user-select: none;
+}
+.autoTimeSaveRow input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
 }
 
 /* Inline collection carousel that replaces the CustomizePanel while

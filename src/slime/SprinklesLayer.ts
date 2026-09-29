@@ -209,7 +209,15 @@ export class SprinklesLayer {
     unitDirs: Float32Array,
     restPositions: Float32Array,
     indexBuffer: Uint16Array | Uint32Array,
-    beadInfo: { positions: Float32Array; size: number } | null = null
+    beadInfo: {
+      positions: Float32Array
+      size: number
+      /** Optional per-bead outer radius (already scaled by size). When
+       *  provided, sprinkles use this instead of a uniform sphere
+       *  approximation so non-sphere shapes (torus, star, cube) get
+       *  sprinkles that actually sit on their visible outer envelope. */
+      radii?: Float32Array
+    } | null = null
   ) {
     this.ensureInstanced()
     this.config = { ...config, colors: [...config.colors] }
@@ -372,7 +380,15 @@ export class SprinklesLayer {
     n: number,
     unitDirs: Float32Array,
     restPositions: Float32Array,
-    beadInfo: { positions: Float32Array; size: number } | null
+    beadInfo: {
+      positions: Float32Array
+      size: number
+      /** Optional per-bead outer radius (already scaled by size). When
+       *  provided, sprinkles use this instead of a uniform sphere
+       *  approximation so non-sphere shapes (torus, star, cube) get
+       *  sprinkles that actually sit on their visible outer envelope. */
+      radii?: Float32Array
+    } | null
   ) {
     this.beadLift = new Float32Array(n)
     this.beadNormalOffset = new Float32Array(n * 3)
@@ -383,8 +399,16 @@ export class SprinklesLayer {
     // Effective radius = actual bead + a thin extra layer that stands in for
     // the slime coating covering the bead. Sprinkles land on this outer
     // envelope, giving the "stuck to slime-covered bead" look.
-    const beadRadius = beadInfo.size * 1.05
-    const beadRadiusSq = beadRadius * beadRadius
+    // Per-bead when beadInfo.radii is supplied (non-sphere shapes like
+    // torus / star / cube have outer envelopes noticeably larger than
+    // the sphere approximation — without per-bead radii, sprinkles land
+    // at the sphere surface which is INSIDE the actual bead silhouette,
+    // reading as "floating above the slime, disconnected from the bead"
+    // on non-sphere 꽉비즈).
+    const COATING_MARGIN = 1.05
+    const uniformRadius = beadInfo.size * COATING_MARGIN
+    const uniformRadiusSq = uniformRadius * uniformRadius
+    const beadRadii = beadInfo.radii ?? null
 
     for (let i = 0; i < n; i++) {
       let dx: number
@@ -439,9 +463,15 @@ export class SprinklesLayer {
         // Möller ray-sphere from origin along (dx,dy,dz):
         //   |t·dir − C|² = R²
         //   t² − 2t(dir·C) + |C|² − R² = 0
+        const rSq = beadRadii
+          ? (() => {
+              const r = beadRadii[k] * COATING_MARGIN
+              return r * r
+            })()
+          : uniformRadiusSq
         const bDot = dx * cx + dy * cy + dz * cz
         const cSq = cx * cx + cy * cy + cz * cz
-        const disc = bDot * bDot - cSq + beadRadiusSq
+        const disc = bDot * bDot - cSq + rSq
         if (disc <= 0) continue
         const t = bDot + Math.sqrt(disc)
         const lift = t - restLen
@@ -483,7 +513,15 @@ export class SprinklesLayer {
     unitDirs: Float32Array,
     restPositions: Float32Array,
     indexBuffer: Uint16Array | Uint32Array,
-    beadInfo: { positions: Float32Array; size: number } | null = null
+    beadInfo: {
+      positions: Float32Array
+      size: number
+      /** Optional per-bead outer radius (already scaled by size). When
+       *  provided, sprinkles use this instead of a uniform sphere
+       *  approximation so non-sphere shapes (torus, star, cube) get
+       *  sprinkles that actually sit on their visible outer envelope. */
+      radii?: Float32Array
+    } | null = null
   ) {
     if (!this.instanced) return
     if (!this.config.fill && this.config.count === 0) return
