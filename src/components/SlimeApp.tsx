@@ -90,8 +90,6 @@ function computeInitialScale(): number {
 
 // Slime base "squish" is now a single Slime.mp3 recording (random
 // windows scheduled from it per press, same as the old 8-clip pool).
-// Slimetapping.mp3 plays in parallel via the `slimeTap` named
-// channel — see render loop.
 // Slime-squish sample files. Files that exist under public/sounds/ are used
 // verbatim; missing ones are silently skipped. Add more clips for variety —
 // the sample scheduler picks one at random per squelch tick.
@@ -126,8 +124,10 @@ const NAMED_SAMPLE_URLS = {
   ice: '/sounds/Crack.mp3',
   // 젤(tube) coating crack — wet-jelly squelch.
   tube: '/sounds/Jelly.mp3',
-  // 꽉비즈 (compact) + 비즈볼 (chunk) share the `beads` channel.
+  // 비즈볼 (chunk) — beads channel.
   beads: '/sounds/Bead0.mp3',
+  // 꽉비즈 (compact) — its own channel with a distinct sample.
+  bizCompact: '/sounds/Biz.mp3',
   // 스팽글 종이 옵션 — crunchier crinkle.
   paper: '/sounds/Crunchier.mp3',
   // 스팽글 플라스틱 옵션 — sharper star-like tick.
@@ -152,11 +152,7 @@ const NAMED_SAMPLE_URLS = {
   // additive-bead surfaces carry the same acoustic signature; kept
   // as its own channel so gain / attenuation can be tuned
   // independently.
-  customBeads: '/sounds/Imoji.mp3',
-  // Slime.mp3의 squish와 병렬로 재생되는 tapping 레이어. 압력 따라
-  // gain이 움직이며, squish가 무음 처리되는 조건(iceMat/matte/metal/
-  // soft 재질, ice 코팅)에서 함께 무음.
-  slimeTap: '/sounds/Slimetapping.mp3'
+  customBeads: '/sounds/Imoji.mp3'
 } as const
 
 // Optional [startSec, endSec] source-range constraints for each named
@@ -165,7 +161,7 @@ const NAMED_SAMPLE_URLS = {
 // segment. Set to `null` to allow the full recording. Adjust the wax
 // range to pick the exact section of Wak.mp3 you want as the crack sound.
 const NAMED_SAMPLE_RANGES: Record<
-  'wax' | 'waxLayer' | 'thinwax' | 'foil' | 'ice' | 'tube' | 'beads' | 'paper' | 'plastic' | 'plasticLayer' | 'matte' | 'metal' | 'soft' | 'iceMat' | 'emoji' | 'customBeads' | 'slimeTap',
+  'wax' | 'waxLayer' | 'thinwax' | 'foil' | 'ice' | 'tube' | 'beads' | 'bizCompact' | 'paper' | 'plastic' | 'plasticLayer' | 'matte' | 'metal' | 'soft' | 'iceMat' | 'emoji' | 'customBeads',
   readonly [number, number] | null
 > = {
   // Wakcom.mp3 with only [6, 8] spliced out at load time. Post-
@@ -192,6 +188,7 @@ const NAMED_SAMPLE_RANGES: Record<
   ice: null,
   tube: null,
   beads: null,
+  bizCompact: null,
   paper: null,
   plastic: null,
   plasticLayer: null,
@@ -202,8 +199,7 @@ const NAMED_SAMPLE_RANGES: Record<
   soft: null,
   iceMat: null,
   emoji: null,
-  customBeads: null,
-  slimeTap: null
+  customBeads: null
 }
 
 /** Down-scale applied to a layer group when its owning config's `inside`
@@ -1650,6 +1646,7 @@ export default function SlimeApp() {
     void engine?.loadNamedSample('ice', NAMED_SAMPLE_URLS.ice)
     void engine?.loadNamedSample('tube', NAMED_SAMPLE_URLS.tube)
     void engine?.loadNamedSample('beads', NAMED_SAMPLE_URLS.beads)
+    void engine?.loadNamedSample('bizCompact', NAMED_SAMPLE_URLS.bizCompact)
     void engine?.loadNamedSample('paper', NAMED_SAMPLE_URLS.paper)
     void engine?.loadNamedSample('plastic', NAMED_SAMPLE_URLS.plastic)
     void engine?.loadNamedSample(
@@ -1669,7 +1666,6 @@ export default function SlimeApp() {
     void engine?.loadNamedSample('customBeads', NAMED_SAMPLE_URLS.customBeads, [
       [4, 5]
     ])
-    void engine?.loadNamedSample('slimeTap', NAMED_SAMPLE_URLS.slimeTap)
     engine?.setNamedSampleRange('wax', NAMED_SAMPLE_RANGES.wax)
     engine?.setNamedSampleRange('thinwax', NAMED_SAMPLE_RANGES.thinwax)
     engine?.setNamedSampleRange('waxLayer', NAMED_SAMPLE_RANGES.waxLayer)
@@ -1677,6 +1673,7 @@ export default function SlimeApp() {
     engine?.setNamedSampleRange('ice', NAMED_SAMPLE_RANGES.ice)
     engine?.setNamedSampleRange('tube', NAMED_SAMPLE_RANGES.tube)
     engine?.setNamedSampleRange('beads', NAMED_SAMPLE_RANGES.beads)
+    engine?.setNamedSampleRange('bizCompact', NAMED_SAMPLE_RANGES.bizCompact)
     engine?.setNamedSampleRange('paper', NAMED_SAMPLE_RANGES.paper)
     engine?.setNamedSampleRange('plastic', NAMED_SAMPLE_RANGES.plastic)
     engine?.setNamedSampleRange(
@@ -1692,7 +1689,6 @@ export default function SlimeApp() {
       'customBeads',
       NAMED_SAMPLE_RANGES.customBeads
     )
-    engine?.setNamedSampleRange('slimeTap', NAMED_SAMPLE_RANGES.slimeTap)
     // Softy.mp3 recorded quietly — boost the soft channel above the
     // 0..1 intensity ceiling so it reads at a comparable level to the
     // other material ambients on the same press pressure.
@@ -1792,13 +1788,18 @@ export default function SlimeApp() {
       | MaterialId
       | 'plastic'
   }, [innerSlime.material])
+  // Chunk (비즈볼) drives the `beads` channel (Bead0.mp3).
   const beadsActiveRef = useRef<boolean>(false)
+  // Compact (꽉비즈) drives its own `bizCompact` channel (Biz.mp3).
+  // Compact "미니 꽉 채우기" packs densely via `fill: true` while count
+  // stays 0, so the activity check accepts EITHER fill or a non-zero
+  // explicit count.
+  const bizCompactActiveRef = useRef<boolean>(false)
   useEffect(() => {
-    // Compact "미니 꽉 채우기" packs densely via `fill: true` while count
-    // stays 0, so the activity check has to accept EITHER fill or a
-    // non-zero explicit count.
     beadsActiveRef.current =
-      beads.combo !== 'none' && (beads.fill || beads.count > 0)
+      beads.combo === 'chunk' && (beads.fill || beads.count > 0)
+    bizCompactActiveRef.current =
+      beads.combo === 'compact' && (beads.fill || beads.count > 0)
   }, [beads])
   // Emoji layer activity — mirrors React state so the render loop can
   // drive an ambient loop when the user presses a slime that has emojis
@@ -3140,9 +3141,9 @@ export default function SlimeApp() {
       s.setLoopingSampleLevel('plastic', 0)
       s.setLoopingSampleLevel('plasticLayer', 0)
       s.setLoopingSampleLevel('beads', 0)
+      s.setLoopingSampleLevel('bizCompact', 0)
       s.setLoopingSampleLevel('emoji', 0)
       s.setLoopingSampleLevel('customBeads', 0)
-      s.setLoopingSampleLevel('slimeTap', 0)
     }
     const handleHide = () => {
       if (paused) return
@@ -3911,12 +3912,10 @@ export default function SlimeApp() {
         const materialAtten = slimeCoatingActive ? 0.3 : 1.0
         const innerCoatingActive = innerSlimeCoatingRef.current !== 'none'
         const ballMaterialAtten = innerCoatingActive ? 0.3 : 1.0
-        // Squish base level + parallel Slimetapping layer share the
-        // same mute gate: iceMat/matte/metal/soft materials and ice
-        // coating all silence both, so a specialised material/coating
+        // Squish base mute gate: iceMat/matte/metal/soft materials and
+        // ice coating silence Slime.mp3 so a specialised material/coating
         // ambient (Sprinkle / Popp / Softslime / Smoothie / Iced) is
-        // the sole slime-body sound in those states rather than
-        // doubling with Slime.mp3 + Slimetapping.mp3.
+        // the sole slime-body sound in those states.
         // When either emoji or 추가비즈 stickers are on the slime,
         // that channel takes the acoustic foreground — dim the slime
         // body sound to 30 % so Imoji.mp3 can breathe on top without
@@ -3929,7 +3928,6 @@ export default function SlimeApp() {
             ? 0
             : soundLevel * materialAtten * emojiAtten
         sound.setSquishLevel(slimeBaseLevel)
-        sound.setLoopingSampleLevel('slimeTap', slimeBaseLevel)
         // Union outer-slime + ball material sounds so a matte ball inside
         // a crystal slime plays its foam sound when pressed, and a putty
         // ball plays its Hoil sample. Whichever surface is being pressed
@@ -4132,6 +4130,10 @@ export default function SlimeApp() {
         sound.setLoopingSampleLevel(
           'beads',
           beadsActiveRef.current ? soundLevel : 0
+        )
+        sound.setLoopingSampleLevel(
+          'bizCompact',
+          bizCompactActiveRef.current ? soundLevel : 0
         )
         sound.setLoopingSampleLevel(
           'emoji',
@@ -4507,7 +4509,8 @@ export default function SlimeApp() {
               </button>
             </div>
             <nav className={styles.drawerNav} role="menu">
-              <AccountDrawerTop onCloseDrawer={() => setMenuOpen(false)} />
+              {/* Subscription card / restore hidden until SKUs are live */}
+              {false && <AccountDrawerTop onCloseDrawer={() => setMenuOpen(false)} />}
               <div className={styles.drawerItem} role="none">
                 <span>테마</span>
                 <div className={styles.themeSwitch} role="radiogroup" aria-label="테마">

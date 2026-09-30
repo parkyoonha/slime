@@ -10,8 +10,8 @@
          renders, before any React / CSS module bundle is parsed. Always
          black regardless of theme (user request). Removed by main.tsx
          after React mounts, with a minimum on-screen time of 850 ms so
-         users always see the logo instead of a subliminal flash on fast
-         cold starts. */
+         users always see the wordmark instead of a subliminal flash on
+         fast cold starts. */
       #splash {
         position: fixed;
         inset: 0;
@@ -20,19 +20,11 @@
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        gap: 14px;
         z-index: 2147483647;
         opacity: 1;
         transition: opacity 260ms ease;
       }
       #splash.fade { opacity: 0; }
-      #splash img {
-        width: 17vmin;
-        height: 17vmin;
-        max-width: 105px;
-        max-height: 105px;
-        object-fit: contain;
-      }
       #splash .splashWordmark {
         color: #ffffff;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
@@ -49,7 +41,6 @@
   </head>
   <body>
     <div id="splash">
-      <img src="/logo.png" alt="" />
       <span class="splashWordmark">soundslime</span>
     </div>
     <div id="root"></div>

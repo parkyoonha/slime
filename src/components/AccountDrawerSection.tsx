@@ -4,8 +4,7 @@ import { Browser } from '@capacitor/browser'
 import { useAuth } from '../auth/AuthContext'
 import { usePremium } from '../hooks/usePremium'
 import { useDailyUsage } from '../hooks/useDailyUsage'
-import { isRevenueCatSupported, logOutRevenueCat, Purchases } from '../lib/revenuecat'
-import { supabase } from '../lib/supabase'
+import { isRevenueCatSupported, Purchases } from '../lib/revenuecat'
 import Paywall from './Paywall'
 import styles from './AccountDrawerSection.module.css'
 
@@ -164,12 +163,10 @@ export function AccountDrawerTop({ onCloseDrawer }: Props) {
   )
 }
 
-/** Bottom slot: profile info + logout + account deletion. */
+/** Bottom slot: profile info + logout. */
 export function AccountDrawerFooter({ onCloseDrawer }: Props) {
   const { user, signOut } = useAuth()
-  const [busy, setBusy] = useState<'signOut' | 'delete' | null>(null)
-  const [confirmDelete, setConfirmDelete] = useState(false)
-  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const [signingOut, setSigningOut] = useState(false)
 
   const profile = user?.user_metadata ?? {}
   const displayName = (profile.name as string | undefined) ?? (profile.full_name as string | undefined) ?? null
@@ -177,88 +174,31 @@ export function AccountDrawerFooter({ onCloseDrawer }: Props) {
   const email = user?.email ?? null
 
   const handleSignOut = async () => {
-    setBusy('signOut')
+    setSigningOut(true)
     try {
       sessionStorage.removeItem('wakbu.usage.consumed')
       await signOut()
     } finally {
-      setBusy(null)
-      onCloseDrawer?.()
-    }
-  }
-
-  const handleDelete = async () => {
-    setBusy('delete')
-    setDeleteError(null)
-    try {
-      const { error } = await supabase.rpc('delete_current_user')
-      if (error) throw error
-      sessionStorage.removeItem('wakbu.usage.consumed')
-      await logOutRevenueCat()
-      await signOut()
-    } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : '계정 삭제에 실패했어요. 잠시 후 다시 시도해주세요.')
-    } finally {
-      setBusy(null)
-      setConfirmDelete(false)
+      setSigningOut(false)
       onCloseDrawer?.()
     }
   }
 
   return (
-    <>
-      <div className={styles.footer}>
-        <div className={styles.profile}>
-          <div className={styles.avatar}>
-            {avatarUrl ? <img src={avatarUrl} alt="" /> : initialFor(displayName, email)}
-          </div>
-          <div className={styles.profileText}>
-            <div className={styles.name}>{displayName ?? email ?? '사용자'}</div>
-            {email && displayName && <div className={styles.email}>{email}</div>}
-          </div>
+    <div className={styles.footer}>
+      <div className={styles.profile}>
+        <div className={styles.avatar}>
+          {avatarUrl ? <img src={avatarUrl} alt="" /> : initialFor(displayName, email)}
         </div>
-        <button className={styles.logout} onClick={handleSignOut} disabled={busy !== null}>
-          <span>{busy === 'signOut' ? '로그아웃 중…' : '로그아웃'}</span>
-          <span className={styles.chevron}>›</span>
-        </button>
-        <button className={styles.deleteAccount} onClick={() => setConfirmDelete(true)} disabled={busy !== null}>
-          <span>계정 완전 삭제</span>
-          <span className={styles.chevron}>›</span>
-        </button>
+        <div className={styles.profileText}>
+          <div className={styles.name}>{displayName ?? email ?? '사용자'}</div>
+          {email && displayName && <div className={styles.email}>{email}</div>}
+        </div>
       </div>
-
-      {confirmDelete && (
-        <div className={styles.detailsBackdrop} onClick={() => busy === null && setConfirmDelete(false)}>
-          <div className={styles.detailsCard} onClick={(e) => e.stopPropagation()} role="dialog" aria-modal>
-            <div className={styles.detailsHeader}>
-              <div className={styles.detailsTitle}>정말 계정을 삭제할까요?</div>
-            </div>
-            <div className={styles.subLine}>
-              계정과 저장된 컬렉션, 사용 기록이 즉시 영구 삭제됩니다.
-              구독 중인 경우 Google Play 스토어의 <strong>내 구독</strong>에서 별도로 해지해주세요.
-              이 작업은 되돌릴 수 없습니다.
-            </div>
-            {deleteError && <div className={styles.subLine} style={{ color: '#d93b3b' }}>{deleteError}</div>}
-            <div className={styles.detailsActions}>
-              <button
-                className={styles.primaryBtn}
-                style={{ background: '#d93b3b', color: '#fff' }}
-                onClick={handleDelete}
-                disabled={busy !== null}
-              >
-                {busy === 'delete' ? '삭제 중…' : '영구 삭제'}
-              </button>
-              <button
-                className={styles.secondaryBtn}
-                onClick={() => setConfirmDelete(false)}
-                disabled={busy !== null}
-              >
-                취소
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </>
+      <button className={styles.logout} onClick={handleSignOut} disabled={signingOut}>
+        <span>{signingOut ? '로그아웃 중…' : '로그아웃'}</span>
+        <span className={styles.chevron}>›</span>
+      </button>
+    </div>
   )
 }
