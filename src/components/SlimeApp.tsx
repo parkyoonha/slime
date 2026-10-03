@@ -46,6 +46,7 @@ import {
 import { SoundEngine } from '../sound/SoundEngine'
 import CustomizePanel, { type SelectionTag } from './CustomizePanel'
 import { AccountDrawerTop, AccountDrawerFooter } from './AccountDrawerSection'
+import { useLocale, useTr } from '../i18n'
 import styles from './SlimeApp.module.css'
 
 const CAMERA_Z = 3.4
@@ -88,12 +89,12 @@ function computeInitialScale(): number {
   return Math.min(1.4, Math.max(SCALE_MIN, scale))
 }
 
-// Slime base "squish" is now a single Slime.mp3 recording (random
+// Slime base "squish" is now a single slime2.mp3 recording (random
 // windows scheduled from it per press, same as the old 8-clip pool).
 // Slime-squish sample files. Files that exist under public/sounds/ are used
 // verbatim; missing ones are silently skipped. Add more clips for variety —
 // the sample scheduler picks one at random per squelch tick.
-const SQUISH_SAMPLE_URLS = ['/sounds/Slime.mp3']
+const SQUISH_SAMPLE_URLS = ['/sounds/slime2.mp3']
 
 // Coating- / beads-specific one-shot sample files. Loaded once on mount and
 // triggered from the render loop when the corresponding coating is active
@@ -128,8 +129,8 @@ const NAMED_SAMPLE_URLS = {
   beads: '/sounds/Bead0.mp3',
   // 꽉비즈 (compact) — its own channel with a distinct sample.
   bizCompact: '/sounds/Biz.mp3',
-  // 스팽글 종이 옵션 — crunchier crinkle.
-  paper: '/sounds/Crunchier.mp3',
+  // 스팽글 종이 옵션 — paper spangle sprinkle.
+  paper: '/sounds/Sprink.mp3',
   // 스팽글 플라스틱 옵션 — sharper star-like tick.
   plastic: '/sounds/Sharpstar.mp3',
   // Parallel layer stacked on top of plastic — Crunchier.mp3 gives
@@ -147,12 +148,12 @@ const NAMED_SAMPLE_URLS = {
   iceMat: '/sounds/Smoothie.mp3',
   // Ambient loop that fires when the user presses a slime that has
   // emojis on it.
-  emoji: '/sounds/Imoji.mp3',
-  // 추가비즈 loop — shares Imoji.mp3 with the emoji channel so both
+  emoji: '/sounds/Beads.mp3',
+  // 추가비즈 loop — shares Beads.mp3 with the emoji channel so both
   // additive-bead surfaces carry the same acoustic signature; kept
   // as its own channel so gain / attenuation can be tuned
   // independently.
-  customBeads: '/sounds/Imoji.mp3'
+  customBeads: '/sounds/Beads.mp3'
 } as const
 
 // Optional [startSec, endSec] source-range constraints for each named
@@ -803,6 +804,8 @@ export default function SlimeApp() {
   // via useState's initializer; SSR-safe fallback = 'dark' (the app's
   // origin look). Every change writes back and flips the `data-theme`
   // attribute on <html>, which every module reads through CSS variables.
+  const { locale, setLocale } = useLocale()
+  const tr = useTr()
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     if (typeof window === 'undefined') return 'dark'
     const saved = window.localStorage.getItem('wakbu-theme')
@@ -1342,10 +1345,55 @@ export default function SlimeApp() {
    *  ready for use as a shader decal. Shared by the slime sticker
    *  and the photo bead pipelines so both get identical crop / size /
    *  colour-space treatment. Returns null when the browser can't
-   *  decode the image so callers can silently no-op. */
+   *  decode the image so callers can silently no-op.
+   *
+   *  Uses `createImageBitmap` when available — on Android WebView it
+   *  decodes directly to a scaled bitmap without allocating the full
+   *  resolution image, which prevents OOM crashes when the camera
+   *  returns a 12MP+ JPEG. Falls back to the <img> path on browsers
+   *  that don't support `createImageBitmap`. */
   const loadPhotoTexture = async (
     file: File
   ): Promise<THREE.CanvasTexture | null> => {
+    const TARGET = 512
+    if (typeof createImageBitmap === 'function') {
+      let bitmap: ImageBitmap | null = null
+      try {
+        bitmap = await createImageBitmap(file, {
+          resizeWidth: TARGET,
+          resizeHeight: TARGET,
+          resizeQuality: 'high'
+        })
+      } catch {
+        try {
+          bitmap = await createImageBitmap(file)
+        } catch {
+          bitmap = null
+        }
+      }
+      if (bitmap) {
+        try {
+          const side = Math.min(bitmap.width, bitmap.height)
+          const size = Math.min(TARGET, side)
+          const canvas = document.createElement('canvas')
+          canvas.width = size
+          canvas.height = size
+          const ctx = canvas.getContext('2d')
+          if (!ctx) return null
+          const sx = (bitmap.width - side) / 2
+          const sy = (bitmap.height - side) / 2
+          ctx.drawImage(bitmap, sx, sy, side, side, 0, 0, size, size)
+          const tex = new THREE.CanvasTexture(canvas)
+          tex.colorSpace = THREE.SRGBColorSpace
+          tex.needsUpdate = true
+          return tex
+        } finally {
+          bitmap.close()
+        }
+      }
+    }
+    // Fallback: <img> + URL.createObjectURL. Only reached on browsers
+    // without createImageBitmap (older WebViews).
     const url = URL.createObjectURL(file)
     try {
       const img = new Image()
@@ -1356,7 +1404,7 @@ export default function SlimeApp() {
       })
       const side = Math.min(img.naturalWidth, img.naturalHeight)
       const canvas = document.createElement('canvas')
-      const size = Math.min(512, side)
+      const size = Math.min(TARGET, side)
       canvas.width = size
       canvas.height = size
       const ctx = canvas.getContext('2d')
@@ -1535,10 +1583,10 @@ export default function SlimeApp() {
     }
     try {
       await navigator.clipboard.writeText(url)
-      setToast('링크가 복사되었습니다')
+      setToast(tr('링크가 복사되었습니다'))
       window.setTimeout(() => setToast(null), 2000)
     } catch {
-      setToast('공유 실패')
+      setToast(tr('공유 실패'))
       window.setTimeout(() => setToast(null), 2000)
     }
   }
@@ -1583,7 +1631,7 @@ export default function SlimeApp() {
     const url = encodeShareUrl()
     const payload = {
       title: 'soundslime',
-      text: '내가 만든 슬라임 놀아봐!',
+      text: tr('내가 만든 슬라임 놀아봐!'),
       url
     }
     try {
@@ -1596,10 +1644,10 @@ export default function SlimeApp() {
     }
     try {
       await navigator.clipboard.writeText(url)
-      setToast('링크가 복사되었습니다')
+      setToast(tr('링크가 복사되었습니다'))
       window.setTimeout(() => setToast(null), 2000)
     } catch {
-      setToast('공유 실패')
+      setToast(tr('공유 실패'))
       window.setTimeout(() => setToast(null), 2000)
     }
   }
@@ -3913,7 +3961,7 @@ export default function SlimeApp() {
         const innerCoatingActive = innerSlimeCoatingRef.current !== 'none'
         const ballMaterialAtten = innerCoatingActive ? 0.3 : 1.0
         // Squish base mute gate: iceMat/matte/metal/soft materials and
-        // ice coating silence Slime.mp3 so a specialised material/coating
+        // ice coating silence slime2.mp3 so a specialised material/coating
         // ambient (Sprinkle / Popp / Softslime / Smoothie / Iced) is
         // the sole slime-body sound in those states.
         // When either emoji or 추가비즈 stickers are on the slime,
@@ -4327,13 +4375,13 @@ export default function SlimeApp() {
   const busyLabel = !skeletonOn
     ? ''
     : cameraStatus === 'requesting'
-      ? '카메라 권한 요청 중…'
+      ? tr('카메라 권한 요청 중…')
       : handStatus === 'loading'
-        ? '손 인식 모델 로딩 중…'
+        ? tr('손 인식 모델 로딩 중…')
         : cameraStatus === 'error'
-          ? `카메라 오류: ${cameraError ?? ''}`
+          ? `${locale === 'ko' ? '카메라 오류' : 'Camera error'}: ${cameraError ?? ''}`
           : handStatus === 'error'
-            ? `모델 오류: ${handError ?? ''}`
+            ? `${locale === 'ko' ? '모델 오류' : 'Model error'}: ${handError ?? ''}`
             : ''
 
   // Collection mode with zero saved slimes — hide the 3D scene so the
@@ -4384,7 +4432,7 @@ export default function SlimeApp() {
           type="button"
           className={styles.iconButton}
           onClick={() => setMenuOpen(true)}
-          aria-label="메뉴"
+          aria-label={tr('메뉴')}
           aria-expanded={menuOpen}
         >
           <svg
@@ -4421,7 +4469,7 @@ export default function SlimeApp() {
             className={styles.iconButton}
             data-active={emojiMoveOn}
             onClick={() => setEmojiMoveOn((v) => !v)}
-            aria-label="이모지 / 비즈 위치 변경"
+            aria-label={tr('이모지 / 비즈 위치 변경')}
             aria-pressed={emojiMoveOn}
           >
             <svg
@@ -4447,7 +4495,7 @@ export default function SlimeApp() {
           type="button"
           className={styles.iconButton}
           onClick={handleShare}
-          aria-label="공유"
+          aria-label={tr('공유')}
         >
           <svg
             width="20"
@@ -4484,14 +4532,14 @@ export default function SlimeApp() {
             className={styles.drawer}
             data-hud
             role="dialog"
-            aria-label="메뉴"
+            aria-label={tr('메뉴')}
           >
             <div className={styles.drawerHeader}>
               <button
                 type="button"
                 className={styles.drawerClose}
                 onClick={() => setMenuOpen(false)}
-                aria-label="닫기"
+                aria-label={tr('닫기')}
               >
                 <svg
                   width="18"
@@ -4512,8 +4560,8 @@ export default function SlimeApp() {
               {/* Subscription card / restore hidden until SKUs are live */}
               {false && <AccountDrawerTop onCloseDrawer={() => setMenuOpen(false)} />}
               <div className={styles.drawerItem} role="none">
-                <span>테마</span>
-                <div className={styles.themeSwitch} role="radiogroup" aria-label="테마">
+                <span>{locale === 'ko' ? '테마' : 'Theme'}</span>
+                <div className={styles.themeSwitch} role="radiogroup" aria-label={locale === 'ko' ? '테마' : 'Theme'}>
                   <button
                     type="button"
                     className={styles.themeSwitchOption}
@@ -4522,7 +4570,7 @@ export default function SlimeApp() {
                     aria-checked={theme === 'light'}
                     onClick={() => setTheme('light')}
                   >
-                    라이트
+                    {locale === 'ko' ? '라이트' : 'Light'}
                   </button>
                   <button
                     type="button"
@@ -4532,7 +4580,32 @@ export default function SlimeApp() {
                     aria-checked={theme === 'dark'}
                     onClick={() => setTheme('dark')}
                   >
-                    다크
+                    {locale === 'ko' ? '다크' : 'Dark'}
+                  </button>
+                </div>
+              </div>
+              <div className={styles.drawerItem} role="none">
+                <span>{locale === 'ko' ? '언어' : 'Language'}</span>
+                <div className={styles.themeSwitch} role="radiogroup" aria-label="Language">
+                  <button
+                    type="button"
+                    className={styles.themeSwitchOption}
+                    data-active={locale === 'ko'}
+                    role="radio"
+                    aria-checked={locale === 'ko'}
+                    onClick={() => setLocale('ko')}
+                  >
+                    한국어
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.themeSwitchOption}
+                    data-active={locale === 'en'}
+                    role="radio"
+                    aria-checked={locale === 'en'}
+                    onClick={() => setLocale('en')}
+                  >
+                    English
                   </button>
                 </div>
               </div>
@@ -4745,7 +4818,7 @@ export default function SlimeApp() {
                 applyPressReset()
                 setBrowseIdx(null)
               }}
-              aria-label="닫기"
+              aria-label={tr('닫기')}
             >
               ×
             </button>
@@ -4883,7 +4956,7 @@ export default function SlimeApp() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className={styles.modalTitle}>
-              {nameDialog.mode === 'save' ? '슬라임 이름' : '이름 수정'}
+              {nameDialog.mode === 'save' ? tr('슬라임 이름') : tr('이름 수정')}
             </div>
             <input
               type="text"
@@ -4907,7 +4980,7 @@ export default function SlimeApp() {
               }}
               className={styles.nameDialogInput}
               maxLength={30}
-              placeholder="슬라임 이름"
+              placeholder={tr('슬라임 이름')}
             />
             <div className={styles.nameDialogActions}>
               <button
@@ -4915,14 +4988,14 @@ export default function SlimeApp() {
                 className={styles.modalClose}
                 onClick={() => setNameDialog(null)}
               >
-                취소
+                {tr('취소')}
               </button>
               <button
                 type="button"
                 className={styles.nameDialogSaveBtn}
                 onClick={commitNameDialog}
               >
-                저장
+                {tr('저장')}
               </button>
             </div>
           </div>
@@ -4945,7 +5018,7 @@ export default function SlimeApp() {
             if (snap) applyStateSnapshot(snap)
             setBottomMode('options')
           }}
-          aria-label="컬렉션 닫기"
+          aria-label={tr('컬렉션 닫기')}
         >
           ×
         </button>
@@ -4980,7 +5053,7 @@ export default function SlimeApp() {
               setAutoSaveAsDefault(false)
               setAutoTimeOpen(true)
             }}
-            aria-label="자동 압박 남은 시간 (탭하여 조정)"
+            aria-label={tr('자동 압박 남은 시간 (탭하여 조정)')}
           >
             {mm}:{ss}
           </button>
@@ -5006,7 +5079,7 @@ export default function SlimeApp() {
                   onClick={() =>
                     setAutoTimeEditMin((v) => Math.max(0, v - 1))
                   }
-                  aria-label="분 감소"
+                  aria-label={tr('분 감소')}
                 >
                   −
                 </button>
@@ -5019,7 +5092,7 @@ export default function SlimeApp() {
                   onClick={() =>
                     setAutoTimeEditMin((v) => Math.min(59, v + 1))
                   }
-                  aria-label="분 증가"
+                  aria-label={tr('분 증가')}
                 >
                   +
                 </button>
@@ -5032,7 +5105,7 @@ export default function SlimeApp() {
                   onClick={() =>
                     setAutoTimeEditSec((v) => Math.max(0, v - 1))
                   }
-                  aria-label="초 감소"
+                  aria-label={tr('초 감소')}
                 >
                   −
                 </button>
@@ -5045,7 +5118,7 @@ export default function SlimeApp() {
                   onClick={() =>
                     setAutoTimeEditSec((v) => Math.min(59, v + 1))
                   }
-                  aria-label="초 증가"
+                  aria-label={tr('초 증가')}
                 >
                   +
                 </button>
@@ -5247,7 +5320,7 @@ export default function SlimeApp() {
                 setHandDetectPending(true)
               }
             }}
-            aria-label={skeletonOn ? '손 감지 끄기' : '손 감지 켜기'}
+            aria-label={skeletonOn ? tr('손 감지 끄기') : tr('손 감지 켜기')}
             aria-pressed={skeletonOn}
           >
             <svg
@@ -5292,9 +5365,9 @@ export default function SlimeApp() {
               waxAttackPendingRef.current = true
               setAutoPressOn(true)
             }}
-            aria-label={autoPressOn ? '자동 압박 중' : '자동 압박 시작'}
+            aria-label={autoPressOn ? tr('자동 압박 중') : tr('자동 압박 시작')}
             aria-pressed={autoPressOn}
-            title="자동 압박"
+            title={tr('자동 압박')}
           >
             {/* Concentric ripples — reads as "auto tapping / press
                 waves". Center dot is the tap, rings are the pulse. */}
@@ -5324,7 +5397,7 @@ export default function SlimeApp() {
               // undeformed slime after a reset.
               setSlimeText((t) => ({ ...t, face: 'front' }))
             }}
-            aria-label="슬라임 리셋"
+            aria-label={tr('슬라임 리셋')}
           >
             <svg
               width="22"
@@ -5350,7 +5423,7 @@ export default function SlimeApp() {
                   setCollectionMenuOpen((v) => !v)
                 }
               }}
-              aria-label="컬렉션"
+              aria-label={tr('컬렉션')}
               aria-expanded={collectionMenuOpen}
             >
               <svg
@@ -5471,7 +5544,7 @@ export default function SlimeApp() {
           colors.forEach((cid) => {
             allTags.push({
               key: `sc-${cid}`,
-              label: '슬라임',
+              label: tr('슬라임'),
               swatchColor: hexToCssColor(
                 resolveColorHex(cid, colorAdjustments)
               ),
@@ -5485,7 +5558,7 @@ export default function SlimeApp() {
             if (m) {
               allTags.push({
                 key: `sm-${material}`,
-                label: m.label,
+                label: tr(m.label),
                 onRemove: () => setMaterial('crystal'),
                 targetCategory: 'slime',
                 targetSubCategory: 'material'
@@ -5505,7 +5578,7 @@ export default function SlimeApp() {
             if (c && !hasCoatingColor) {
               allTags.push({
                 key: `sco-${coating}`,
-                label: c.label,
+                label: tr(c.label),
                 onRemove: () => setCoating('none'),
                 targetCategory: 'slime',
                 targetSubCategory: 'coating'
@@ -5520,7 +5593,7 @@ export default function SlimeApp() {
               foilColors.forEach((cid) => {
                 allTags.push({
                   key: `sfc-${cid}`,
-                  label: c?.label ?? '코팅',
+                  label: tr(c?.label ?? '코팅'),
                   swatchColor: hexToCssColor(
                     resolveFoilCoatingHex(cid, colorAdjustments)
                   ),
@@ -5534,7 +5607,7 @@ export default function SlimeApp() {
               coatingColors.forEach((cid) => {
                 allTags.push({
                   key: `scc-${cid}`,
-                  label: c?.label ?? '코팅',
+                  label: tr(c?.label ?? '코팅'),
                   swatchColor: hexToCssColor(
                     resolveWaxCoatingHex(cid, colorAdjustments)
                   ),
@@ -5553,7 +5626,7 @@ export default function SlimeApp() {
             if (s) {
               allTags.push({
                 key: `ssh-${shape}`,
-                label: s.label,
+                label: tr(s.label),
                 onRemove: () => setShape('sphere'),
                 targetCategory: 'slime',
                 targetSubCategory: 'shape'
@@ -5563,7 +5636,7 @@ export default function SlimeApp() {
           if (stickerOn) {
             allTags.push({
               key: 'sticker',
-              label: '사진 슬라임',
+              label: tr('사진 슬라임'),
               onRemove: clearSticker,
               targetCategory: 'slime'
             })
@@ -5594,8 +5667,10 @@ export default function SlimeApp() {
             allTags.push({
               key: 'b-compact',
               label: beads.fill
-                ? '비즈 꽉'
-                : `비즈 ${beads.count}개`,
+                ? tr('비즈 꽉')
+                : locale === 'ko'
+                  ? `비즈 ${beads.count}개`
+                  : `${beads.count} beads`,
               onRemove: () => setBeads(BEADS_DEFAULT),
               targetCategory: 'compact',
               targetSubCategory: 'color'
@@ -5604,14 +5679,14 @@ export default function SlimeApp() {
           if (beads.combo === 'chunk' && beads.count > 0) {
             allTags.push({
               key: 'b-chunk',
-              label: `비즈볼 ${beads.count}개`,
+              label: locale === 'ko' ? `비즈볼 ${beads.count}개` : `${beads.count} bead balls`,
               onRemove: () => setBeads(BEADS_DEFAULT),
               targetCategory: 'chunk',
               targetSubCategory: 'count'
             })
           }
           if (beads.combo !== 'none') {
-            const beadLabel = beads.combo === 'chunk' ? '비즈볼' : '비즈'
+            const beadLabel = tr(beads.combo === 'chunk' ? '비즈볼' : '비즈')
             const beadCategory =
               beads.combo === 'chunk' ? 'chunk' : 'compact'
             beads.colors.forEach((cid) => {
@@ -5636,7 +5711,7 @@ export default function SlimeApp() {
               if (!s) return
               allTags.push({
                 key: `bs-${sid}`,
-                label: `비즈 ${s.label}`,
+                label: `${tr('비즈')} ${tr(s.label)}`,
                 onRemove: () =>
                   setBeads({
                     ...beads,
@@ -5651,7 +5726,7 @@ export default function SlimeApp() {
               if (bm) {
                 allTags.push({
                   key: `bm-${beads.material}`,
-                  label: `비즈 ${bm.label}`,
+                  label: `${tr('비즈')} ${tr(bm.label)}`,
                   onRemove: () => setBeads({ ...beads, material: 'plastic' }),
                   targetCategory: beadCategory,
                   targetSubCategory: 'material'
@@ -5663,7 +5738,7 @@ export default function SlimeApp() {
             if (!tex) return
             allTags.push({
               key: `pb-${i}`,
-              label: `사진 비즈 ${i + 1}`,
+              label: locale === 'ko' ? `사진 비즈 ${i + 1}` : `Photo bead ${i + 1}`,
               onRemove: () => clearPhotoBeadAt(i),
               targetCategory: 'chunk'
             })
@@ -5673,7 +5748,7 @@ export default function SlimeApp() {
           if (innerSlime.combo !== 'none' && innerSlime.count > 0) {
             allTags.push({
               key: 'is-active',
-              label: `슬라임볼 ${innerSlime.count}개`,
+              label: locale === 'ko' ? `슬라임볼 ${innerSlime.count}개` : `${innerSlime.count} slime balls`,
               onRemove: () => setInnerSlime(BEADS_DEFAULT),
               targetCategory: 'inner-slime',
               targetSubCategory: 'count'
@@ -5683,7 +5758,7 @@ export default function SlimeApp() {
             innerSlime.colors.forEach((cid) => {
               allTags.push({
                 key: `isc-${cid}`,
-                label: '슬라임볼',
+                label: tr('슬라임볼'),
                 swatchColor: hexToCssColor(
                   resolveColorHex(cid, colorAdjustments)
                 ),
@@ -5704,7 +5779,7 @@ export default function SlimeApp() {
               if (bc && innerCoatingColors.length === 0) {
                 allTags.push({
                   key: `isco-${innerSlime.coating}`,
-                  label: `슬라임볼 ${bc.label}`,
+                  label: `${tr('슬라임볼')} ${tr(bc.label)}`,
                   onRemove: () =>
                     setInnerSlime({ ...innerSlime, coating: 'none' }),
                   targetCategory: 'inner-slime',
@@ -5716,7 +5791,7 @@ export default function SlimeApp() {
               innerCoatingColors.forEach((cid) => {
                 allTags.push({
                   key: `iscc-${cid}`,
-                  label: `슬라임볼 ${bc?.label ?? '코팅'}`,
+                  label: `${tr('슬라임볼')} ${tr(bc?.label ?? '코팅')}`,
                   swatchColor: hexToCssColor(
                     resolveInnerCoatingHex(cid, colorAdjustments)
                   ),
@@ -5737,7 +5812,7 @@ export default function SlimeApp() {
           if (customBeads.count > 0) {
             allTags.push({
               key: 'cb-active',
-              label: `추가비즈 ${customBeads.count}개`,
+              label: locale === 'ko' ? `추가비즈 ${customBeads.count}개` : `${customBeads.count} add-on beads`,
               onRemove: () => setCustomBeads(CUSTOM_BEADS_DEFAULT),
               targetCategory: 'custom-beads',
               targetSubCategory: 'count'
@@ -5746,7 +5821,7 @@ export default function SlimeApp() {
           customBeads.colors.forEach((cid) => {
             allTags.push({
               key: `cbc-${cid}`,
-              label: '추가비즈',
+              label: tr('추가비즈'),
               swatchColor: hexToCssColor(
                 resolveColorHex(cid, colorAdjustments)
               ),
@@ -5762,7 +5837,7 @@ export default function SlimeApp() {
           if (customBeadsPhoto) {
             allTags.push({
               key: 'cbp',
-              label: '커스텀 사진',
+              label: tr('커스텀 사진'),
               onRemove: () => setCustomBeadsPhoto(null),
               targetCategory: 'custom-beads'
             })
@@ -5775,8 +5850,9 @@ export default function SlimeApp() {
             const cfg = sprinkles[typeId]
             const isFilled = 'fill' in cfg && cfg.fill
             if (cfg.count === 0 && !isFilled) return
-            const typeLabel =
+            const typeLabel = tr(
               typeId === 'paper' ? '스팽글' : typeId === 'powder' ? '가루' : '잉크'
+            )
             cfg.colors.forEach((cid) => {
               const c = SPRINKLE_COLORS.find((x) => x.id === cid)
               if (!c) return
@@ -5840,8 +5916,8 @@ export default function SlimeApp() {
                 type="button"
                 className={styles.unifiedTagResetBtn}
                 onClick={resetToDefaults}
-                aria-label="모든 옵션 초기화"
-                title="모든 옵션 초기화"
+                aria-label={tr('모든 옵션 초기화')}
+                title={tr('모든 옵션 초기화')}
               >
                 <svg
                   width="14"
@@ -5904,7 +5980,7 @@ export default function SlimeApp() {
                         e.stopPropagation()
                         t.onRemove()
                       }}
-                      aria-label={`${t.label ?? '옵션'} 제거`}
+                      aria-label={`${t.label ?? tr('옵션')} ${tr('제거')}`}
                     >
                       ×
                     </button>
@@ -5981,8 +6057,8 @@ export default function SlimeApp() {
                     }}
                   >
                     {selectedForDelete.size === items.length
-                      ? '선택 해제'
-                      : '전체선택'}
+                      ? tr('선택 해제')
+                      : tr('전체선택')}
                   </button>
                 </>
               ) : (
@@ -5991,8 +6067,8 @@ export default function SlimeApp() {
                     type="button"
                     className={styles.collectionCarouselAction}
                     onClick={() => applyPressReset()}
-                    aria-label="압박 리셋"
-                    title="압박 리셋"
+                    aria-label={tr('압박 리셋')}
+                    title={tr('압박 리셋')}
                   >
                     <svg
                       width="16"
@@ -6018,8 +6094,8 @@ export default function SlimeApp() {
                     type="button"
                     className={styles.collectionCarouselAction}
                     onClick={() => void handleShare()}
-                    aria-label="공유"
-                    title="공유"
+                    aria-label={tr('공유')}
+                    title={tr('공유')}
                   >
                     <svg
                       width="16"
@@ -6125,8 +6201,8 @@ export default function SlimeApp() {
                           data-checked={selectedForDelete.has(entry.id)}
                           aria-label={
                             selectedForDelete.has(entry.id)
-                              ? '삭제 선택 해제'
-                              : '삭제 선택'
+                              ? tr('삭제 선택 해제')
+                              : tr('삭제 선택')
                           }
                         >
                           {selectedForDelete.has(entry.id) && (
@@ -6161,7 +6237,7 @@ export default function SlimeApp() {
 
       {busy && (
         <div className={styles.overlay}>
-          <div className={styles.overlayText}>{busyLabel || '준비 중…'}</div>
+          <div className={styles.overlayText}>{busyLabel || tr('준비 중…')}</div>
         </div>
       )}
     </div>

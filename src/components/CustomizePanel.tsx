@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import {
   BEAD_COLORS,
   BEAD_COMBOS,
@@ -50,6 +50,7 @@ import {
   type SprinkleTypeId,
   type SprinklesConfig
 } from '../slime/presets'
+import { useTr } from '../i18n'
 import styles from './CustomizePanel.module.css'
 
 /**
@@ -241,6 +242,7 @@ function ColorAdjustSliders({
   adjustments: ColorAdjustments
   onChange: (id: string, dh: number, dl: number) => void
 }) {
+  const tr = useTr()
   const cur = (adjustments as Record<string, readonly [number, number]>)[
     colorId
   ] ?? [0, 0]
@@ -258,7 +260,7 @@ function ColorAdjustSliders({
           value={dh}
           onChange={(e) => onChange(colorId, parseFloat(e.currentTarget.value), dl)}
           className={styles.slider}
-          aria-label="색조 조절"
+          aria-label={tr('색조 조절')}
         />
         <span className={styles.sliderValue}>
           {dh > 0 ? `+${dh}` : dh}
@@ -274,7 +276,7 @@ function ColorAdjustSliders({
           value={dl}
           onChange={(e) => onChange(colorId, dh, parseFloat(e.currentTarget.value))}
           className={styles.slider}
-          aria-label="명도 조절"
+          aria-label={tr('명도 조절')}
         />
         <span className={styles.sliderValue}>
           {dl > 0 ? `+${dl}` : dl}
@@ -288,21 +290,29 @@ function ColorAdjustSliders({
  *  panel toggle chip. Solid → hatched split for the OFF (band) state,
  *  smooth stroke for the ON state via currentColor. */
 function GradientIcon() {
+  // useId gives each instance a stable, unique gradient-def ID so multiple
+  // GradientIcon buttons on the same page don't collide on `url(#...)`.
+  const gid = useId().replace(/:/g, '')
   return (
     <svg
       width="16"
       height="16"
       viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
     >
-      <rect x="3" y="6" width="18" height="12" rx="2" />
-      <line x1="7" y1="6" x2="7" y2="18" />
-      <line x1="12" y1="6" x2="12" y2="18" />
-      <line x1="17" y1="6" x2="17" y2="18" />
+      <defs>
+        <linearGradient id={`grad-${gid}`} x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stopColor="currentColor" stopOpacity="1" />
+          <stop offset="100%" stopColor="currentColor" stopOpacity="0.15" />
+        </linearGradient>
+      </defs>
+      <circle
+        cx="12"
+        cy="12"
+        r="8.5"
+        fill={`url(#grad-${gid})`}
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
     </svg>
   )
 }
@@ -583,6 +593,7 @@ function PrimaryChipsRow({
    *  since the value never needs to trigger a re-render. */
   scrollLeftRef: React.MutableRefObject<number>
 }) {
+  const tr = useTr()
   const scrollRef = useRef<HTMLDivElement>(null)
   const [atStart, setAtStart] = useState(true)
   const [atEnd, setAtEnd] = useState(false)
@@ -634,7 +645,7 @@ function PrimaryChipsRow({
             <span className={styles.primaryChipIcon}>
               <CategoryIcon id={c.id} />
             </span>
-            <span className={styles.primaryChipLabel}>{c.label}</span>
+            <span className={styles.primaryChipLabel}>{tr(c.label)}</span>
           </button>
         )
       })}
@@ -682,6 +693,7 @@ export default function CustomizePanel({
   onActivePanelChange,
   onRegisterOpenCategory
 }: Props) {
+  const tr = useTr()
   const [category, setCategory] = useState<CategoryId | null>(null)
   // Persistent horizontal scroll offset for the primary chip strip.
   // Each category switch tears the sub-panel down and remounts
@@ -892,17 +904,24 @@ export default function CustomizePanel({
     }
     if (c === 'ink') {
       setSprinkleSub('count')
-      // Seed ink at MAX amount on first entry so the marble effect is
-      // immediately visible — user only needs to pick colours to swap
-      // the white default swirl for their palette. Preserves any prior
-      // user tweak.
-      if (sprinkles.ink.count === 0) {
+      // Seed ink at MAX amount AND a default colour on first entry so
+      // the marble effect is immediately visible. Without seeding a
+      // colour the ink layer renders nothing until the user picks one,
+      // which read as "ink didn't apply" to users. Preserves any prior
+      // user tweak when either count or colours are already set.
+      if (sprinkles.ink.count === 0 && sprinkles.ink.colors.length === 0) {
         onSprinkles({
           ...sprinkles,
           ink: {
             ...sprinkles.ink,
-            count: SPRINKLES_LIMITS.inkCountMax
+            count: SPRINKLES_LIMITS.inkCountMax,
+            colors: [SPRINKLE_COLORS[0].id]
           }
+        })
+      } else if (sprinkles.ink.count === 0) {
+        onSprinkles({
+          ...sprinkles,
+          ink: { ...sprinkles.ink, count: SPRINKLES_LIMITS.inkCountMax }
         })
       }
     }
@@ -1052,7 +1071,7 @@ export default function CustomizePanel({
         data-active={insideToggle.active}
         onClick={insideToggle.onToggle}
         aria-pressed={insideToggle.active}
-        title="슬라임 안"
+        title={tr('슬라임 안')}
       >
         슬라임 안
       </button>
@@ -1068,7 +1087,7 @@ export default function CustomizePanel({
     )
   }
 
-  const catLabel = CATEGORIES.find((c) => c.id === category)?.label
+  const catLabel = tr(CATEGORIES.find((c) => c.id === category)?.label ?? '')
   const goBack = () => {
     setCategory(null)
   }
@@ -1093,7 +1112,7 @@ export default function CustomizePanel({
       if (m) {
         slimeTags.push({
           key: `mat-${material}`,
-          label: m.label,
+          label: tr(m.label),
           onRemove: () => onMaterial('crystal')
         })
       }
@@ -1103,7 +1122,7 @@ export default function CustomizePanel({
       if (c) {
         slimeTags.push({
           key: `coat-${coating}`,
-          label: c.label,
+          label: tr(c.label),
           onRemove: () => onCoating('none')
         })
       }
@@ -1113,7 +1132,7 @@ export default function CustomizePanel({
       if (s) {
         slimeTags.push({
           key: `shape-${shape}`,
-          label: s.label,
+          label: tr(s.label),
           onRemove: () => onShape('sphere')
         })
       }
@@ -1144,7 +1163,7 @@ export default function CustomizePanel({
           onBack={goBack}
           tags={slimeTags}
           rightAction={{
-            ariaLabel: stickerOn ? '사진 지우기' : '사진 슬라임',
+            ariaLabel: stickerOn ? tr('사진 지우기') : tr('사진 슬라임'),
             active: stickerOn,
             onClick: () => {
               if (stickerOn) onClearSticker()
@@ -1155,7 +1174,7 @@ export default function CustomizePanel({
         />
         <div className={styles.tabs}>
           <CameraTriggerChip
-            ariaLabel={stickerOn ? '사진 스티커 교체' : '사진 슬라임'}
+            ariaLabel={stickerOn ? tr('사진 스티커 교체') : tr('사진 슬라임')}
             active={stickerOn}
             onClick={() => openPhotoPicker({ kind: 'sticker' })}
           />
@@ -1170,7 +1189,7 @@ export default function CustomizePanel({
                 setActiveAdjustColor(null)
               }}
             >
-              {s.label}
+              {tr(s.label)}
             </button>
           ))}
         </div>
@@ -1211,7 +1230,7 @@ export default function CustomizePanel({
                         setActiveAdjustColor(c.id)
                       }
                     }}
-                    aria-label={c.label}
+                    aria-label={tr(c.label)}
                     aria-pressed={active}
                   >
                     <span
@@ -1222,7 +1241,7 @@ export default function CustomizePanel({
                         )
                       }}
                     />
-                    <span className={styles.chipLabel}>{c.label}</span>
+                    <span className={styles.chipLabel}>{tr(c.label)}</span>
                   </button>
                 )
               })}
@@ -1246,7 +1265,7 @@ export default function CustomizePanel({
                 type="button"
                 onClick={() => onMaterial(m.id)}
               >
-                <span className={styles.chipLabel}>{m.label}</span>
+                <span className={styles.chipLabel}>{tr(m.label)}</span>
               </button>
             ))}
           </div>
@@ -1262,7 +1281,7 @@ export default function CustomizePanel({
                   type="button"
                   onClick={() => onCoating(c.id)}
                 >
-                  <span className={styles.chipLabel}>{c.label}</span>
+                  <span className={styles.chipLabel}>{tr(c.label)}</span>
                 </button>
               ))}
             </div>
@@ -1295,7 +1314,7 @@ export default function CustomizePanel({
                           // tag × only, matching the body-colour UX.
                           setActiveAdjustColor(adjustKey)
                         }}
-                        aria-label={c.label}
+                        aria-label={tr(c.label)}
                         aria-pressed={active}
                       >
                         <span
@@ -1306,7 +1325,7 @@ export default function CustomizePanel({
                             )
                           }}
                         />
-                        <span className={styles.chipLabel}>{c.label}</span>
+                        <span className={styles.chipLabel}>{tr(c.label)}</span>
                       </button>
                     )
                   })}
@@ -1347,7 +1366,7 @@ export default function CustomizePanel({
                           // tag × only, matching the body-colour UX.
                           setActiveAdjustColor(adjustKey)
                         }}
-                        aria-label={c.label}
+                        aria-label={tr(c.label)}
                         aria-pressed={active}
                       >
                         <span
@@ -1358,7 +1377,7 @@ export default function CustomizePanel({
                             )
                           }}
                         />
-                        <span className={styles.chipLabel}>{c.label}</span>
+                        <span className={styles.chipLabel}>{tr(c.label)}</span>
                       </button>
                     )
                   })}
@@ -1385,7 +1404,7 @@ export default function CustomizePanel({
                 type="button"
                 onClick={() => onShape(s.id)}
               >
-                <span className={styles.chipLabel}>{s.label}</span>
+                <span className={styles.chipLabel}>{tr(s.label)}</span>
               </button>
             ))}
           </div>
@@ -1404,7 +1423,7 @@ export default function CustomizePanel({
                 type="text"
                 value={slimeText.content}
                 maxLength={12}
-                placeholder="텍스트 입력"
+                placeholder={tr('텍스트 입력')}
                 onChange={(e) =>
                   onSlimeText({ ...slimeText, content: e.target.value })
                 }
@@ -1420,7 +1439,7 @@ export default function CustomizePanel({
                   type="button"
                   className={styles.simpleTextClearBtn}
                   onClick={() => onSlimeText(SLIME_TEXT_DEFAULT)}
-                  aria-label="텍스트 지우기"
+                  aria-label={tr('텍스트 지우기')}
                 >
                   ×
                 </button>
@@ -1461,7 +1480,7 @@ export default function CustomizePanel({
                         resolveColorHex(c.id, colorAdjustments)
                       )
                     }}
-                    aria-label={c.label}
+                    aria-label={tr(c.label)}
                     aria-pressed={isActive}
                   >
                     <span
@@ -1472,7 +1491,7 @@ export default function CustomizePanel({
                         )
                       }}
                     />
-                    <span className={styles.chipLabel}>{c.label}</span>
+                    <span className={styles.chipLabel}>{tr(c.label)}</span>
                   </button>
                 )
               })}
@@ -1492,7 +1511,7 @@ export default function CustomizePanel({
   if (category === 'compact' || category === 'chunk') {
     const activeCombo: BeadCombo = category
     const combo = BEAD_COMBOS.find((c) => c.id === activeCombo)
-    const catTitle = combo?.label ?? ''
+    const catTitle = tr(combo?.label ?? '')
     // 속비즈 (chunk) here no longer exposes 코팅 — coating lives on
     // the 속슬라임 tab now, since the 슬라임/속슬라임 pair is where
     // the coating decision belongs. The 속슬라임 panel renders its
@@ -1523,7 +1542,7 @@ export default function CustomizePanel({
         if (!s || beads.shapes.length <= 1) return
         beadTags.push({
           key: `bs-${sid}`,
-          label: s.label,
+          label: tr(s.label),
           onRemove: () =>
             onBeads({ ...beads, shapes: beads.shapes.filter((x) => x !== sid) })
         })
@@ -1533,7 +1552,7 @@ export default function CustomizePanel({
         if (bm) {
           beadTags.push({
             key: `bm-${beads.material}`,
-            label: bm.label,
+            label: tr(bm.label),
             onRemove: () => onBeads({ ...beads, material: 'plastic' })
           })
         }
@@ -1543,7 +1562,7 @@ export default function CustomizePanel({
         if (bc) {
           beadTags.push({
             key: `bcoat-${beads.coating}`,
-            label: bc.label,
+            label: tr(bc.label),
             onRemove: () => onBeads({ ...beads, coating: 'none' })
           })
         }
@@ -1583,7 +1602,7 @@ export default function CustomizePanel({
                 setActiveAdjustColor(null)
               }}
             >
-              {s.label}
+              {tr(s.label)}
             </button>
           ))}
         </div>
@@ -1603,7 +1622,7 @@ export default function CustomizePanel({
                 onClick={() =>
                   onBeads({ ...beads, gradient: !beads.gradient })
                 }
-                aria-label="그라데이션 토글"
+                aria-label={tr('그라데이션 토글')}
                 aria-pressed={!!beads.gradient}
               >
                 <GradientIcon />
@@ -1639,7 +1658,7 @@ export default function CustomizePanel({
                         setActiveAdjustColor(c.id)
                       }
                     }}
-                    aria-label={c.label}
+                    aria-label={tr(c.label)}
                     aria-pressed={active}
                   >
                     <span
@@ -1650,7 +1669,7 @@ export default function CustomizePanel({
                         )
                       }}
                     />
-                    <span className={styles.chipLabel}>{c.label}</span>
+                    <span className={styles.chipLabel}>{tr(c.label)}</span>
                   </button>
                 )
               })}
@@ -1698,7 +1717,7 @@ export default function CustomizePanel({
                 })
               }}
               className={styles.slider}
-              aria-label="비즈 양"
+              aria-label={tr('비즈 양')}
             />
             <span className={styles.sliderValue}>
               {Math.min(beads.count, beadChunkMaxCount(sizeForCap))}
@@ -1749,7 +1768,7 @@ export default function CustomizePanel({
                   }
                 }}
                 className={styles.slider}
-                aria-label="비즈 크기"
+                aria-label={tr('비즈 크기')}
               />
               <span className={styles.sliderValue}>
                 {clampedSize.toFixed(2)}
@@ -1781,7 +1800,7 @@ export default function CustomizePanel({
                     onClick={() => toggleBeadShape(s.id)}
                     aria-pressed={beads.shapes.includes(s.id)}
                   >
-                    <span className={styles.chipLabel}>{s.label}</span>
+                    <span className={styles.chipLabel}>{tr(s.label)}</span>
                   </button>
                 )
               )}
@@ -1801,7 +1820,7 @@ export default function CustomizePanel({
                 type="button"
                 onClick={() => onBeads({ ...beads, material: m.id })}
               >
-                <span className={styles.chipLabel}>{m.label}</span>
+                <span className={styles.chipLabel}>{tr(m.label)}</span>
               </button>
             ))}
           </div>
@@ -1816,7 +1835,7 @@ export default function CustomizePanel({
                 type="button"
                 onClick={() => onBeads({ ...beads, coating: c.id })}
               >
-                <span className={styles.chipLabel}>{c.label}</span>
+                <span className={styles.chipLabel}>{tr(c.label)}</span>
               </button>
             ))}
           </div>
@@ -1836,7 +1855,7 @@ export default function CustomizePanel({
                 })
               }
               className={styles.slider}
-              aria-label="꽉비즈 납작함"
+              aria-label={tr('꽉비즈 납작함')}
             />
             <span className={styles.sliderValue}>
               {Math.round(Math.min(beads.flatness ?? 0, 0.58) * 100)}%
@@ -1881,7 +1900,7 @@ export default function CustomizePanel({
     // 'active' tag zeroes the count so the whole type turns off.
     const sprinkleTags: SelectionTag[] = []
     if (typeCfg.count > 0 || ('fill' in typeCfg && typeCfg.fill)) {
-      const tLabel = SPRINKLE_TYPES.find((t) => t.id === effectiveType)?.label
+      const tLabel = tr(SPRINKLE_TYPES.find((t) => t.id === effectiveType)?.label ?? '')
       if (tLabel) {
         sprinkleTags.push({
           key: `stype-${effectiveType}`,
@@ -1911,7 +1930,7 @@ export default function CustomizePanel({
         if (!c) return
         sprinkleTags.push({
           key: `sc-${effectiveType}-${cid}`,
-          label: c.label,
+          label: tr(c.label),
           onRemove: () => {
             const next = typeCfg.colors.filter((x) => x !== cid)
             if (effectiveType === 'paper') {
@@ -1951,7 +1970,7 @@ export default function CustomizePanel({
                   setActiveAdjustColor(null)
                 }}
               >
-                {s.label}
+                {tr(s.label)}
               </button>
             ))}
           </div>
@@ -1983,14 +2002,14 @@ export default function CustomizePanel({
                       setActiveAdjustColor(adjustKey)
                     }
                   }}
-                  aria-label={c.label}
+                  aria-label={tr(c.label)}
                   aria-pressed={typeCfg.colors.includes(c.id)}
                 >
                   <span
                     className={styles.swatch}
                     style={{ background: hexToCss(c.hex) }}
                   />
-                  <span className={styles.chipLabel}>{c.label}</span>
+                  <span className={styles.chipLabel}>{tr(c.label)}</span>
                 </button>
               )
             })}
@@ -2054,10 +2073,10 @@ export default function CustomizePanel({
                   }}
                   className={styles.slider}
                   disabled={isFilling}
-                  aria-label="스프링클 양"
+                  aria-label={tr('스프링클 양')}
                 />
                 <span className={styles.sliderValue}>
-                  {isFilling ? '꽉' : typeCfg.count}
+                  {isFilling ? tr('꽉') : typeCfg.count}
                 </span>
               </div>
               {supportsFill && (
@@ -2106,7 +2125,7 @@ export default function CustomizePanel({
                   })
                 }
                 className={styles.slider}
-                aria-label="스프링클 크기"
+                aria-label={tr('스프링클 크기')}
               />
               <span className={styles.sliderValue}>
                 {clamped.toFixed(2)}
@@ -2126,7 +2145,7 @@ export default function CustomizePanel({
                   updateSprinkleSub('paper', { shape: s.id })
                 }
               >
-                <span className={styles.chipLabel}>{s.label}</span>
+                <span className={styles.chipLabel}>{tr(s.label)}</span>
               </button>
             ))}
           </div>
@@ -2151,7 +2170,7 @@ export default function CustomizePanel({
                     : updateSprinkleSub('powder', { material: m.id })
                 }
               >
-                <span className={styles.chipLabel}>{m.label}</span>
+                <span className={styles.chipLabel}>{tr(m.label)}</span>
               </button>
             ))}
           </div>
@@ -2180,7 +2199,7 @@ export default function CustomizePanel({
                   updateSprinkleSub('paper', patch)
                 }}
               >
-                <span className={styles.chipLabel}>{k.label}</span>
+                <span className={styles.chipLabel}>{tr(k.label)}</span>
               </button>
             ))}
           </div>
@@ -2217,7 +2236,7 @@ export default function CustomizePanel({
       if (!s || innerSlime.shapes.length <= 1) return
       beadTags.push({
         key: `is-s-${sid}`,
-        label: s.label,
+        label: tr(s.label),
         onRemove: () =>
           onInnerSlime({
             ...innerSlime,
@@ -2233,7 +2252,7 @@ export default function CustomizePanel({
       if (sm) {
         beadTags.push({
           key: `is-m-${innerSlime.material}`,
-          label: sm.label,
+          label: tr(sm.label),
           onRemove: () =>
             onInnerSlime({ ...innerSlime, material: 'crystal' })
         })
@@ -2244,7 +2263,7 @@ export default function CustomizePanel({
       if (bc) {
         beadTags.push({
           key: `is-co-${innerSlime.coating}`,
-          label: bc.label,
+          label: tr(bc.label),
           onRemove: () => onInnerSlime({ ...innerSlime, coating: 'none' })
         })
       }
@@ -2277,7 +2296,7 @@ export default function CustomizePanel({
                 setActiveAdjustColor(null)
               }}
             >
-              {s.label}
+              {tr(s.label)}
             </button>
           ))}
         </div>
@@ -2297,7 +2316,7 @@ export default function CustomizePanel({
                   gradient: !innerSlime.gradient
                 })
               }
-              aria-label="그라데이션 토글"
+              aria-label={tr('그라데이션 토글')}
               aria-pressed={!!innerSlime.gradient}
             >
               <GradientIcon />
@@ -2326,7 +2345,7 @@ export default function CustomizePanel({
                   // via tag × only.
                   setActiveAdjustColor(c.id)
                 }}
-                aria-label={c.label}
+                aria-label={tr(c.label)}
                 aria-pressed={innerSlime.colors.includes(c.id)}
               >
                 <span
@@ -2337,7 +2356,7 @@ export default function CustomizePanel({
                     )
                   }}
                 />
-                <span className={styles.chipLabel}>{c.label}</span>
+                <span className={styles.chipLabel}>{tr(c.label)}</span>
               </button>
             ))}
             </div>
@@ -2389,7 +2408,7 @@ export default function CustomizePanel({
                 })
               }}
               className={styles.slider}
-              aria-label="속슬라임 양"
+              aria-label={tr('속슬라임 양')}
             />
             <span className={styles.sliderValue}>
               {Math.min(
@@ -2419,7 +2438,7 @@ export default function CustomizePanel({
                 })
               }}
               className={styles.slider}
-              aria-label="속슬라임 크기"
+              aria-label={tr('속슬라임 크기')}
             />
             <span className={styles.sliderValue}>
               {clampedSize.toFixed(2)}
@@ -2446,7 +2465,7 @@ export default function CustomizePanel({
                 }}
                 aria-pressed={innerSlime.shapes.includes(s.id)}
               >
-                <span className={styles.chipLabel}>{s.label}</span>
+                <span className={styles.chipLabel}>{tr(s.label)}</span>
               </button>
             ))}
           </div>
@@ -2463,7 +2482,7 @@ export default function CustomizePanel({
                   onInnerSlime({ ...innerSlime, material: m.id })
                 }
               >
-                <span className={styles.chipLabel}>{m.label}</span>
+                <span className={styles.chipLabel}>{tr(m.label)}</span>
               </button>
             ))}
           </div>
@@ -2481,7 +2500,7 @@ export default function CustomizePanel({
                     onInnerSlime({ ...innerSlime, coating: c.id })
                   }
                 >
-                  <span className={styles.chipLabel}>{c.label}</span>
+                  <span className={styles.chipLabel}>{tr(c.label)}</span>
                 </button>
               ))}
             </div>
@@ -2517,7 +2536,7 @@ export default function CustomizePanel({
                           // tag × only.
                           setActiveAdjustColor(adjustKey)
                         }}
-                        aria-label={c.label}
+                        aria-label={tr(c.label)}
                         aria-pressed={active}
                       >
                         <span
@@ -2528,7 +2547,7 @@ export default function CustomizePanel({
                             )
                           }}
                         />
-                        <span className={styles.chipLabel}>{c.label}</span>
+                        <span className={styles.chipLabel}>{tr(c.label)}</span>
                       </button>
                     )
                   })}
@@ -2586,7 +2605,7 @@ export default function CustomizePanel({
       if (!s || customBeads.shapes.length <= 1) return
       beadTags.push({
         key: `cb-s-${sid}`,
-        label: s.label,
+        label: tr(s.label),
         onRemove: () =>
           onCustomBeads({
             ...customBeads,
@@ -2620,7 +2639,7 @@ export default function CustomizePanel({
           onBack={goBack}
           tags={beadTags}
           rightAction={{
-            ariaLabel: customBeadsPhotoOn ? '사진 지우기' : '사진 인쇄',
+            ariaLabel: customBeadsPhotoOn ? tr('사진 지우기') : tr('사진 인쇄'),
             active: customBeadsPhotoOn,
             onClick: () => {
               if (customBeadsPhotoOn) onClearCustomBeadsPhoto()
@@ -2631,7 +2650,7 @@ export default function CustomizePanel({
         />
         <div className={styles.tabs}>
           <CameraTriggerChip
-            ariaLabel={customBeadsPhotoOn ? '사진 교체' : '사진 인쇄'}
+            ariaLabel={customBeadsPhotoOn ? tr('사진 교체') : tr('사진 인쇄')}
             active={customBeadsPhotoOn}
             onClick={() => openPhotoPicker({ kind: 'customPhoto' })}
           />
@@ -2646,7 +2665,7 @@ export default function CustomizePanel({
                 setActiveAdjustColor(null)
               }}
             >
-              {s.label}
+              {tr(s.label)}
             </button>
           ))}
         </div>
@@ -2666,7 +2685,7 @@ export default function CustomizePanel({
                   gradient: !customBeads.gradient
                 })
               }
-              aria-label="그라데이션 토글"
+              aria-label={tr('그라데이션 토글')}
               aria-pressed={!!customBeads.gradient}
             >
               <GradientIcon />
@@ -2707,7 +2726,7 @@ export default function CustomizePanel({
                       )
                     }}
                   />
-                  <span className={styles.chipLabel}>{c.label}</span>
+                  <span className={styles.chipLabel}>{tr(c.label)}</span>
                 </button>
               )
             })}
@@ -2736,7 +2755,7 @@ export default function CustomizePanel({
                 })
               }
               className={styles.slider}
-              aria-label="추가비즈 양"
+              aria-label={tr('추가비즈 양')}
             />
             <span className={styles.sliderValue}>
               {customBeads.count}
@@ -2758,7 +2777,7 @@ export default function CustomizePanel({
                 })
               }
               className={styles.slider}
-              aria-label="추가비즈 크기"
+              aria-label={tr('추가비즈 크기')}
             />
             <span className={styles.sliderValue}>
               {customBeads.size.toFixed(2)}
@@ -2785,7 +2804,7 @@ export default function CustomizePanel({
                 }}
                 aria-pressed={customBeads.shapes.includes(s.id)}
               >
-                <span className={styles.chipLabel}>{s.label}</span>
+                <span className={styles.chipLabel}>{tr(s.label)}</span>
               </button>
             ))}
           </div>
@@ -2805,7 +2824,7 @@ export default function CustomizePanel({
                 })
               }
               className={styles.slider}
-              aria-label="추가비즈 두께"
+              aria-label={tr('추가비즈 두께')}
             />
             <span className={styles.sliderValue}>
               {Math.round(Math.min(customBeads.flatness, 0.58) * 100)}%
@@ -2879,7 +2898,7 @@ export default function CustomizePanel({
                 }
               }}
             >
-              <span className={styles.chipLabel}>{t.label}</span>
+              <span className={styles.chipLabel}>{tr(t.label)}</span>
             </button>
           ))}
         </div>
@@ -2915,7 +2934,7 @@ export default function CustomizePanel({
                   })
                 }
                 className={styles.slider}
-                aria-label="이모지 양"
+                aria-label={tr('이모지 양')}
               />
               <span className={styles.sliderValue}>
                 {emojiBeads.count}
@@ -2935,7 +2954,7 @@ export default function CustomizePanel({
                   })
                 }
                 className={styles.slider}
-                aria-label="이모지 크기"
+                aria-label={tr('이모지 크기')}
               />
               <span className={styles.sliderValue}>
                 {emojiBeads.size.toFixed(2)}

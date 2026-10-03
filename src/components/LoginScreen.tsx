@@ -1,9 +1,11 @@
 import { useState } from 'react'
 import { useAuth } from '../auth/AuthContext'
+import { useT } from '../i18n'
 import styles from './LoginScreen.module.css'
 
 export default function LoginScreen() {
   const { signInWith, signingIn } = useAuth()
+  const t = useT()
   const [error, setError] = useState<string | null>(null)
 
   const handle = async (provider: 'google' | 'kakao') => {
@@ -11,7 +13,7 @@ export default function LoginScreen() {
     try {
       await signInWith(provider)
     } catch (err) {
-      const message = err instanceof Error ? err.message : '로그인에 실패했어요. 다시 시도해주세요.'
+      const message = err instanceof Error ? err.message : t((m) => m.login.error)
       setError(message)
     }
   }
@@ -21,9 +23,7 @@ export default function LoginScreen() {
   return (
     <div className={styles.root}>
       <div className={styles.brand}>soundslime</div>
-      <div className={styles.tagline}>
-        로그인하고 나만의 슬라임을 저장해보세요.
-      </div>
+      <div className={styles.tagline}>{t((m) => m.login.tagline)}</div>
       <div className={styles.buttons}>
         <button
           className={`${styles.btn} ${styles.google}`}
@@ -38,7 +38,7 @@ export default function LoginScreen() {
               <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
             </svg>
           </span>
-          {signingIn === 'google' ? '연결 중…' : 'Google로 계속하기'}
+          {signingIn === 'google' ? t((m) => m.login.connecting) : t((m) => m.login.google)}
         </button>
         <button
           className={`${styles.btn} ${styles.kakao}`}
@@ -50,7 +50,7 @@ export default function LoginScreen() {
               <path fill="#191600" d="M12 3C6.48 3 2 6.58 2 11c0 2.85 1.86 5.34 4.66 6.77l-.94 3.44a.4.4 0 0 0 .61.44l4.09-2.72c.52.06 1.05.07 1.58.07 5.52 0 10-3.58 10-8S17.52 3 12 3z"/>
             </svg>
           </span>
-          {signingIn === 'kakao' ? '연결 중…' : '카카오로 계속하기'}
+          {signingIn === 'kakao' ? t((m) => m.login.connecting) : t((m) => m.login.kakao)}
         </button>
       </div>
       {error && <div className={styles.error}>{error}</div>}
@@ -59,5 +59,6 @@ export default function LoginScreen() {
 }
 
 export function AuthSplash() {
-  return <div className={styles.splash}>불러오는 중…</div>
+  const t = useT()
+  return <div className={styles.splash}>{t((m) => m.splash.loading)}</div>
 }
