@@ -13,8 +13,8 @@ android {
         applicationId "io.wakbu.slime"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 7
-        versionName "1.0.6"
+        versionCode 17
+        versionName "1.0.16"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -40,6 +40,19 @@ android {
                 signingConfig signingConfigs.release
             }
         }
+    }
+}
+
+// Force a single Kotlin stdlib version across all plugins so debug builds
+// don't fail with "Duplicate class kotlin.collections.jdk8..." — one
+// Capacitor plugin pulls in kotlin-stdlib-jdk8:1.6.21 (legacy, pre-1.8
+// split) while others pull in the merged kotlin-stdlib:1.8.22. Release
+// builds hide this via R8 dedup; debug builds don't, so pin all three.
+configurations.all {
+    resolutionStrategy {
+        force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+        force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
     }
 }
 

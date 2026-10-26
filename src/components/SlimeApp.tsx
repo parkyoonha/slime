@@ -47,6 +47,11 @@ import { SoundEngine } from '../sound/SoundEngine'
 import CustomizePanel, { type SelectionTag } from './CustomizePanel'
 import { AccountDrawerTop, AccountDrawerFooter } from './AccountDrawerSection'
 import { useLocale, useTr } from '../i18n'
+import { usePremium } from '../hooks/usePremium'
+import { showInterstitial, hideBanner, showBottomBanner } from '../lib/admob'
+import { App, type URLOpenListenerEvent } from '@capacitor/app'
+import { Capacitor } from '@capacitor/core'
+import { Share } from '@capacitor/share'
 import styles from './SlimeApp.module.css'
 
 const CAMERA_Z = 3.4
@@ -413,6 +418,12 @@ export default function SlimeApp() {
   const [bottomMode, setBottomMode] = useState<'options' | 'collection'>(
     'options'
   )
+  // Options panel collapsed state — controlled by the bottom-row options
+  // toggle button. When true, the sub-options area inside CustomizePanel
+  // is hidden (only the primary chip row remains visible via its portal
+  // outside the panel). Shared-link opens default to collapsed so the
+  // recipient sees the sender's slime cleanly before touching options.
+  const [panelCollapsed, setPanelCollapsed] = useState(false)
   const bottomModeRef = useRef(bottomMode)
   useEffect(() => {
     bottomModeRef.current = bottomMode
@@ -806,6 +817,20 @@ export default function SlimeApp() {
   // attribute on <html>, which every module reads through CSS variables.
   const { locale, setLocale } = useLocale()
   const tr = useTr()
+  const { isPremium } = usePremium()
+  // Hide the native AdMob banner whenever the left drawer opens — the
+  // banner is a native overlay that sits ABOVE the webview, so CSS
+  // z-index can't make the drawer render above it. Restore the banner
+  // when the drawer closes (free tier only — premium users never had
+  // one in the first place).
+  useEffect(() => {
+    if (isPremium) return
+    if (menuOpen) {
+      void hideBanner()
+    } else {
+      void showBottomBanner()
+    }
+  }, [menuOpen, isPremium])
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
     if (typeof window === 'undefined') return 'dark'
     const saved = window.localStorage.getItem('wakbu-theme')
@@ -1196,6 +1221,16 @@ export default function SlimeApp() {
     setEmojiBeads(EMOJI_BEADS_DEFAULT)
     setCrunchOn(false)
     setSlimeText(SLIME_TEXT_DEFAULT)
+    // Clear every photo surface too — sticker decal on the slime body,
+    // per-chunk photo beads, and the custom-beads photo. Without this
+    // the tag reset leaves photos lingering on the slime because the
+    // texture-backed options don't live in the main option state.
+    clearSticker()
+    setPhotoBeads((prev) => {
+      for (const tex of prev) tex?.dispose()
+      return prev.map(() => null)
+    })
+    setCustomBeadsPhoto(null)
     // Wipe every hue / lightness tune so the adjust sliders re-open
     // at zero if the user tunes a colour again after resetting.
     setColorAdjustments({})
@@ -1465,8 +1500,11 @@ export default function SlimeApp() {
       .replace(/\+/g, '-')
       .replace(/\//g, '_')
       .replace(/=+$/, '')
-    const { origin, pathname } = window.location
-    return `${origin}${pathname}?d=${b64}`
+    // Public landing page as the share base so the link opens cleanly on
+    // ANY device (recipient's browser if the app isn't installed; the app
+    // itself if the custom-scheme redirect in the landing page fires).
+    // window.location on native is https://localhost — useless to share.
+    return `https://parkyoonha.github.io/slimong/?d=${b64}`
   }
   const encodeShareUrl = (): string =>
     encodeShareUrlFromState(buildStateSnapshot())
@@ -1488,11 +1526,19 @@ export default function SlimeApp() {
       input: `슬라임 ${collection.length + 1}`
     })
   }
-  const commitNameDialog = () => {
+  const commitNameDialog = async () => {
     if (!nameDialog) return
     const trimmed = nameDialog.input.trim()
     if (nameDialog.mode === 'save') {
-      const name = trimmed || `슬라임 ${collection.length + 1}`
+      const name = trimmed || `${locale === 'ko' ? '슬라임' : 'Slime'} ${collection.length + 1}`
+      const pendingState = nameDialog.pendingState
+      const pendingThumb = nameDialog.pendingThumb
+      // Close the dialog first so the interstitial doesn't overlap it.
+      setNameDialog(null)
+      // Free users watch an interstitial to save; premium users skip.
+      // showInterstitial is resilient — it resolves on failure too, so a
+      // broken fill never permanently blocks save.
+      if (!isPremium) await showInterstitial()
       const id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
       setCollection((prev) => [
         ...prev,
@@ -1500,28 +1546,28 @@ export default function SlimeApp() {
           id,
           name,
           createdAt: Date.now(),
-          state: nameDialog.pendingState,
-          thumb: nameDialog.pendingThumb
+          state: pendingState,
+          thumb: pendingThumb
         }
       ])
       // Fresh save — clear the unsaved-changes gate so the
       // beforeunload confirm won't fire until the user tweaks
       // something new.
       hasUnsavedChangesRef.current = false
-      setToast(`${name} 저장됨`)
+      setToast(locale === 'ko' ? `${name} 저장됨` : `${name} saved`)
       window.setTimeout(() => setToast(null), 2000)
-    } else {
-      // Rename mode — no-op on empty input.
-      if (!trimmed) {
-        setNameDialog(null)
-        return
-      }
-      setCollection((prev) =>
-        prev.map((c) =>
-          c.id === nameDialog.id ? { ...c, name: trimmed } : c
-        )
-      )
+      return
     }
+    // Rename mode — no-op on empty input.
+    if (!trimmed) {
+      setNameDialog(null)
+      return
+    }
+    setCollection((prev) =>
+      prev.map((c) =>
+        c.id === nameDialog.id ? { ...c, name: trimmed } : c
+      )
+    )
     setNameDialog(null)
   }
   const beginRename = (id: string) => {
@@ -1629,19 +1675,41 @@ export default function SlimeApp() {
 
   const handleShare = async () => {
     const url = encodeShareUrl()
-    const payload = {
-      title: 'soundslime',
-      text: tr('내가 만든 슬라임 놀아봐!'),
-      url
+    const title = 'soundslime'
+
+    // Native Android share sheet — share ONLY the URL. Including a
+    // separate `text` field causes KakaoTalk (and some other chat apps)
+    // to render the message as plain text with the URL inlined — the
+    // full base64 payload becomes a wall of characters in the chat.
+    // URL-only lets the chat app fetch the destination's Open Graph
+    // meta (og:title / og:description / og:image) and render a compact
+    // link-preview card: thumbnail + short caption + domain. The OG
+    // meta is served from landing/index.html.
+    if (Capacitor.isNativePlatform()) {
+      try {
+        await Share.share({
+          title,
+          url,
+          dialogTitle: tr('슬라임 공유하기')
+        })
+        return
+      } catch (err) {
+        const msg = (err as { message?: string })?.message ?? ''
+        if (msg.toLowerCase().includes('cancel')) return
+      }
     }
+
+    // Web fallback: Web Share API if available (desktop Safari, etc.)
     try {
       if (typeof navigator !== 'undefined' && 'share' in navigator) {
-        await navigator.share(payload)
+        await navigator.share({ title, url })
         return
       }
     } catch {
-      // User dismissed the share sheet — fall through to clipboard copy.
+      /* dismissed — fall through */
     }
+
+    // Final fallback: copy to clipboard.
     try {
       await navigator.clipboard.writeText(url)
       setToast(tr('링크가 복사되었습니다'))
@@ -1652,21 +1720,64 @@ export default function SlimeApp() {
     }
   }
 
+  // Decode a `d=<base64>` query param (or hash) from any URL and apply
+  // the carried snapshot. Used by BOTH the mount-time decoder (cold
+  // start via `?d=` in window.location) and the appUrlOpen listener
+  // (warm start when the app is already running and the OS routes a
+  // shared link into it).
+  const applySharedUrl = (urlOrSearch: string) => {
+    try {
+      let d: string | null = null
+      try {
+        const u = new URL(urlOrSearch)
+        d = u.searchParams.get('d')
+      } catch {
+        d = new URLSearchParams(urlOrSearch).get('d')
+      }
+      if (!d) return
+      const b64 = d.replace(/-/g, '+').replace(/_/g, '/')
+      const json = decodeURIComponent(escape(atob(b64)))
+      applyStateSnapshot(JSON.parse(json))
+      // Shared-link recipients land with the options panel COLLAPSED so
+      // they see the sender's slime front-and-center. One tap on the
+      // options toggle opens the full panel if they want to tweak.
+      setPanelCollapsed(true)
+      setToast(tr('공유받은 슬라임을 불러왔어요'))
+      window.setTimeout(() => setToast(null), 2000)
+    } catch {
+      // Ignore invalid share params — user still gets a working slime.
+    }
+  }
+
   // On mount, decode a ?d= share param (if present) and apply it as the
   // initial customisation state so the recipient lands on the sender's
   // exact slime. Missing / malformed params silently no-op — the app
   // just boots with defaults.
   useEffect(() => {
     if (typeof window === 'undefined') return
-    const params = new URLSearchParams(window.location.search)
-    const d = params.get('d')
-    if (!d) return
-    try {
-      const b64 = d.replace(/-/g, '+').replace(/_/g, '/')
-      const json = decodeURIComponent(escape(atob(b64)))
-      applyStateSnapshot(JSON.parse(json))
-    } catch {
-      // Ignore invalid share params — user still gets a working slime.
+    applySharedUrl(window.location.search)
+  }, [])
+
+  // Warm-start share: when the app is already running and the OS routes
+  // a shared link into it (custom scheme io.wakbu.slime://share?d=... or
+  // the https landing-page URL via App Links), the Capacitor App plugin
+  // fires appUrlOpen with the full URL. Decode the d param and swap the
+  // live state so the recipient sees the sender's exact slime without
+  // having to kill and relaunch the app.
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return
+    let removed = false
+    let handle: { remove: () => Promise<void> } | null = null
+    App.addListener('appUrlOpen', (event: URLOpenListenerEvent) => {
+      // OAuth callbacks go through AuthContext — ignore them here.
+      if (event.url.startsWith('io.wakbu.slime://auth')) return
+      applySharedUrl(event.url)
+    }).then((h) => {
+      if (removed) { void h.remove() } else { handle = h }
+    })
+    return () => {
+      removed = true
+      void handle?.remove()
     }
   }, [])
 
@@ -1770,11 +1881,16 @@ export default function SlimeApp() {
     engine?.setLoopingSampleGain('emoji', 3.0)
     // 추가비즈 (같은 Imoji.mp3 재사용) — 요청 gain 3.0.
     engine?.setLoopingSampleGain('customBeads', 3.0)
+    // 꽉비즈 (Biz.mp3) — compact bead layer boost so the squish layer
+    // underneath doesn't bury it.
+    engine?.setLoopingSampleGain('bizCompact', 2.5)
     // 스팽글 플라스틱 (Sharpstar.mp3) 부스트.
     engine?.setLoopingSampleGain('plastic', 3.0)
     // 플라스틱 위 병렬 Crunchier.mp3 레이어 — primary보다 낮게 잡아
     // 배경으로 깔림.
     engine?.setLoopingSampleGain('plasticLayer', 2.0)
+    // 슬라임 base squish (slime2.mp3) — 2배 부스트해서 체감 더 분명.
+    engine?.setSquishGain(2.0)
     return () => {
       engine?.dispose()
     }
@@ -3092,7 +3208,7 @@ export default function SlimeApp() {
     // or shrink into a tiny letterbox strip (contain). Uses `contain`
     // semantics + a uniform scale factor around center — the hand stays
     // aspect-correct AND at a comfortable visible size.
-    const HAND_SCALE = 1.8
+    const HAND_SCALE = 1.25
     const mapVidToScreen = (
       lx: number,
       ly: number
@@ -4293,8 +4409,13 @@ export default function SlimeApp() {
         const t = (autoSpinUntilRef.current - nowMs) / 600
         spinShrink = 1 + 0.35 * Math.max(0, Math.min(1, t))
       }
+      // When hand tracking is on, the slime should fill more of the
+      // frame (slightly overflowing) so finger presses have more room
+      // to land on it. Shrinks back to normal when the user disables
+      // tracking.
+      const handTrackingScale = skeletonOnRef.current ? 1.6 : 1
       slime.mesh.scale.setScalar(
-        currentScale * currentPanelScale * browseScale * spinShrink
+        currentScale * currentPanelScale * browseScale * spinShrink * handTrackingScale
       )
 
       // Carousel slide — offset mesh.position.x during the browse
@@ -4522,7 +4643,22 @@ export default function SlimeApp() {
           tapped. Backdrop dims the app and closes the drawer on outside
           tap; the drawer itself catches clicks so tapping inside doesn't
           bubble up and dismiss the whole thing. */}
-      {menuOpen && (
+      {menuOpen && (() => {
+        // Swipe-left-to-close gesture — users dismiss the panel by
+        // dragging it toward its origin edge (left). Keeps the chrome
+        // minimal (no X button) and matches the system drawer idiom.
+        let swipeStartX: number | null = null
+        const handlePointerDown = (e: React.PointerEvent) => {
+          swipeStartX = e.clientX
+        }
+        const handlePointerUp = (e: React.PointerEvent) => {
+          if (swipeStartX === null) return
+          const dx = e.clientX - swipeStartX
+          swipeStartX = null
+          if (dx < -60) setMenuOpen(false)
+        }
+        const handlePointerCancel = () => { swipeStartX = null }
+        return (
         <>
           <div
             className={styles.drawerBackdrop}
@@ -4533,32 +4669,12 @@ export default function SlimeApp() {
             data-hud
             role="dialog"
             aria-label={tr('메뉴')}
+            onPointerDown={handlePointerDown}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerCancel}
           >
-            <div className={styles.drawerHeader}>
-              <button
-                type="button"
-                className={styles.drawerClose}
-                onClick={() => setMenuOpen(false)}
-                aria-label={tr('닫기')}
-              >
-                <svg
-                  width="18"
-                  height="18"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                </svg>
-              </button>
-            </div>
             <nav className={styles.drawerNav} role="menu">
-              {/* Subscription card / restore hidden until SKUs are live */}
-              {false && <AccountDrawerTop onCloseDrawer={() => setMenuOpen(false)} />}
+              <AccountDrawerTop onCloseDrawer={() => setMenuOpen(false)} />
               <div className={styles.drawerItem} role="none">
                 <span>{locale === 'ko' ? '테마' : 'Theme'}</span>
                 <div className={styles.themeSwitch} role="radiogroup" aria-label={locale === 'ko' ? '테마' : 'Theme'}>
@@ -4584,6 +4700,7 @@ export default function SlimeApp() {
                   </button>
                 </div>
               </div>
+              <div className={styles.drawerDivider} />
               <div className={styles.drawerItem} role="none">
                 <span>{locale === 'ko' ? '언어' : 'Language'}</span>
                 <div className={styles.themeSwitch} role="radiogroup" aria-label="Language">
@@ -4615,7 +4732,8 @@ export default function SlimeApp() {
             </div>
           </aside>
         </>
-      )}
+        )
+      })()}
 
       {browseIdx !== null && (() => {
         const visible = collection.filter((c) => c.thumb)
@@ -5308,6 +5426,30 @@ export default function SlimeApp() {
           <button
             type="button"
             className={styles.sideBtn}
+            data-active={!panelCollapsed}
+            onClick={() => setPanelCollapsed((v) => !v)}
+            aria-label={panelCollapsed ? tr('옵션 열기') : tr('옵션 닫기')}
+            aria-pressed={!panelCollapsed}
+            title={panelCollapsed ? tr('옵션 열기') : tr('옵션 닫기')}
+          >
+            {/* Three horizontal lines = "options / adjustments" */}
+            <svg
+              width="22"
+              height="22"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            >
+              <line x1="5" y1="7" x2="19" y2="7" />
+              <line x1="5" y1="12" x2="19" y2="12" />
+              <line x1="5" y1="17" x2="19" y2="17" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            className={styles.sideBtn}
             data-active={skeletonOn}
             onClick={() => {
               if (skeletonOn) {
@@ -5409,11 +5551,33 @@ export default function SlimeApp() {
             </svg>
           </button>
           <div className={styles.sideBtnWrap}>
+            {(() => {
+            // Any customisation on the slime means the user has something
+            // worth saving — swap the collection grid icon for a right-
+            // arrow and mark the button active so "there's progress to
+            // capture" reads at a glance.
+            const hasAnyOption =
+              colors.length > 0 ||
+              material !== 'crystal' ||
+              coating !== 'none' ||
+              shape !== 'sphere' ||
+              beads.combo !== 'none' ||
+              innerSlime.combo !== 'none' ||
+              customBeads.count > 0 ||
+              sprinkles.paper.fill || sprinkles.paper.count > 0 ||
+              sprinkles.powder.count > 0 ||
+              sprinkles.ink.count > 0 ||
+              emojiBeads.count > 0 ||
+              stickerOn ||
+              slimeText.content.trim().length > 0
+            return (
             <button
               type="button"
-              className={styles.sideBtn}
+              className={`${styles.sideBtn} ${styles.collectionBtn}`}
               data-active={
-                bottomMode === 'collection' || collectionMenuOpen
+                hasAnyOption ||
+                bottomMode === 'collection' ||
+                collectionMenuOpen
               }
               onClick={() => {
                 if (bottomMode === 'collection') {
@@ -5426,54 +5590,99 @@ export default function SlimeApp() {
               aria-label={tr('컬렉션')}
               aria-expanded={collectionMenuOpen}
             >
-              <svg
-                width="22"
-                height="22"
-                viewBox="0 -0.5 21 21"
-                fill="currentColor"
-              >
-                <path d="M17.85,11 L14.7,11 C12.96015,11 11.55,12.343 11.55,14 L11.55,17 C11.55,18.657 12.96015,20 14.7,20 L17.85,20 C19.58985,20 21,18.657 21,17 L21,14 C21,12.343 19.58985,11 17.85,11 M6.3,11 L3.15,11 C1.41015,11 0,12.343 0,14 L0,17 C0,18.657 1.41015,20 3.15,20 L6.3,20 C8.03985,20 9.45,18.657 9.45,17 L9.45,14 C9.45,12.343 8.03985,11 6.3,11 M17.85,0 L14.7,0 C12.96015,0 11.55,1.343 11.55,3 L11.55,6 C11.55,7.657 12.96015,9 14.7,9 L17.85,9 C19.58985,9 21,7.657 21,6 L21,3 C21,1.343 19.58985,0 17.85,0 M9.45,3 L9.45,6 C9.45,7.657 8.03985,9 6.3,9 L3.15,9 C1.41015,9 0,7.657 0,6 L0,3 C0,1.343 1.41015,0 3.15,0 L6.3,0 C8.03985,0 9.45,1.343 9.45,3" />
-              </svg>
+              {hasAnyOption ? (
+                <svg
+                  width="22"
+                  height="22"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M9 6l6 6-6 6" />
+                </svg>
+              ) : (
+                <svg
+                  width="22"
+                  height="22"
+                  viewBox="0 -0.5 21 21"
+                  fill="currentColor"
+                >
+                  <path d="M17.85,11 L14.7,11 C12.96015,11 11.55,12.343 11.55,14 L11.55,17 C11.55,18.657 12.96015,20 14.7,20 L17.85,20 C19.58985,20 21,18.657 21,17 L21,14 C21,12.343 19.58985,11 17.85,11 M6.3,11 L3.15,11 C1.41015,11 0,12.343 0,14 L0,17 C0,18.657 1.41015,20 3.15,20 L6.3,20 C8.03985,20 9.45,18.657 9.45,17 L9.45,14 C9.45,12.343 8.03985,11 6.3,11 M17.85,0 L14.7,0 C12.96015,0 11.55,1.343 11.55,3 L11.55,6 C11.55,7.657 12.96015,9 14.7,9 L17.85,9 C19.58985,9 21,7.657 21,6 L21,3 C21,1.343 19.58985,0 17.85,0 M9.45,3 L9.45,6 C9.45,7.657 8.03985,9 6.3,9 L3.15,9 C1.41015,9 0,7.657 0,6 L0,3 C0,1.343 1.41015,0 3.15,0 L6.3,0 C8.03985,0 9.45,1.343 9.45,3" />
+                </svg>
+              )}
             </button>
+            )
+            })()}
             {collectionMenuOpen && (
-              <>
+              <div
+                className={styles.collectionPopupBackdrop}
+                onClick={() => setCollectionMenuOpen(false)}
+                data-hud
+              >
                 <div
-                  className={styles.collectionMenuBackdrop}
-                  onClick={() => setCollectionMenuOpen(false)}
-                />
-                <div
-                  className={`${styles.collectionMenu} ${styles.collectionMenuUp}`}
-                  data-hud
+                  className={styles.collectionPopup}
+                  onClick={(e) => e.stopPropagation()}
+                  role="dialog"
+                  aria-modal
                 >
                   <button
                     type="button"
-                    className={styles.collectionMenuBtn}
-                    onClick={() => {
-                      beginSaveToCollection()
-                      setCollectionMenuOpen(false)
-                    }}
+                    className={styles.collectionPopupClose}
+                    onClick={() => setCollectionMenuOpen(false)}
+                    aria-label={tr('닫기')}
                   >
-                    저장하기
+                    <svg
+                      width="14"
+                      height="14"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.4"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                    </svg>
                   </button>
-                  <button
-                    type="button"
-                    className={styles.collectionMenuBtn}
-                    onClick={() => {
-                      // Snapshot the WIP slime BEFORE collection auto-
-                      // preview clobbers it, so the top-right × can
-                      // restore what the user was building if they
-                      // decide not to switch.
-                      preCollectionPreviewStateRef.current =
-                        buildStateSnapshot()
-                      setCarouselIdx(-1)
-                      setBottomMode('collection')
-                      setCollectionMenuOpen(false)
-                    }}
-                  >
-                    컬렉션 보기
-                  </button>
+                  <div className={styles.collectionPopupTitle}>
+                    {locale === 'ko' ? '컬렉션' : 'Collection'}
+                  </div>
+                  <div className={styles.collectionPopupBody}>
+                    {locale === 'ko'
+                      ? '만든 슬라임을 저장하거나, 저장한 슬라임을 둘러볼 수 있어요.'
+                      : 'Save the slime you just made, or browse the ones you already have.'}
+                  </div>
+                  <div className={styles.collectionPopupRow}>
+                    <button
+                      type="button"
+                      className={styles.collectionPopupBtn}
+                      onClick={() => {
+                        beginSaveToCollection()
+                        setCollectionMenuOpen(false)
+                      }}
+                    >
+                      {locale === 'ko' ? '저장' : 'Save'}
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.collectionPopupBtn}
+                      onClick={() => {
+                        preCollectionPreviewStateRef.current =
+                          buildStateSnapshot()
+                        setCarouselIdx(-1)
+                        setBottomMode('collection')
+                        setCollectionMenuOpen(false)
+                      }}
+                    >
+                      {locale === 'ko' ? '컬렉션' : 'Collection'}
+                    </button>
+                  </div>
                 </div>
-              </>
+              </div>
             )}
           </div>
         </div>
@@ -5533,6 +5742,7 @@ export default function SlimeApp() {
           onRegisterOpenCategory={(fn) => {
             openCategoryRef.current = fn
           }}
+          panelCollapsed={panelCollapsed}
         />
         {(() => {
           // Unified selected-option tag row — aggregates every

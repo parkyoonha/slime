@@ -108,11 +108,17 @@
   position: fixed;
   top: 0;
   left: 0;
-  bottom: 0;
+  /* Stop at the top of the device's gesture / nav bar — otherwise the
+     drawer's bottom edge extends behind the home tab area, which looks
+     tacky and (on gesture-nav devices) can intercept the swipe-up. */
+  bottom: env(safe-area-inset-bottom);
   z-index: 10;
   width: min(280px, 82vw);
   padding: 16px 12px;
-  padding-top: max(16px, env(safe-area-inset-top));
+  /* Pull the first item down from the top edge — without the X button
+     there was no breathing room above the toggles, so bump the top
+     padding to roughly where the status-bar area ended. */
+  padding-top: calc(max(16px, env(safe-area-inset-top)) + 40px);
   padding-bottom: max(16px, env(safe-area-inset-bottom));
   padding-left: max(12px, env(safe-area-inset-left));
   background: var(--bg-panel-strong);
@@ -166,6 +172,13 @@
   flex-direction: column;
 }
 
+.drawerDivider {
+  height: 1px;
+  margin: 2px 12px;
+  background: var(--color-border-soft);
+  opacity: 0.6;
+}
+
 .drawerItem {
   background: transparent;
   border: none;
@@ -190,19 +203,16 @@
   outline: none;
 }
 
-/* Theme-toggle segment inside a drawer item. Two mini pills side by side;
-   the active one is filled. */
+/* Drawer theme/language toggle — borderless pair separated by a thin
+   vertical divider. Active option is highlighted by text colour only
+   (no pill background). */
 .themeSwitch {
   display: inline-flex;
-  padding: 3px;
-  border-radius: 999px;
-  background: var(--bg-chip);
-  gap: 2px;
+  align-items: center;
 }
 
 .themeSwitchOption {
-  padding: 5px 10px;
-  border-radius: 999px;
+  padding: 4px 10px;
   border: none;
   outline: none;
   background: transparent;
@@ -211,12 +221,17 @@
   font-weight: 600;
   letter-spacing: 0.02em;
   cursor: pointer;
-  transition: background 120ms ease, color 120ms ease;
+  transition: color 120ms ease;
+}
+
+/* Vertical divider between the two options */
+.themeSwitchOption + .themeSwitchOption {
+  border-left: 1px solid var(--color-border-soft);
 }
 
 .themeSwitchOption[data-active='true'] {
-  background: var(--bg-chip-active);
   color: var(--color-text);
+  font-weight: 700;
 }
 
 @keyframes drawerFade {
@@ -414,7 +429,7 @@
    the "이 슬라임 사용하기" pill and the × close in the corner. */
 .browseFooter {
   position: absolute;
-  bottom: calc(max(24px, env(safe-area-inset-bottom)) + 88px);
+  bottom: calc(max(24px, env(safe-area-inset-bottom)) + var(--ad-banner-height, 0px) + 88px);
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -484,7 +499,7 @@
    of the bottom-right × close button. */
 .browseUseBtn {
   position: absolute;
-  bottom: max(24px, env(safe-area-inset-bottom));
+  bottom: calc(max(24px, env(safe-area-inset-bottom)) + var(--ad-banner-height, 0px));
   left: max(16px, env(safe-area-inset-left));
   width: 44px;
   height: 44px;
@@ -513,7 +528,7 @@
    before they opened the collection. */
 .browseCloseIconBtn {
   position: absolute;
-  bottom: max(24px, env(safe-area-inset-bottom));
+  bottom: calc(max(24px, env(safe-area-inset-bottom)) + var(--ad-banner-height, 0px));
   right: max(16px, env(safe-area-inset-right));
   width: 44px;
   height: 44px;
@@ -758,7 +773,7 @@
    is hidden. Anchored to the bottom safe area, centred horizontally. */
 .previewReturnBtn {
   position: absolute;
-  bottom: max(20px, env(safe-area-inset-bottom));
+  bottom: calc(max(20px, env(safe-area-inset-bottom)) + var(--ad-banner-height, 0px));
   left: 50%;
   transform: translateX(-50%);
   z-index: 4;
@@ -797,7 +812,13 @@
 
 .controls {
   position: absolute;
-  bottom: max(4px, env(safe-area-inset-bottom));
+  /* --ad-banner-height is 0 unless the native AdMob banner is loaded
+     at the bottom. When an ad is actually visible it holds the ad's
+     measured height so the bottom controls lift above it; when the ad
+     fails to load / isn't filled, the var drops back to 0 and the
+     controls return to their default position (no empty reserved
+     slot). See src/lib/admob.ts. */
+  bottom: calc(max(4px, env(safe-area-inset-bottom)) + var(--ad-banner-height, 0px));
   left: 0;
   right: 0;
   z-index: 2;
@@ -843,28 +864,28 @@
   -webkit-tap-highlight-color: transparent;
 }
 
-/* Press-reset stretches to fill the row (occupies the 3rd slot in
-   the top button row: hand • auto-press • press-reset • collection)
-   so its wide pill flanks the surrounding narrow buttons — matches
-   the pre-auto-press layout where the reset was the visible centre
-   element. Auto-press sits at slot 2 with the default sideBtn width. */
-.topButtonRow > button.sideBtn:nth-child(3) {
+/* Press-reset is slot 4 (options • hand • auto-press • press-reset •
+   collection) — a slightly-wider pill that reads as the row's centre
+   action without ballooning across the whole row. Capped at ~132px so
+   the other buttons stay comfortably sized. */
+.topButtonRow > button.sideBtn:nth-child(4) {
   flex: 1;
   width: auto;
+  max-width: 132px;
 }
 
 /* Press-reset button — quick tap flash: darker fill while pressed,
    springs back to the default toggle colour on release with no
    lingering hover state. */
-.topButtonRow > button.sideBtn:nth-child(3),
-.topButtonRow > button.sideBtn:nth-child(3):hover,
-.topButtonRow > button.sideBtn:nth-child(3):focus,
-.topButtonRow > button.sideBtn:nth-child(3):focus-visible {
+.topButtonRow > button.sideBtn:nth-child(4),
+.topButtonRow > button.sideBtn:nth-child(4):hover,
+.topButtonRow > button.sideBtn:nth-child(4):focus,
+.topButtonRow > button.sideBtn:nth-child(4):focus-visible {
   background: var(--bg-toggle);
   color: var(--color-text);
   outline: none;
 }
-.topButtonRow > button.sideBtn:nth-child(3):active {
+.topButtonRow > button.sideBtn:nth-child(4):active {
   background: var(--bg-toggle-hover);
 }
 
@@ -876,9 +897,14 @@
   flex-direction: column;
   align-items: stretch;
   gap: 6px;
-  padding: 10px 18px 0;
+  /* 12px horizontal padding matches .topButtonRow so the primary chip
+     strip + sub-options span the SAME gutter as the bottom button row
+     below — same visual edges on both. */
+  padding: 10px 12px 0;
   background: transparent;
   border: none;
+  transition: max-height 220ms ease, opacity 160ms ease;
+  overflow: hidden;
 }
 
 /* Unified selected-option tag row rendered between CustomizePanel
@@ -1138,6 +1164,104 @@
 
 .sideBtn[data-active='true'] {
   color: #4a9eff;
+}
+
+/* Collection button variant — when the user has customised the slime
+   enough to be worth saving, fill the button background with the accent
+   so the "there's something to save" state reads at a glance. Icon
+   stays white against the solid pill. */
+.sideBtn.collectionBtn[data-active='true'] {
+  color: #ffffff;
+  background: #4a9eff;
+}
+
+/* Collection popup — modal variant of the old dropdown. Centred over
+   the scene with a dim backdrop so it reads as a decision prompt. */
+.collectionPopupBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  background: var(--bg-modal-backdrop);
+  backdrop-filter: blur(6px);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  animation: drawerFade 180ms ease-out;
+}
+
+.collectionPopup {
+  position: relative;
+  width: min(340px, 100%);
+  background: var(--bg-panel-strong);
+  color: var(--color-text);
+  border-radius: 18px;
+  padding: 22px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: var(--shadow-strong);
+}
+
+.collectionPopupClose {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.collectionPopupClose:hover,
+.collectionPopupClose:focus-visible {
+  background: var(--bg-chip);
+  color: var(--color-text);
+}
+
+.collectionPopupTitle {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+  padding-right: 32px;
+}
+
+.collectionPopupBody {
+  font-size: 13px;
+  color: var(--color-text-muted);
+  line-height: 1.55;
+  margin-bottom: 6px;
+}
+
+.collectionPopupRow {
+  display: flex;
+  gap: 8px;
+}
+
+.collectionPopupBtn {
+  flex: 1;
+  height: 46px;
+  border-radius: 12px;
+  border: none;
+  outline: none;
+  background: var(--bg-chip);
+  color: var(--color-text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.collectionPopupBtn:hover,
+.collectionPopupBtn:focus-visible {
+  background: var(--bg-chip-hover);
 }
 
 .bottomBar {

@@ -12,6 +12,14 @@
   border: none;
 }
 
+/* Collapsed state: hide the entire panel (chip row + sub-options).
+   The bottom-row options toggle button in SlimeApp is the only way
+   to re-open. Driven by panelCollapsed prop. */
+.panel[data-collapsed='true'] {
+  display: none;
+}
+
+
 /* Top-left "슬라임 안" toggle — only appears in the 4 embed-capable
    leaves (compact / paper / theme / custom-beads). Left-aligned tiny
    row above the sub-panel's Header/tabs so the toggle is always in
@@ -226,6 +234,23 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+/* Row wrapper: holds the inline collapse toggle (left) and the
+   horizontally-scrollable chip strip. Rendered OUTSIDE .panel (as a
+   sibling in controlsInner's flex-column) so its Y stays constant
+   regardless of panel height changes (sub-option open/close, panel
+   collapse). See CustomizePanel.tsx — primaryChipsRow is placed next
+   to the panel div, not inside it. */
+.primaryChipsWrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  /* Push the chip row to the BOTTOM of .panel's flex-column so the
+     sub-options (header + tabs + option chips) render ABOVE it. Other
+     panel children keep the default order 0. */
+  order: 999;
+}
+
 /* Persistent top-of-panel category strip — 8 chips exceed a phone's
    width so this scrolls horizontally with the scrollbar hidden.
    Each chip keeps its natural width (no flex fill) so labels don't
@@ -233,20 +258,11 @@
    Mask-image bleeds both edges into a soft gradient so labels that
    are mid-scroll off-screen fade out instead of hard-clipping. */
 .primaryChips {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   gap: 6px;
-  /* Break out of controlsInner's 18 px horizontal padding by 6 px on
-     each side so the first / last chip land at 12 px from the
-     viewport edge — matching the topButtonRow's own 12 px inner
-     padding (which sits directly under .controls with no controlsInner
-     wrapper). Net result: primary chip strip and bottom 3-button row
-     share identical left / right whitespace against the phone edge. */
   padding: 2px 0;
-  margin: 0 -6px;
-  /* Push the 1차 category chip strip to the BOTTOM of the flex-column
-     panel so the sub-options (Header + tabs + option chips) render
-     ABOVE it. Other children keep the default order 0. */
-  order: 999;
   background: transparent;
   /* No border-radius on the container — otherwise the pill-shape
      combined with overflow clips the first and last chip's outer

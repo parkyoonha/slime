@@ -221,6 +221,11 @@ interface Props {
   onRegisterOpenCategory?: (
     fn: (id: string | null, subId?: string) => void
   ) => void
+  /** When true, hide all panel contents (sub-options area). The primary
+   *  chip row lives OUTSIDE the panel via a Portal (see PrimaryChipsRow)
+   *  so it stays visible regardless. Controlled by the bottom-row
+   *  options toggle button in SlimeApp. */
+  panelCollapsed?: boolean
 }
 
 function hexToCss(h: number): string {
@@ -295,8 +300,8 @@ function GradientIcon() {
   const gid = useId().replace(/:/g, '')
   return (
     <svg
-      width="16"
-      height="16"
+      width="22"
+      height="22"
       viewBox="0 0 24 24"
     >
       <defs>
@@ -305,13 +310,13 @@ function GradientIcon() {
           <stop offset="100%" stopColor="currentColor" stopOpacity="0.15" />
         </linearGradient>
       </defs>
-      <circle
-        cx="12"
-        cy="12"
-        r="8.5"
+      <rect
+        x="2"
+        y="2"
+        width="20"
+        height="20"
+        rx="3"
         fill={`url(#grad-${gid})`}
-        stroke="currentColor"
-        strokeWidth="1.5"
       />
     </svg>
   )
@@ -399,7 +404,7 @@ function CategoryIcon({ id }: { id: CategoryId }) {
     viewBox: '0 0 24 24',
     fill: 'none',
     stroke: 'currentColor',
-    strokeWidth: 1.6,
+    strokeWidth: 1.2,
     strokeLinecap: 'round' as const,
     strokeLinejoin: 'round' as const,
     width: 26,
@@ -623,32 +628,34 @@ function PrimaryChipsRow({
   }, [scrollLeftRef])
 
   return (
-    <div
-      ref={scrollRef}
-      className={styles.primaryChips}
-      data-at-start={atStart}
-      data-at-end={atEnd}
-    >
-      {CATEGORIES.map((c) => {
-        const isActive = c.id === category
-        return (
-          <button
-            key={c.id}
-            className={styles.primaryChip}
-            data-active={isActive}
-            data-dim={!isActive}
-            type="button"
-            onClick={() =>
-              isActive ? closeCategory() : openCategory(c.id)
-            }
-          >
-            <span className={styles.primaryChipIcon}>
-              <CategoryIcon id={c.id} />
-            </span>
-            <span className={styles.primaryChipLabel}>{tr(c.label)}</span>
-          </button>
-        )
-      })}
+    <div className={styles.primaryChipsWrap}>
+      <div
+        ref={scrollRef}
+        className={styles.primaryChips}
+        data-at-start={atStart}
+        data-at-end={atEnd}
+      >
+        {CATEGORIES.map((c) => {
+          const isActive = c.id === category
+          return (
+            <button
+              key={c.id}
+              className={styles.primaryChip}
+              data-active={isActive}
+              data-dim={!isActive}
+              type="button"
+              onClick={() =>
+                isActive ? closeCategory() : openCategory(c.id)
+              }
+            >
+              <span className={styles.primaryChipIcon}>
+                <CategoryIcon id={c.id} />
+              </span>
+              <span className={styles.primaryChipLabel}>{tr(c.label)}</span>
+            </button>
+          )
+        })}
+      </div>
     </div>
   )
 }
@@ -691,7 +698,8 @@ export default function CustomizePanel({
   onTextColorImmediate,
   onActiveSlimeSubChange,
   onActivePanelChange,
-  onRegisterOpenCategory
+  onRegisterOpenCategory,
+  panelCollapsed = false
 }: Props) {
   const tr = useTr()
   const [category, setCategory] = useState<CategoryId | null>(null)
@@ -1081,7 +1089,7 @@ export default function CustomizePanel({
   /* ── Root view: just the chip row (all chips dimmed to 50%). */
   if (category === null) {
     return (
-      <div className={styles.panel} data-hud>
+      <div className={styles.panel} data-hud data-collapsed={panelCollapsed || undefined}>
         {primaryChipsRow}
       </div>
     )
@@ -1138,7 +1146,7 @@ export default function CustomizePanel({
       }
     }
     return (
-      <div className={styles.panel} data-hud>
+      <div className={styles.panel} data-hud data-collapsed={panelCollapsed || undefined}>
         {insideToggleBtn}
         {primaryChipsRow}
         <input
@@ -1569,7 +1577,7 @@ export default function CustomizePanel({
       }
     }
     return (
-      <div className={styles.panel} data-hud>
+      <div className={styles.panel} data-hud data-collapsed={panelCollapsed || undefined}>
         {insideToggleBtn}
         {primaryChipsRow}
         <input
@@ -1954,7 +1962,7 @@ export default function CustomizePanel({
       })
     }
     return (
-      <div className={styles.panel} data-hud>
+      <div className={styles.panel} data-hud data-collapsed={panelCollapsed || undefined}>
         {primaryChipsRow}
         <Header title={catLabel} onBack={goBack} tags={sprinkleTags} />
         {showDetail && (
@@ -2281,7 +2289,7 @@ export default function CustomizePanel({
       sizeMax
     )
     return (
-      <div className={styles.panel} data-hud>
+      <div className={styles.panel} data-hud data-collapsed={panelCollapsed || undefined}>
         {primaryChipsRow}
         <Header title={catLabel} onBack={goBack} tags={beadTags} />
         <div className={styles.tabs}>
@@ -2614,7 +2622,7 @@ export default function CustomizePanel({
       })
     })
     return (
-      <div className={styles.panel} data-hud>
+      <div className={styles.panel} data-hud data-collapsed={panelCollapsed || undefined}>
         {insideToggleBtn}
         {primaryChipsRow}
         <input
@@ -2867,7 +2875,7 @@ export default function CustomizePanel({
         })
     }))
     return (
-      <div className={styles.panel} data-hud>
+      <div className={styles.panel} data-hud data-collapsed={panelCollapsed || undefined}>
         {insideToggleBtn}
         {primaryChipsRow}
         <Header title={catLabel} onBack={goBack} tags={emojiTags} />

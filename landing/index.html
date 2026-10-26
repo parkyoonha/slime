@@ -7,9 +7,18 @@
   <meta name="description" content="숨 한 번 쉬고, 조물조물. 진짜 같은 3D 슬라임과 함께하는 5분 힐링 앱." />
   <meta name="theme-color" content="#f7d5e1" />
 
-  <meta property="og:title" content="soundslime" />
-  <meta property="og:description" content="손끝으로 힐링하는 3D 슬라임 앱." />
+  <meta property="og:title" content="친구가 공유한 슬라임 만져보기" />
+  <meta property="og:description" content="소리와 촉감이 살아있는 3D 슬라임. 지금 바로 만져보세요." />
   <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://parkyoonha.github.io/slimong/" />
+  <meta property="og:site_name" content="soundslime" />
+  <meta property="og:image" content="https://parkyoonha.github.io/slimong/share-thumbnail.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="친구가 공유한 슬라임 만져보기" />
+  <meta name="twitter:description" content="소리와 촉감이 살아있는 3D 슬라임. 지금 바로 만져보세요." />
+  <meta name="twitter:image" content="https://parkyoonha.github.io/slimong/share-thumbnail.png" />
 
   <style>
     :root {
@@ -269,13 +278,77 @@
       바쁜 하루 사이에 필요한 건 대단한 힐링이 아니라,<br />
       손끝으로 조물조물, 눈으로 멍때리는 5분이에요.
     </p>
-    <a href="#pricing" class="cta">시작하기 →</a>
+    <a href="#pricing" class="cta" id="cta-default">시작하기 →</a>
     <span class="cta-note">Android 앱 · 곧 iOS 예정</span>
+
+    <!-- Shared-slime hand-off panel: shown ONLY when the URL carries a
+         ?d=<base64> param (someone shared a slime). Hidden by default. -->
+    <div id="share-handoff" style="display:none; margin-top: 20px;">
+      <a id="share-open-app" class="cta" href="#">앱에서 열기</a>
+      <span class="cta-note">
+        앱이 설치되어 있지 않다면 <a id="share-store" href="#">Play 스토어</a>에서 설치해 주세요.
+      </span>
+    </div>
 
     <div class="visual" aria-hidden="true">
       <div class="blob"></div>
     </div>
   </section>
+
+  <script>
+    // Share-link hand-off. If URL carries ?d=<base64>:
+    //   • Android Chrome: fire an Intent URL — Chrome routes to the
+    //     app if installed AND auto-closes its own tab (so recipient
+    //     doesn't see this landing page lingering after app opens).
+    //     Fallback: Play Store install URL embedded in the intent.
+    //   • Other browsers (iOS / desktop / non-Chrome): keep the
+    //     visible "앱에서 열기" button + Play Store link as fallback.
+    (function handleShareHandoff() {
+      try {
+        var params = new URLSearchParams(window.location.search);
+        var d = params.get('d');
+        if (!d) return;
+        var customScheme = 'io.wakbu.slime://share?d=' + encodeURIComponent(d);
+        var storeUrl =
+          'https://play.google.com/store/apps/details?id=io.wakbu.slime&referrer=d%3D' +
+          encodeURIComponent(d);
+        // Android Intent URL — Chrome handles this specially: tries to
+        // launch the app, and crucially CLOSES ITS OWN TAB when the app
+        // takes over (unlike a plain custom-scheme navigation which
+        // leaves the browser tab in the background).
+        var intentUrl =
+          'intent://parkyoonha.github.io/slimong/?d=' + encodeURIComponent(d) +
+          '#Intent;scheme=https;package=io.wakbu.slime;' +
+          'S.browser_fallback_url=' + encodeURIComponent(storeUrl) +
+          ';end;';
+
+        var handoff = document.getElementById('share-handoff');
+        var openApp = document.getElementById('share-open-app');
+        var storeLink = document.getElementById('share-store');
+        var defaultCta = document.getElementById('cta-default');
+        if (handoff) handoff.style.display = 'block';
+        if (defaultCta) defaultCta.style.display = 'none';
+        if (openApp) openApp.href = customScheme;
+        if (storeLink) storeLink.href = storeUrl;
+
+        // Detect Android Chrome to decide whether to auto-fire intent URL.
+        var ua = navigator.userAgent || '';
+        var isAndroid = /Android/i.test(ua);
+        var isChrome = /Chrome/i.test(ua) && !/EdgiOS|FxiOS|CriOS/i.test(ua);
+        setTimeout(function () {
+          if (isAndroid && isChrome) {
+            // Intent URL: Chrome launches app + closes tab if the app
+            // consumes the intent. If not installed, falls back to
+            // S.browser_fallback_url (= Play Store).
+            window.location.href = intentUrl;
+          } else {
+            // iOS / other browsers: plain custom scheme (best effort).
+            window.location.href = customScheme;
+          }
+        }, 200);
+      } catch (e) { /* malformed URL — fall through to the normal page */ }
+    })();
+  </script>
 
   <section id="features">
     <div class="section-title">

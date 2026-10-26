@@ -47,6 +47,10 @@ export class SoundEngine {
 
   private squishSquelchTimer: ReturnType<typeof setTimeout> | null = null
   private squishTargetLevel = 0
+  /** Overall gain multiplier applied to each squelch voice. Default 1.0 —
+   *  callers can bump it when the base recording reads too quiet in the
+   *  mix. Values > ~1.6 may approach clipping depending on the sample. */
+  private squishGain = 1.0
 
   /** Per-slot scheduler state — mirrors the squish scheduler pattern for
    *  named-sample slots (wax / foil / beads). Each slot has:
@@ -270,6 +274,12 @@ export class SoundEngine {
     return buf
   }
 
+  /** Set the overall squish gain multiplier. Default 1.0; bump to boost
+   *  the slime body sound without touching per-press intensity logic. */
+  setSquishGain(gain: number) {
+    this.squishGain = Math.max(0, gain)
+  }
+
   /**
    * Drive a soft, wet squelch. `intensity ∈ [0, 1]` — 0 fades the loop out,
    * high values open a low-pass filter and raise gain so it sounds tighter.
@@ -337,7 +347,7 @@ export class SoundEngine {
 
     // Small fade envelope so the abrupt window boundaries don't click.
     const now = ctx.currentTime
-    const peak = 0.35 + amp * 0.75
+    const peak = (0.35 + amp * 0.75) * this.squishGain
     const gain = ctx.createGain()
     gain.gain.setValueAtTime(0.0001, now)
     gain.gain.exponentialRampToValueAtTime(peak, now + 0.008)

@@ -1,6 +1,7 @@
 import SlimeApp from './components/SlimeApp'
 import LoginScreen, { AuthSplash } from './components/LoginScreen'
 import PremiumGate from './components/PremiumGate'
+import AdBanner from './components/AdBanner'
 import { AuthProvider, useAuth } from './auth/AuthContext'
 import { LocaleProvider } from './i18n'
 
@@ -11,6 +12,7 @@ function Gate() {
   return (
     <PremiumGate>
       <SlimeApp />
+      <AdBanner />
     </PremiumGate>
   )
 }

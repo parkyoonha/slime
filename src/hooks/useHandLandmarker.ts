@@ -73,23 +73,62 @@ export function useHandLandmarker(enabled: boolean = true) {
       return
     }
     let cancelled = false
+    let timeoutId: ReturnType<typeof setTimeout> | null = null
     setStatus('loading')
     setError(null)
-    preloadLandmarker().then(
-      (landmarker) => {
-        if (cancelled) return
-        landmarkerRef.current = landmarker
-        setStatus('ready')
-      },
-      (e) => {
-        if (cancelled) return
-        console.error(e)
-        setError(e instanceof Error ? e.message : String(e))
-        setStatus('error')
+
+    const LOAD_TIMEOUT_MS = 5000
+    const MAX_ATTEMPTS = 2
+
+    const attemptLoad = (attempt: number) => {
+      if (cancelled) return
+      // Reset the shared cache on retry so the next preload call starts
+      // fresh instead of returning the (stuck) pending Promise. Without
+      // this, every retry just re-awaits the same hung request.
+      if (attempt > 0) {
+        landmarkerPromise = null
       }
-    )
+
+      let timedOut = false
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          timedOut = true
+          reject(new Error('HAND_LOAD_TIMEOUT'))
+        }, LOAD_TIMEOUT_MS)
+      })
+
+      Promise.race([preloadLandmarker(), timeoutPromise]).then(
+        (landmarker) => {
+          if (cancelled) return
+          if (timeoutId) clearTimeout(timeoutId)
+          landmarkerRef.current = landmarker as HandLandmarker
+          setStatus('ready')
+        },
+        (e) => {
+          if (cancelled) return
+          if (timeoutId) clearTimeout(timeoutId)
+
+          // Timeout → retry once. Loads normally finish well under 5s;
+          // if it drags past that it's almost always a stuck WASM /
+          // model fetch that a fresh request can recover from.
+          if (timedOut && attempt + 1 < MAX_ATTEMPTS) {
+            console.warn(`Hand landmarker load timed out, retry ${attempt + 1}/${MAX_ATTEMPTS - 1}`)
+            attemptLoad(attempt + 1)
+            return
+          }
+
+          console.error(e)
+          setError(e instanceof Error ? e.message : String(e))
+          setStatus('error')
+        }
+      )
+    }
+
+    attemptLoad(0)
+
     return () => {
       cancelled = true
+      if (timeoutId) clearTimeout(timeoutId)
       // The shared landmarker instance is intentionally NOT closed here —
       // it's cached in module scope so a hot-reload / remount reuses the
       // already-downloaded WASM+model instead of paying the full startup

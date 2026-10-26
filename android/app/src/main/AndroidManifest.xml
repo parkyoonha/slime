@@ -32,6 +32,31 @@
                 <data android:scheme="io.wakbu.slime" android:host="auth" />
             </intent-filter>
 
+            <!-- Shared slime: custom-scheme hand-off used by the landing
+                 page to open the app with the sender's design encoded in
+                 the ?d= query param. -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="io.wakbu.slime" android:host="share" />
+            </intent-filter>
+
+            <!-- Shared slime via HTTPS landing-page URL. Without
+                 autoVerify this appears in the "Open with" chooser so
+                 recipients can pick the app; enabling App Links later
+                 requires hosting /.well-known/assetlinks.json on
+                 parkyoonha.github.io so Android verifies ownership. -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="parkyoonha.github.io"
+                    android:pathPrefix="/slimong" />
+            </intent-filter>
+
         </activity>
 
         <provider
@@ -43,12 +68,24 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths"></meta-data>
         </provider>
+
+        <!-- Google AdMob App ID — required for the Google Mobile Ads SDK
+             to initialize. Omitting this causes the app to crash at
+             startup. Replace with your own App ID from AdMob console. -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="ca-app-pub-7170998120147154~9086629438" />
     </application>
 
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- AdMob — advertising ID access (targetSdk 33+ requires this
+         declaration AND the matching Play Console → App content →
+         Advertising ID = "Yes" declaration). -->
+    <uses-permission android:name="com.google.android.gms.permission.AD_ID" />
 
     <!-- Camera used only for MediaPipe hand tracking; not a hard requirement. -->
     <uses-feature android:name="android.hardware.camera" android:required="false" />

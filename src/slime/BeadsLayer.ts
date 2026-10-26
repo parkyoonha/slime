@@ -97,6 +97,14 @@ export class BeadsLayer {
   }
   private readonly gradientSizeUniform = { value: 0.13 }
   private gradientTexture: THREE.DataTexture | null = null
+  /** Multi-colour coating gradient — mirrors the body-gradient path so
+   *  a ball with 2+ coating colours paints a top-to-bottom coating
+   *  gradient instead of averaging the picks into one tint. */
+  private readonly coatingGradientUseUniform = { value: 0.0 }
+  private readonly coatingGradientTexUniform: {
+    value: THREE.Texture | null
+  } = { value: null }
+  private coatingGradientTexture: THREE.DataTexture | null = null
   // Ink uniforms borrowed from SlimeSphere so the wrap shell paints the same
   // marble swirls on top of every bead. Held as refs (not copies) so one
   // slime.setInk() call updates both layers in lockstep with no re-emit.
@@ -916,6 +924,8 @@ export class BeadsLayer {
     const photoAtlasU = this.beadPhotoAtlasUniform
     const coatingTintU = this.beadCoatingTintUniform
     const coatingAlphaU = this.beadCoatingAlphaUniform
+    const coatingGradUseU = this.coatingGradientUseUniform
+    const coatingGradTexU = this.coatingGradientTexUniform
     const matteU = this.beadMaterialIsMatteUniform
     const ballDentEnabledU = this.ballDentEnabledUniform
     const ballDentsU = this.ballDentsUniform
@@ -938,6 +948,12 @@ export class BeadsLayer {
       // coating can be a different hue than its body.
       shader.uniforms.uBeadCoatingTint = coatingTintU
       shader.uniforms.uBeadCoatingAlpha = coatingAlphaU
+      // Multi-colour coating gradient — sampled along vBeadGradT when
+      // uBeadCoatingGradientUse > 0.5. Lets the ball paint a true
+      // top-to-bottom coating gradient instead of averaging multi-colour
+      // picks into a single tint.
+      shader.uniforms.uBeadCoatingGradientUse = coatingGradUseU
+      shader.uniforms.uBeadCoatingGradient = coatingGradTexU
       // Slime-matte foam pattern flag for inner-slime layers.
       shader.uniforms.uBeadMaterialIsMatte = matteU
       // 사진 비즈 uniforms — atlas is a 2×2 grid of up to 4 photos.
@@ -1075,6 +1091,8 @@ export class BeadsLayer {
          uniform float uBeadFoilFullSurface;
          uniform vec3 uBeadCoatingTint;
          uniform float uBeadCoatingAlpha;
+         uniform float uBeadCoatingGradientUse;
+         uniform sampler2D uBeadCoatingGradient;
          uniform float uBeadMaterialIsMatte;
          uniform float uBeadPhotoUse;
          uniform sampler2D uBeadPhotoAtlas;
@@ -1249,9 +1267,14 @@ export class BeadsLayer {
            // beneath the coating tint.
            vec3 _beadBaseColor = diffuseColor.rgb;
            if (uBeadCoatingAlpha > 0.001) {
+             vec3 _coatTint = uBeadCoatingTint;
+             if (uBeadCoatingGradientUse > 0.5) {
+               _coatTint =
+                 texture2D(uBeadCoatingGradient, vec2(vBeadGradT, 0.5)).rgb;
+             }
              diffuseColor.rgb = mix(
                diffuseColor.rgb,
-               uBeadCoatingTint,
+               _coatTint,
                clamp(uBeadCoatingAlpha, 0.0, 1.0)
              );
            }
@@ -1669,13 +1692,33 @@ export class BeadsLayer {
       mat.sheen = 0
       mat.iridescence = 0
     }
-    // 글레이즈 (ice) coating renders the ball as CRYSTAL — bring the
-    // transmission back on so the ball reads as clear glass through
-    // the glaze rather than an opaque tinted marble.
+    // 글레이즈 (ice) coating:
+    //   • Regular bead layers (not inner-slime) — keep transmission on so
+    //     the bead reads as a clear glass marble through the glaze.
+    //   • Inner-slime ball — force transmission=0 and opaque body. Nested
+    //     transparent objects (transparent slime body wrapping a trans-
+    //     parent ball) don't composite correctly in three.js and the ball
+    //     reads as invisible. Opaque body also lets the picked bead
+    //     palette tint through cleanly and keeps the crack shader
+    //     visible on top of the body colour.
     if (id === 'ice') {
-      mat.transmission = 0.9
-      mat.thickness = 0.4
-      mat.ior = 1.5
+      if (this.useSlimeMaterials) {
+        mat.transmission = 0
+        mat.thickness = 0
+        mat.transparent = false
+        mat.opacity = 1
+        mat.depthWrite = true
+        mat.depthTest = true
+        // Base colour must stay neutral so the per-instance colour from
+        // setColorAt actually shows through instead of being multiplied
+        // against a stale coating tint carried over from a previous
+        // coating swap.
+        mat.color.setHex(0xffffff)
+      } else {
+        mat.transmission = 0.9
+        mat.thickness = 0.4
+        mat.ior = 1.5
+      }
     }
     mat.needsUpdate = true
   }
@@ -2179,56 +2222,7 @@ export class BeadsLayer {
     // Regular bead layers don't expose a coating colour picker so they
     // fall through with the same helper — no coatingColors on them
     // means the map yields an empty array.
-    const coatingColorHexes = (config.coatingColors ?? []).map((id) =>
-      this.useSlimeMaterials
-        ? resolveInnerCoatingHex(id, this.currentColorAdjustments)
-        : resolveColorHex(id, this.currentColorAdjustments)
-    )
-    if (config.coating !== 'none') {
-      // Ball's coating tint is a single RGB (no LUT sampling on the
-      // bead shader yet), so multi-colour coating picks blend into one
-      // average tint — at least the picked palette visibly influences
-      // the coating instead of only the first colour taking effect.
-      let hex = 0xffffff
-      if (coatingColorHexes.length === 1) {
-        hex = coatingColorHexes[0]
-      } else if (coatingColorHexes.length > 1) {
-        let r = 0
-        let g = 0
-        let b = 0
-        for (const h of coatingColorHexes) {
-          r += (h >> 16) & 0xff
-          g += (h >> 8) & 0xff
-          b += h & 0xff
-        }
-        const n = coatingColorHexes.length
-        r = Math.round(r / n)
-        g = Math.round(g / n)
-        b = Math.round(b / n)
-        hex = (r << 16) | (g << 8) | b
-      }
-      this.beadCoatingTintUniform.value.setHex(hex)
-      const firstCoatingIsWhite =
-        (config.coatingColors ?? [])[0] === 'white'
-      // 씬왁스 (thinwax) always renders translucent regardless of colour
-      // (thin coat = translucent by definition); 왁스 (wax) picks the
-      // translucent shell only when the coating colour is white and
-      // otherwise paints a solid opaque shell; 글레이즈 (ice) paints a
-      // semi-transparent crystal wash regardless of colour so the
-      // ball's material shows through the glaze.
-      if (config.coating === 'thinwax') {
-        this.beadCoatingAlphaUniform.value = 0.30
-      } else if (config.coating === 'wax') {
-        this.beadCoatingAlphaUniform.value = firstCoatingIsWhite ? 0.80 : 1.0
-      } else if (config.coating === 'ice') {
-        // 글레이즈 crystal shell — hint of tint over transmission.
-        this.beadCoatingAlphaUniform.value = 0.15
-      } else {
-        this.beadCoatingAlphaUniform.value = 1.0
-      }
-    } else {
-      this.beadCoatingAlphaUniform.value = 0.0
-    }
+    this.applyCoatingColorUniforms()
     // Matte-material foam pattern flag — only applies to inner-slime
     // layers (useSlimeMaterials) picking the slime 'matte' material.
     this.beadMaterialIsMatteUniform.value =
@@ -2271,7 +2265,21 @@ export class BeadsLayer {
     // wrap is hidden for all crystal states (see suppress block below).
     // Non-crystal materials always render opaque with default depth.
     if (this.useSlimeMaterials && this.beadMaterial) {
-      if (config.material === 'crystal' || config.material === 'ice') {
+      // 글레이즈(ice) coating on inner-slime: body is forced opaque in
+      // applyBeadCoatingParams so the picked colour + crack layer both
+      // read clearly. We still enforce the opaque state here on every
+      // setConfig in case a color-only change didn't re-run coating
+      // params (materialOrCoatingChanged = false path).
+      const iceCoatingOverride = config.coating === 'ice'
+      if (iceCoatingOverride) {
+        this.beadMaterial.transmission = 0
+        this.beadMaterial.thickness = 0
+        this.beadMaterial.transparent = false
+        this.beadMaterial.opacity = 1
+        this.beadMaterial.depthWrite = true
+        this.beadMaterial.depthTest = true
+        this.beadMaterial.color.setHex(0xffffff)
+      } else if (config.material === 'crystal' || config.material === 'ice') {
         this.beadMaterial.transparent = false
         this.beadMaterial.opacity = 1
         this.beadMaterial.depthWrite = false
@@ -2330,6 +2338,9 @@ export class BeadsLayer {
       (this.useSlimeMaterials && hasGradientPalette) ||
       (this.useSlimeMaterials && config.material === 'crystal') ||
       (this.useSlimeMaterials && config.material === 'ice')
+    // 글레이즈(ice) coating forces the body opaque (see iceCoatingOverride
+    // above), so the body itself is the visible surface — no wrap needed.
+    // Wrap would occlude the cracks + picked colour.
     for (const slot of this.slots) {
       slot.wrapInstanced.visible =
         !opaqueBallMaterial &&
@@ -2472,6 +2483,10 @@ export class BeadsLayer {
     this.currentColorAdjustments = adjustments
     if (this.slots.length === 0 || this.lastEffectiveCount === 0) return
     this.applyInstanceColors()
+    // HSL deltas also move the coating palette — refresh the tint uniform
+    // (and the multi-colour coating gradient texture, if active) so the
+    // slider ripples through to the coating shell too.
+    this.applyCoatingColorUniforms()
   }
 
   /** Extracted color-assignment loop. Reads from this.config +
@@ -2610,6 +2625,91 @@ export class BeadsLayer {
         slot.instanced.instanceColor.needsUpdate = true
       }
     }
+  }
+
+  /** Push coating tint + alpha uniforms from the current config. Pulled
+   *  out of setConfig so setColorAdjustments can rerun it on HSL slider
+   *  moves (otherwise coating tint would stay frozen on the old hex). */
+  private applyCoatingColorUniforms() {
+    const config = this.config
+    if (config.coating === 'none') {
+      this.beadCoatingAlphaUniform.value = 0.0
+      this.coatingGradientUseUniform.value = 0.0
+      return
+    }
+    const coatingColorHexes = (config.coatingColors ?? []).map((id) =>
+      this.useSlimeMaterials
+        ? resolveInnerCoatingHex(id, this.currentColorAdjustments)
+        : resolveColorHex(id, this.currentColorAdjustments)
+    )
+    // Single colour → scalar tint uniform. Multi-colour → build a 1-D
+    // gradient texture and let the shader sample along vBeadGradT so the
+    // ball paints a top-to-bottom coating gradient (same path the body
+    // gradient uses).
+    if (coatingColorHexes.length >= 2) {
+      this.rebuildCoatingGradientTexture(coatingColorHexes)
+      this.coatingGradientUseUniform.value = 1.0
+      // Fallback tint still carries the first picked colour so any part
+      // of the surface that misses the gradient sample still reads as
+      // "picked colour" rather than default white.
+      this.beadCoatingTintUniform.value.setHex(coatingColorHexes[0])
+    } else {
+      this.coatingGradientUseUniform.value = 0.0
+      this.beadCoatingTintUniform.value.setHex(
+        coatingColorHexes.length === 1 ? coatingColorHexes[0] : 0xffffff
+      )
+    }
+    const firstCoatingIsWhite = (config.coatingColors ?? [])[0] === 'white'
+    const coatingColorPicked = coatingColorHexes.length > 0
+    // 씬왁스 (thinwax) always renders translucent regardless of colour;
+    // 왁스 (wax) picks the translucent shell only when the coating colour
+    // is white and otherwise paints a solid opaque shell; 글레이즈 (ice)
+    // paints a semi-transparent crystal wash. When the user explicitly
+    // picks a coating colour, raise the mix weight so the picked colour
+    // visibly dominates — otherwise the "subtle wash" default swallows
+    // the pick and the UI reads as "colour selection did nothing".
+    if (config.coating === 'thinwax') {
+      this.beadCoatingAlphaUniform.value = coatingColorPicked ? 0.70 : 0.30
+    } else if (config.coating === 'wax') {
+      this.beadCoatingAlphaUniform.value = firstCoatingIsWhite ? 0.80 : 1.0
+    } else if (config.coating === 'ice') {
+      this.beadCoatingAlphaUniform.value = coatingColorPicked ? 0.75 : 0.15
+    } else {
+      this.beadCoatingAlphaUniform.value = 1.0
+    }
+  }
+
+  private rebuildCoatingGradientTexture(hexes: readonly number[]) {
+    if (this.coatingGradientTexture) this.coatingGradientTexture.dispose()
+    const size = 64
+    const data = new Uint8Array(size * 4)
+    const cA = new THREE.Color()
+    const cB = new THREE.Color()
+    for (let i = 0; i < size; i++) {
+      const t = i / (size - 1)
+      const scaled = t * (hexes.length - 1)
+      const lo = Math.floor(scaled)
+      const hi = Math.min(lo + 1, hexes.length - 1)
+      const frac = scaled - lo
+      cA.setHex(hexes[lo])
+      cB.setHex(hexes[hi])
+      const r = cA.r * (1 - frac) + cB.r * frac
+      const g = cA.g * (1 - frac) + cB.g * frac
+      const b = cA.b * (1 - frac) + cB.b * frac
+      data[i * 4] = Math.round(r * 255)
+      data[i * 4 + 1] = Math.round(g * 255)
+      data[i * 4 + 2] = Math.round(b * 255)
+      data[i * 4 + 3] = 255
+    }
+    const tex = new THREE.DataTexture(data, size, 1, THREE.RGBAFormat)
+    tex.colorSpace = THREE.SRGBColorSpace
+    tex.minFilter = THREE.LinearFilter
+    tex.magFilter = THREE.LinearFilter
+    tex.wrapS = THREE.ClampToEdgeWrapping
+    tex.wrapT = THREE.ClampToEdgeWrapping
+    tex.needsUpdate = true
+    this.coatingGradientTexture = tex
+    this.coatingGradientTexUniform.value = tex
   }
 
   private rebuildBeadGradientTexture(hexes: readonly number[]) {
@@ -3347,6 +3447,11 @@ export class BeadsLayer {
     if (this.gradientTexture) {
       this.gradientTexture.dispose()
       this.gradientTexture = null
+    }
+    if (this.coatingGradientTexture) {
+      this.coatingGradientTexture.dispose()
+      this.coatingGradientTexture = null
+      this.coatingGradientTexUniform.value = null
     }
     if (this.beadPhotoAtlas) {
       this.beadPhotoAtlas.dispose()

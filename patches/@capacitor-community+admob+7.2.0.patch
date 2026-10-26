@@ -1,0 +1,58 @@
+diff --git a/node_modules/@capacitor-community/admob/android/src/main/java/com/getcapacitor/community/admob/banner/BannerExecutor.java b/node_modules/@capacitor-community/admob/android/src/main/java/com/getcapacitor/community/admob/banner/BannerExecutor.java
+index 0000000..0000001 100644
+--- a/node_modules/@capacitor-community/admob/android/src/main/java/com/getcapacitor/community/admob/banner/BannerExecutor.java
++++ b/node_modules/@capacitor-community/admob/android/src/main/java/com/getcapacitor/community/admob/banner/BannerExecutor.java
+@@ -44,10 +44,41 @@ public class BannerExecutor extends Executor {
+     }
+
+     public void initialize() {
+-        mViewGroup = (ViewGroup) ((ViewGroup) activitySupplier.get().findViewById(android.R.id.content)).getChildAt(0);
++        ensureViewGroup();
++    }
++
++    /** Resolve a non-null ViewGroup to host the banner. On Android 16
++     *  (API 36) edge-to-edge, android.R.id.content's first child can
++     *  be null when the plugin loads before the WebView is attached;
++     *  that path later crashes BannerExecutor.lambda$createNewAdView$5
++     *  with NullPointerException on mViewGroup.addView(). Fallback to
++     *  the content view itself if the first child is missing. */
++    private void ensureViewGroup() {
++        if (mViewGroup != null) return;
++        try {
++            ViewGroup root = (ViewGroup) activitySupplier.get().findViewById(android.R.id.content);
++            if (root != null) {
++                if (root.getChildCount() > 0 && root.getChildAt(0) instanceof ViewGroup) {
++                    mViewGroup = (ViewGroup) root.getChildAt(0);
++                } else {
++                    mViewGroup = root;
++                }
++            }
++        } catch (Exception ignored) {
++            // leave null; showBanner's try/catch will reject gracefully
++        }
+     }
+
+     public void showBanner(final PluginCall call) {
++        // Re-resolve mViewGroup every showBanner call so late-attached
++        // WebView hierarchies (Android 16 edge-to-edge) are picked up
++        // even if the plugin's initial load() ran before content view
++        // was ready.
++        ensureViewGroup();
++        if (mViewGroup == null) {
++            call.reject("Could not resolve content ViewGroup to host the banner");
++            return;
++        }
+         final AdOptions adOptions = AdOptions.getFactory().createBannerOptions(call);
+         float density = contextSupplier.get().getResources().getDisplayMetrics().density;
+
+@@ -297,7 +328,9 @@ public class BannerExecutor extends Executor {
+                 );
+
+                 // Add AdViewLayout top of the WebView
+-                mViewGroup.addView(mAdViewLayout);
++                if (mViewGroup != null) {
++                    mViewGroup.addView(mAdViewLayout);
++                }
+             });
+     }
+ }

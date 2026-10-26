@@ -10,5 +10,8 @@ export const ENV = {
   RC_IOS_KEY: import.meta.env.VITE_RC_IOS_KEY ?? '',
   OAUTH_REDIRECT_URL: import.meta.env.VITE_OAUTH_REDIRECT_URL ?? 'io.wakbu.slime://auth/callback',
   RC_ENTITLEMENT_ID: import.meta.env.VITE_RC_ENTITLEMENT_ID ?? 'premium',
-  FREE_DAILY_LIMIT: Number(import.meta.env.VITE_FREE_DAILY_LIMIT ?? 5)
+  FREE_DAILY_LIMIT: Number(import.meta.env.VITE_FREE_DAILY_LIMIT ?? 5),
+  ADMOB_ANDROID_BANNER: import.meta.env.VITE_ADMOB_ANDROID_BANNER ?? '',
+  ADMOB_ANDROID_INTERSTITIAL: import.meta.env.VITE_ADMOB_ANDROID_INTERSTITIAL ?? '',
+  ADMOB_TESTING: (import.meta.env.VITE_ADMOB_TESTING ?? '').toLowerCase() === 'true' || import.meta.env.DEV
 } as const

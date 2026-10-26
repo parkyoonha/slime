@@ -13,6 +13,9 @@ interface ImportMetaEnv {
   readonly VITE_OAUTH_REDIRECT_URL?: string
   readonly VITE_RC_ENTITLEMENT_ID?: string
   readonly VITE_FREE_DAILY_LIMIT?: string
+  readonly VITE_ADMOB_ANDROID_BANNER?: string
+  readonly VITE_ADMOB_ANDROID_INTERSTITIAL?: string
+  readonly VITE_ADMOB_TESTING?: string
 }
 
 interface ImportMeta {
